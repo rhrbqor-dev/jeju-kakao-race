@@ -772,6 +772,44 @@ app.use((err, _req, res, _next) => {
   console.error(err);
   res.status(500).json({ ok: false, message: err.message || '서버 오류' });
 });
+app.use(express.json());
+
+function kakaoResponse(text) {
+  return {
+    version: "2.0",
+    template: {
+      outputs: [
+        {
+          simpleText: {
+            text: String(text)
+          }
+        }
+      ]
+    }
+  };
+}
+
+function handleKakaoSkill(req, res) {
+  console.log("[카카오 스킬 요청]", req.method, req.originalUrl);
+  console.log("[카카오 요청 BODY]", JSON.stringify(req.body, null, 2));
+
+  const message = req.body?.userRequest?.utterance || "입력값 없음";
+
+  return res.status(200).json(
+    kakaoResponse(`카카오 스킬 연결 성공!\n입력한 말: ${message}`)
+  );
+}
+
+app.post("/kakao/skill", handleKakaoSkill);
+app.post("/webhook", handleKakaoSkill);
+
+app.get("/kakao/skill", (req, res) => {
+  res.send("Kakao skill endpoint is alive. Kakao uses POST.");
+});
+
+app.get("/webhook", (req, res) => {
+  res.send("Kakao webhook endpoint is alive. Kakao uses POST.");
+});
 
 initDb()
   .then(() => {
@@ -781,4 +819,5 @@ initDb()
     console.error('DB initialization failed:', error);
     process.exit(1);
   });
+  
 
