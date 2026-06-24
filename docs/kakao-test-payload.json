@@ -1,0 +1,17 @@
+{
+  "intent": { "id": "test", "name": "테스트" },
+  "userRequest": {
+    "timezone": "Asia/Seoul",
+    "params": {},
+    "block": { "id": "test", "name": "테스트" },
+    "utterance": "게임 시작",
+    "lang": "ko",
+    "user": {
+      "id": "test-user-001",
+      "type": "botUserKey",
+      "properties": {}
+    }
+  },
+  "bot": { "id": "test-bot", "name": "제주 AI 탐험대" },
+  "action": { "name": "테스트", "clientExtra": {}, "params": {}, "id": "test", "detailParams": {} }
+}

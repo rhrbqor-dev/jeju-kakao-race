@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>제주 카카오 미션레이스 관리자</title>
+  <style>
+    :root { --bg:#f5f7fb; --card:#fff; --text:#172033; --muted:#657188; --line:#dfe5ef; --primary:#2f6df6; --danger:#d93d3d; --ok:#0f9960; --wait:#b97300; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:var(--bg); color:var(--text); }
+    header { background:linear-gradient(135deg,#123772,#2764d9); color:white; padding:26px 20px; }
+    header h1 { margin:0 0 8px; font-size:26px; }
+    header p { margin:0; opacity:.9; }
+    main { max-width:1180px; margin:0 auto; padding:20px; }
+    .login { max-width:420px; margin:50px auto; background:var(--card); border:1px solid var(--line); border-radius:18px; padding:24px; box-shadow:0 12px 32px rgba(20,30,60,.08); }
+    .grid { display:grid; gap:14px; }
+    .stats { grid-template-columns:repeat(5,minmax(0,1fr)); }
+    .two { grid-template-columns:1fr 1fr; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:18px; box-shadow:0 8px 22px rgba(20,30,60,.05); }
+    .stat strong { display:block; font-size:28px; margin-top:6px; }
+    .stat span, .muted { color:var(--muted); font-size:14px; }
+    nav { display:flex; gap:8px; flex-wrap:wrap; margin:18px 0; }
+    button, .btn { border:0; background:var(--primary); color:white; padding:10px 14px; border-radius:10px; cursor:pointer; font-weight:700; text-decoration:none; display:inline-block; }
+    button.secondary { background:#edf2ff; color:#1c459d; }
+    button.danger { background:var(--danger); }
+    button.ok { background:var(--ok); }
+    button.warn { background:var(--wait); }
+    input, select, textarea { width:100%; border:1px solid var(--line); border-radius:10px; padding:10px 12px; font:inherit; background:white; }
+    label { display:block; font-size:13px; color:var(--muted); margin:8px 0 4px; }
+    table { width:100%; border-collapse:collapse; font-size:14px; }
+    th, td { padding:10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { background:#f8faff; color:#44516a; position:sticky; top:0; }
+    .table-wrap { overflow:auto; max-height:540px; border:1px solid var(--line); border-radius:12px; }
+    .badge { display:inline-block; padding:3px 8px; border-radius:20px; font-size:12px; font-weight:800; }
+    .badge.correct,.badge.approved { background:#e7f7ef; color:#0f7b50; }
+    .badge.pending { background:#fff4df; color:#986000; }
+    .badge.wrong,.badge.rejected { background:#ffe9e9; color:#b42323; }
+    .hidden { display:none !important; }
+    .section { margin-top:18px; }
+    .notice { background:#fff9e8; border:1px solid #ffe0a3; padding:12px 14px; border-radius:12px; color:#664700; }
+    .small { font-size:12px; color:var(--muted); }
+    @media (max-width:900px) { .stats,.two { grid-template-columns:1fr; } table { min-width:800px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>제주 카카오 미션레이스 관리자</h1>
+    <p>카카오톡 챗봇으로 접수된 팀, 미션 제출, 순위, 사진 인증을 관리합니다.</p>
+  </header>
+  <main>
+    <section id="loginBox" class="login">
+      <h2>관리자 로그인</h2>
+      <p class="muted">Render 환경변수 ADMIN_PASSWORD에 입력한 비밀번호를 넣으세요.</p>
+      <label>관리자 비밀번호</label>
+      <input id="adminPassword" type="password" placeholder="ADMIN_PASSWORD" />
+      <div style="height:12px"></div>
+      <button onclick="login()">로그인</button>
+      <p id="loginMsg" class="small"></p>
+    </section>
+
+    <section id="appBox" class="hidden">
+      <div class="notice">
+        카카오 오픈빌더 스킬 URL은 <b><span id="skillUrl"></span></b> 입니다. KAKAO_SKILL_KEY를 설정했다면 뒤에 <b>?key=설정값</b>을 붙여 등록하세요.
+      </div>
+
+      <nav>
+        <button onclick="loadAll()">새로고침</button>
+        <button class="secondary" onclick="showTab('ranking')">순위표</button>
+        <button class="secondary" onclick="showTab('submissions')">제출내역</button>
+        <button class="secondary" onclick="showTab('missions')">미션설정</button>
+        <button class="secondary" onclick="downloadCsv()">CSV 저장</button>
+        <button class="danger" onclick="resetEvent()">팀/제출 초기화</button>
+        <button class="secondary" onclick="logout()">로그아웃</button>
+      </nav>
+
+      <section class="grid stats">
+        <div class="card stat"><span>참가팀</span><strong id="teamCount">-</strong></div>
+        <div class="card stat"><span>완주팀</span><strong id="finishedCount">-</strong></div>
+        <div class="card stat"><span>미션수</span><strong id="missionCount">-</strong></div>
+        <div class="card stat"><span>승인대기</span><strong id="pendingCount">-</strong></div>
+        <div class="card stat"><span>현재 1위</span><strong id="topTeam">-</strong></div>
+      </section>
+
+      <section id="tab-ranking" class="section card">
+        <h2>실시간 순위표</h2>
+        <div class="table-wrap"><table><thead><tr><th>순위</th><th>팀코드</th><th>팀명</th><th>총점</th><th>완료</th><th>상태</th><th>소요시간</th></tr></thead><tbody id="rankingBody"></tbody></table></div>
+      </section>
+
+      <section id="tab-submissions" class="section card hidden">
+        <h2>미션 제출내역</h2>
+        <div class="table-wrap"><table><thead><tr><th>시간</th><th>팀</th><th>미션</th><th>유형</th><th>입력/인증</th><th>상태</th><th>점수</th><th>관리</th></tr></thead><tbody id="submissionBody"></tbody></table></div>
+      </section>
+
+      <section id="tab-missions" class="section grid two hidden">
+        <div class="card">
+          <h2>미션 목록</h2>
+          <div class="table-wrap"><table><thead><tr><th>코드</th><th>미션명</th><th>유형</th><th>점수</th><th>관리</th></tr></thead><tbody id="missionBody"></tbody></table></div>
+        </div>
+        <div class="card">
+          <h2 id="missionFormTitle">미션 추가/수정</h2>
+          <input id="missionId" type="hidden" />
+          <label>미션코드</label><input id="missionCode" placeholder="M1" />
+          <label>미션명</label><input id="missionName" placeholder="해신사" />
+          <label>유형</label><select id="missionType"><option value="quiz">퀴즈</option><option value="photo">사진</option><option value="gps">GPS</option><option value="visit">방문문구</option><option value="complete">완주</option></select>
+          <label>질문/안내문</label><textarea id="missionQuestion" rows="3"></textarea>
+          <label>정답(복수 정답은 | 로 구분)</label><input id="missionAnswer" placeholder="해신사|해 신 사" />
+          <label>점수</label><input id="missionScore" type="number" value="10" />
+          <label>힌트</label><input id="missionHint" />
+          <label>장소명</label><input id="missionLocation" />
+          <label>GPS 위도</label><input id="missionLat" type="number" step="0.000001" />
+          <label>GPS 경도</label><input id="missionLng" type="number" step="0.000001" />
+          <label>GPS 인정 반경(m)</label><input id="missionRadius" type="number" value="80" />
+          <label>정렬순서</label><input id="missionOrder" type="number" value="1" />
+          <div style="height:12px"></div>
+          <button onclick="saveMission()">미션 저장</button>
+          <button class="secondary" onclick="clearMissionForm()">새 미션 입력</button>
+        </div>
+      </section>
+    </section>
+  </main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let adminPassword = localStorage.getItem('adminPassword') || '';
+let missionsCache = [];
+
+function authHeaders() { return { 'Content-Type': 'application/json', 'x-admin-password': adminPassword }; }
+async function api(path, options = {}) {
+  const res = await fetch(path, { ...options, headers: { ...authHeaders(), ...(options.headers || {}) } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) throw new Error(data.message || '요청 실패');
+  return data;
+}
+function formatTime(v) { return v ? new Date(v).toLocaleString('ko-KR') : '-'; }
+function duration(sec) { if (!sec) return '-'; const m=Math.floor(sec/60), s=sec%60; return `${m}분 ${s}초`; }
+function badge(status) { return `<span class="badge ${status}">${status}</span>`; }
+
+async function login() {
+  adminPassword = $('adminPassword').value.trim();
+  try {
+    await api('/api/admin/login', { method:'POST', body: JSON.stringify({ password: adminPassword }) });
+    localStorage.setItem('adminPassword', adminPassword);
+    $('loginBox').classList.add('hidden');
+    $('appBox').classList.remove('hidden');
+    $('skillUrl').textContent = location.origin + '/kakao/skill';
+    await loadAll();
+  } catch(e) { $('loginMsg').textContent = e.message; }
+}
+function logout() { localStorage.removeItem('adminPassword'); location.reload(); }
+
+async function loadAll() {
+  const summary = await api('/api/admin/summary');
+  $('teamCount').textContent = summary.teamCount;
+  $('finishedCount').textContent = summary.finishedCount;
+  $('missionCount').textContent = summary.missionCount;
+  $('pendingCount').textContent = summary.pendingCount;
+  $('topTeam').textContent = summary.topTeam ? `${summary.topTeam.team_name} ${summary.topTeam.total_score}점` : '-';
+  await Promise.all([loadRanking(), loadSubmissions(), loadMissions()]);
+}
+async function loadRanking() {
+  const data = await api('/api/admin/rankings');
+  $('rankingBody').innerHTML = data.rankings.map(r => `<tr><td>${r.rank}</td><td>${r.team_code}</td><td>${r.team_name}</td><td><b>${r.total_score}</b></td><td>${r.completed_count}</td><td>${r.status}</td><td>${duration(r.duration_seconds)}</td></tr>`).join('') || '<tr><td colspan="7">등록된 팀이 없습니다.</td></tr>';
+}
+async function loadSubmissions() {
+  const data = await api('/api/admin/submissions');
+  $('submissionBody').innerHTML = data.submissions.map(s => {
+    const img = s.has_image ? `<a href="/api/admin/submissions/${s.id}/image?admin_password=${encodeURIComponent(adminPassword)}" target="_blank">사진보기</a>` : '';
+    const gps = s.distance_m != null ? `GPS ${Math.round(s.distance_m)}m` : '';
+    const manage = s.status === 'pending'
+      ? `<button class="ok" onclick="review(${s.id},'approved')">승인</button> <button class="danger" onclick="review(${s.id},'rejected')">반려</button>`
+      : '';
+    return `<tr><td>${formatTime(s.submitted_at)}</td><td>${s.team_name}<br><span class="small">${s.team_code}</span></td><td>${s.mission_code}<br>${s.mission_name}</td><td>${s.mission_type}</td><td>${s.answer_text || ''}<br>${img} ${gps}</td><td>${badge(s.status)}</td><td>${s.score}</td><td>${manage}</td></tr>`;
+  }).join('') || '<tr><td colspan="8">제출 내역이 없습니다.</td></tr>';
+}
+async function loadMissions() {
+  const data = await api('/api/admin/missions');
+  missionsCache = data.missions;
+  $('missionBody').innerHTML = data.missions.map(m => `<tr><td>${m.mission_code}</td><td>${m.mission_name}</td><td>${m.mission_type}</td><td>${m.score}</td><td><button class="secondary" onclick="editMission(${m.id})">수정</button> <button class="danger" onclick="deleteMission(${m.id})">삭제</button></td></tr>`).join('');
+}
+async function review(id, decision) {
+  const note = prompt(decision === 'approved' ? '승인 메모(선택)' : '반려 사유(선택)', '') || '';
+  await api(`/api/admin/submissions/${id}/review`, { method:'POST', body: JSON.stringify({ decision, note }) });
+  await loadAll();
+}
+function showTab(name) {
+  ['ranking','submissions','missions'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
+}
+function editMission(id) {
+  const m = missionsCache.find(x => x.id === id); if (!m) return;
+  $('missionId').value = m.id; $('missionCode').value = m.mission_code; $('missionName').value = m.mission_name; $('missionType').value = m.mission_type;
+  $('missionQuestion').value = m.question; $('missionAnswer').value = m.answer; $('missionScore').value = m.score; $('missionHint').value = m.hint;
+  $('missionLocation').value = m.location_name; $('missionLat').value = m.latitude || ''; $('missionLng').value = m.longitude || ''; $('missionRadius').value = m.radius_m; $('missionOrder').value = m.sort_order;
+}
+function clearMissionForm() {
+  ['missionId','missionCode','missionName','missionQuestion','missionAnswer','missionHint','missionLocation','missionLat','missionLng'].forEach(id => $(id).value='');
+  $('missionType').value='quiz'; $('missionScore').value=10; $('missionRadius').value=80; $('missionOrder').value=1;
+}
+async function saveMission() {
+  const body = {
+    mission_code:$('missionCode').value.trim(), mission_name:$('missionName').value.trim(), mission_type:$('missionType').value,
+    question:$('missionQuestion').value, answer:$('missionAnswer').value, score:Number($('missionScore').value||0), hint:$('missionHint').value,
+    location_name:$('missionLocation').value, latitude:$('missionLat').value ? Number($('missionLat').value) : null, longitude:$('missionLng').value ? Number($('missionLng').value) : null,
+    radius_m:Number($('missionRadius').value||80), sort_order:Number($('missionOrder').value||0), is_required:true
+  };
+  const id = $('missionId').value;
+  await api(id ? `/api/admin/missions/${id}` : '/api/admin/missions', { method:id?'PATCH':'POST', body: JSON.stringify(body) });
+  clearMissionForm(); await loadAll();
+}
+async function deleteMission(id) { if(confirm('정말 삭제할까요? 제출 기록도 함께 삭제될 수 있습니다.')) { await api(`/api/admin/missions/${id}`, { method:'DELETE' }); await loadAll(); } }
+function downloadCsv() { location.href = `/api/admin/export/rankings.csv?admin_password=${encodeURIComponent(adminPassword)}`; }
+async function resetEvent() { if(confirm('정말 모든 팀과 제출 기록을 초기화할까요?')) { await api('/api/admin/reset-event', { method:'POST', body:'{}' }); await loadAll(); } }
+
+if (adminPassword) { $('adminPassword').value = adminPassword; login(); }
+setInterval(() => { if (!$('appBox').classList.contains('hidden')) loadAll().catch(()=>{}); }, 10000);
+</script>
+</body>
+</html>

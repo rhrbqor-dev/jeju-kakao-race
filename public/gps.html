@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GPS 인증</title>
+  <style>
+    body { margin:0; font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#f5f7fb; color:#172033; }
+    main { max-width:520px; margin:0 auto; padding:26px 18px; }
+    .card { background:white; border:1px solid #dfe5ef; border-radius:18px; padding:22px; box-shadow:0 8px 22px rgba(20,30,60,.07); }
+    button { margin-top:16px; width:100%; border:0; background:#2f6df6; color:white; padding:14px; border-radius:12px; font-weight:800; font-size:16px; }
+    .msg { margin-top:14px; padding:12px; border-radius:12px; background:#eef4ff; white-space:pre-wrap; }
+  </style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>GPS 인증</h1>
+    <p>현재 미션 장소에서 아래 버튼을 누르고 위치 권한을 허용해주세요.</p>
+    <button onclick="verifyGps()">현재 위치로 인증하기</button>
+    <div id="msg" class="msg">버튼을 누르면 인증을 시작합니다.</div>
+  </div>
+</main>
+<script>
+const params = new URLSearchParams(location.search);
+async function verifyGps() {
+  const msg = document.getElementById('msg');
+  if (!navigator.geolocation) { msg.textContent = '이 브라우저는 GPS 위치 기능을 지원하지 않습니다.'; return; }
+  msg.textContent = '현재 위치를 확인하고 있습니다...';
+  navigator.geolocation.getCurrentPosition(async (pos) => {
+    try {
+      const body = {
+        team_code: params.get('team') || '',
+        mission_code: params.get('mission') || '',
+        token: params.get('token') || '',
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude
+      };
+      const res = await fetch('/api/public/verify/location', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+      const data = await res.json();
+      msg.textContent = data.message || (data.ok ? '인증 완료' : '인증 실패');
+    } catch(err) { msg.textContent = err.message; }
+  }, (err) => {
+    msg.textContent = '위치 확인에 실패했습니다.\n' + err.message + '\n휴대폰 브라우저 위치 권한을 확인해주세요.';
+  }, { enableHighAccuracy:true, timeout:15000, maximumAge:0 });
+}
+</script>
+</body>
+</html>

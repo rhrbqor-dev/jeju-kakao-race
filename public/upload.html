@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>사진 인증 업로드</title>
+  <style>
+    body { margin:0; font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#f5f7fb; color:#172033; }
+    main { max-width:520px; margin:0 auto; padding:26px 18px; }
+    .card { background:white; border:1px solid #dfe5ef; border-radius:18px; padding:22px; box-shadow:0 8px 22px rgba(20,30,60,.07); }
+    h1 { margin-top:0; }
+    label { display:block; margin:12px 0 6px; font-size:14px; color:#657188; }
+    input, textarea { width:100%; padding:12px; border:1px solid #dfe5ef; border-radius:12px; font:inherit; box-sizing:border-box; }
+    button { margin-top:16px; width:100%; border:0; background:#2f6df6; color:white; padding:13px; border-radius:12px; font-weight:800; font-size:16px; }
+    .msg { margin-top:14px; padding:12px; border-radius:12px; background:#eef4ff; }
+  </style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>사진 인증 업로드</h1>
+    <p>현장 사진을 업로드하면 운영자 승인 후 점수가 반영됩니다.</p>
+    <form id="form">
+      <input type="hidden" name="team_code" id="team_code" />
+      <input type="hidden" name="mission_code" id="mission_code" />
+      <input type="hidden" name="token" id="token" />
+      <label>사진 파일</label>
+      <input type="file" name="photo" accept="image/*" capture="environment" required />
+      <label>메모</label>
+      <textarea name="comment" rows="3" placeholder="예: T001 포구사진 인증"></textarea>
+      <button type="submit">사진 제출하기</button>
+    </form>
+    <div id="msg" class="msg" style="display:none"></div>
+  </div>
+</main>
+<script>
+const params = new URLSearchParams(location.search);
+document.getElementById('team_code').value = params.get('team') || '';
+document.getElementById('mission_code').value = params.get('mission') || '';
+document.getElementById('token').value = params.get('token') || '';
+document.getElementById('form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('msg');
+  msg.style.display = 'block'; msg.textContent = '업로드 중입니다...';
+  try {
+    const res = await fetch('/api/public/upload/photo', { method:'POST', body:new FormData(e.target) });
+    const data = await res.json();
+    msg.textContent = data.message || (data.ok ? '접수되었습니다.' : '오류가 발생했습니다.');
+  } catch(err) { msg.textContent = err.message; }
+});
+</script>
+</body>
+</html>
