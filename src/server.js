@@ -797,28 +797,7 @@ app.use((err, _req, res, _next) => {
   console.error(err);
   res.status(500).json({ ok: false, message: err.message || '서버 오류' });
 });
-app.use(express.json());
 
-function kakaoResponse(text) {
-  return {
-    version: "2.0",
-    template: {
-      outputs: [
-        {
-          simpleText: {
-            text: String(text)
-          }
-        }
-      ]
-    }
-  };
-}
-
-
-
-app.get("/kakao/skill", (req, res) => {
-  res.send("Kakao skill endpoint is alive. Kakao uses POST.");
-});
 
 app.get("/webhook", (req, res) => {
   res.send("Kakao webhook endpoint is alive. Kakao uses POST.");
