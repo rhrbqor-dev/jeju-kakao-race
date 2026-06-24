@@ -559,18 +559,7 @@ app.get('/health', async (_req, res) => {
 });
 
 app.post('/kakao/skill', async (req, res) => {
-  if (message === '게임 시작') {
-  users[userId] = {
-    nickname: null,
-    state: 'WAIT_NICKNAME',
-    startTime: Date.now(),
-    endTime: null,
-  };
 
-  return res.status(200).json(
-    kakaoText('게임을 시작합니다!\n사용할 닉네임을 입력해주세요.')
-  );
-}
   try {
     if (KAKAO_SKILL_KEY && req.query.key !== KAKAO_SKILL_KEY) {
       return res.json(kakaoText('스킬 서버 인증키가 올바르지 않습니다. 운영자에게 문의해주세요.'));
@@ -825,19 +814,7 @@ function kakaoResponse(text) {
   };
 }
 
-function handleKakaoSkill(req, res) {
-  console.log("[카카오 스킬 요청]", req.method, req.originalUrl);
-  console.log("[카카오 요청 BODY]", JSON.stringify(req.body, null, 2));
 
-  const message = req.body?.userRequest?.utterance || "입력값 없음";
-
-  return res.status(200).json(
-    kakaoResponse(`카카오 스킬 연결 성공!\n입력한 말: ${message}`)
-  );
-}
-
-app.post("/kakao/skill", handleKakaoSkill);
-app.post("/webhook", handleKakaoSkill);
 
 app.get("/kakao/skill", (req, res) => {
   res.send("Kakao skill endpoint is alive. Kakao uses POST.");
