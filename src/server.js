@@ -328,13 +328,37 @@ async function buildRanking(eventId) {
 }
 
 function kakaoText(text, quickReplies = []) {
-  return {
+  const safeText = String(text || '응답 메시지가 없습니다.');
+
+  const safeQuickReplies = Array.isArray(quickReplies)
+    ? quickReplies
+        .filter((q) => typeof q === 'string' && q.trim() !== '')
+        .slice(0, 10)
+        .map((q) => ({
+          action: 'message',
+          label: q,
+          messageText: q,
+        }))
+    : [];
+
+  const response = {
     version: '2.0',
     template: {
-      outputs: [{ simpleText: { text } }],
-      quickReplies: quickReplies.slice(0, 10).map((q) => ({ action: 'message', label: q, messageText: q })),
+      outputs: [
+        {
+          simpleText: {
+            text: safeText,
+          },
+        },
+      ],
     },
   };
+
+  if (safeQuickReplies.length > 0) {
+    response.template.quickReplies = safeQuickReplies;
+  }
+
+  return response;
 }
 
 function kakaoCard(title, description, buttons = [], quickReplies = []) {
@@ -535,6 +559,18 @@ app.get('/health', async (_req, res) => {
 });
 
 app.post('/kakao/skill', async (req, res) => {
+  if (message === '게임 시작') {
+  users[userId] = {
+    nickname: null,
+    state: 'WAIT_NICKNAME',
+    startTime: Date.now(),
+    endTime: null,
+  };
+
+  return res.status(200).json(
+    kakaoText('게임을 시작합니다!\n사용할 닉네임을 입력해주세요.')
+  );
+}
   try {
     if (KAKAO_SKILL_KEY && req.query.key !== KAKAO_SKILL_KEY) {
       return res.json(kakaoText('스킬 서버 인증키가 올바르지 않습니다. 운영자에게 문의해주세요.'));
@@ -819,5 +855,5 @@ initDb()
     console.error('DB initialization failed:', error);
     process.exit(1);
   });
-  
+
 
