@@ -417,7 +417,7 @@ async function handleMissionList(event, team) {
     const done = completed.has(m.id) ? '✅' : '⬜';
     return `${done} ${m.mission_code} ${m.mission_name} (${m.score}점)`;
   });
-  return kakaoText(`미션 목록입니다.\n\n${lines.join('\n')}\n\n장소에 도착하면 미션코드 예: M1 을 입력해주세요.`, menuQuickReplies);
+  return kakaoText(`미션 목록입니다.\n\n${lines.join('\n')}\n\n장소에 도착하면 QR코드를 스캔해주세요.`, menuQuickReplies);
 }
 
 async function handleScore(team) {
@@ -480,7 +480,7 @@ async function handleMissionStart(req, event, team, missionCode) {
 async function handleAnswer(req, event, team, utterance) {
   const teamReload = (await query(`SELECT * FROM teams WHERE id=$1;`, [team.id])).rows[0];
   if (!teamReload.current_mission_id) {
-    return kakaoText('먼저 미션코드를 입력해주세요. 예: M1', ['미션 목록', ...menuQuickReplies]);
+    return kakaoText('먼저 QR코드를 스캔해주세요.', ['미션 목록', ...menuQuickReplies]);
   }
   const mission = (await query(`SELECT * FROM missions WHERE id=$1;`, [teamReload.current_mission_id])).rows[0];
   if (!mission) return kakaoText('진행 중인 미션 정보를 찾을 수 없습니다. 미션 목록에서 다시 선택해주세요.', menuQuickReplies);
@@ -637,12 +637,12 @@ app.post('/kakao/skill', async (req, res) => {
         return res.json(kakaoText('먼저 팀 등록이 필요합니다.\n\n팀명을 2글자 이상으로 입력해주세요.\n예: 귤탐험대'));
       }
       team = await createTeam(event.id, kakaoUserId, teamName.slice(0, 30));
-      return res.json(kakaoText(`${team.team_name} 등록 완료!\n\n팀코드: ${team.team_code}\n\n장소 안내판의 미션코드 예: M1 을 입력하면 미션이 시작됩니다.`, ['미션 목록', '도움말']));
+      return res.json(kakaoText(`${team.team_name} 등록 완료!\n\n팀코드: ${team.team_code}\n\n장소 안내판의 QR코드를 스캔하면 미션이 시작됩니다.`, ['미션 목록', '도움말']));
     }
 
-    if (!utterance) return res.json(kakaoText('입력값이 비어 있습니다. 미션코드 또는 메뉴를 입력해주세요.', menuQuickReplies));
+    if (!utterance) return res.json(kakaoText('입력값이 비어 있습니다. QR코드 스캔 또는 메뉴를 입력해주세요.', menuQuickReplies));
     if (isStartCommand(utterance)) return res.json(kakaoText(`${team.team_name}님, 이미 참가 등록되어 있습니다.\n\n팀코드: ${team.team_code}`, menuQuickReplies));
-    if (isHelpCommand(utterance)) return res.json(kakaoText('사용법\n\n1. 장소 안내판의 미션코드 예: M1 을 입력합니다.\n2. 챗봇이 내는 문제에 답합니다.\n3. 사진/GPS 미션은 버튼을 눌러 인증합니다.\n4. 내 점수 또는 순위를 입력해 확인합니다.', menuQuickReplies));
+    if (isHelpCommand(utterance)) return res.json(kakaoText('사용법\n\n1. 미션지의 QR코드를 스캔합니다.\n2. 챗봇이 내는 문제에 답합니다.\n3. 사진/GPS 미션은 버튼을 눌러 인증합니다.\n4. 내 점수 또는 순위를 입력해 확인합니다.', menuQuickReplies));
     if (isMissionListCommand(utterance)) return res.json(await handleMissionList(event, team));
     if (isScoreCommand(utterance)) return res.json(await handleScore(team));
     if (isRankCommand(utterance)) return res.json(await handleRanking(event.id));
