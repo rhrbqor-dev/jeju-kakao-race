@@ -562,7 +562,53 @@ app.get('/health', async (_req, res) => {
     res.status(500).json({ ok: false, error: error.message });
   }
 });
+function extractMissionCodeFromQr(body) {
+  const params = body?.action?.params || {};
+  const detailParams = body?.action?.detailParams || {};
 
+  // 카카오 QR 플러그인 파라미터명은 barcode로 설정하는 것을 추천
+  const raw =
+    params.barcode ||
+    params.mission_qr ||
+    params.qr ||
+    detailParams.barcode?.value ||
+    detailParams.mission_qr?.value ||
+    '';
+
+  if (!raw) return '';
+
+  let qrText = raw;
+
+  // 카카오 QR 플러그인은 {"barcodeData":"M1"} 같은 JSON 문자열로 들어올 수 있음
+  try {
+    const parsed = JSON.parse(raw);
+    qrText = parsed.barcodeData || parsed.value || raw;
+  } catch {
+    qrText = raw;
+  }
+
+  qrText = String(qrText).trim();
+
+  // QR값이 그냥 M1, M2인 경우
+  if (/^M\d+$/i.test(qrText)) {
+    return qrText.toUpperCase();
+  }
+
+  // QR값이 URL인 경우 예: https://jeju-kakao-race.onrender.com/mission?code=M1
+  try {
+    const url = new URL(qrText);
+    const code = url.searchParams.get('mission') || url.searchParams.get('code');
+    if (code && /^M\d+$/i.test(code)) {
+      return code.toUpperCase();
+    }
+  } catch {
+    // URL이 아니면 무시
+  }
+
+  // QR값 안에 M1 같은 코드가 섞여 있는 경우
+  const found = qrText.match(/\bM\d+\b/i);
+  return found ? found[0].toUpperCase() : '';
+}
 app.post('/kakao/skill', async (req, res) => {
 
   try {
@@ -571,7 +617,9 @@ app.post('/kakao/skill', async (req, res) => {
     }
 
     const event = await getActiveEvent();
-    const utterance = String(req.body?.userRequest?.utterance || '').trim();
+    const normalUtterance = String(req.body?.userRequest?.utterance || '').trim();
+    const qrMissionCode = extractMissionCodeFromQr(req.body);
+    const utterance = String(qrMissionCode || normalUtterance).trim();
     const kakaoUserId = String(req.body?.userRequest?.user?.id || req.body?.userRequest?.user?.properties?.plusfriendUserKey || '').trim();
 
     if (!kakaoUserId) {
