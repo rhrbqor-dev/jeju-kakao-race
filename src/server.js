@@ -434,7 +434,7 @@ function kakaoCard(title, description, buttons = [], quickReplies = []) {
   };
 }
 
-const menuQuickReplies = ['미션 목록', '내 점수', '순위', '도움말'];
+const menuQuickReplies = ['미션 목록', '내 점수', '순위', '팀명 수정', '도움말'];
 
 function isStartCommand(text) {
   return ['시작', '게임 시작', '참여하기', '참가', 'start'].includes(text.toLowerCase());
@@ -783,6 +783,51 @@ if (team && isTeamNameEditCommand(utterance)) {
     )
   );
 }
+    if (!utterance) {
+      return res.json(
+        kakaoText('입력값이 비어 있습니다. QR코드를 스캔하거나 메뉴를 입력해주세요.', menuQuickReplies)
+      );
+    }
+
+    if (isStartCommand(utterance)) {
+      return res.json(
+        kakaoText(`${team.team_name}님, 이미 참가 등록되어 있습니다.\n\n팀코드: ${team.team_code}`, menuQuickReplies)
+      );
+    }
+
+    if (isHelpCommand(utterance)) {
+      return res.json(
+        kakaoText(
+          '사용법\n\n1. 현장 QR코드를 스캔합니다.\n2. 챗봇이 내는 문제에 답합니다.\n3. 사진/GPS 미션은 버튼을 눌러 인증합니다.\n4. 내 점수 또는 순위를 입력해 확인합니다.\n5. 팀명을 바꾸려면 "팀명 수정"을 입력합니다.',
+          menuQuickReplies
+        )
+      );
+    }
+
+    if (isMissionListCommand(utterance)) {
+      return res.json(await handleMissionList(event, team));
+    }
+
+    if (isScoreCommand(utterance)) {
+      return res.json(await handleScore(team));
+    }
+
+    if (isRankCommand(utterance)) {
+      return res.json(await handleRanking(event.id));
+    }
+
+    if (isMissionCode(utterance)) {
+      return res.json(await handleMissionStart(req, event, team, utterance.toUpperCase()));
+    }
+
+    return res.json(await handleAnswer(req, event, team, utterance));
+  } catch (error) {
+    console.error('[카카오 스킬 오류]', error);
+    return res.json(
+      kakaoText('서버 처리 중 오류가 발생했습니다.\n\n관리자에게 문의해주세요.')
+    );
+  }
+});
 
 function requireAdmin(req, res, next) {
   const token = req.get('x-admin-password') || req.query.admin_password || req.body.admin_password;
