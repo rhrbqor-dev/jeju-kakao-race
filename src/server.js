@@ -149,7 +149,17 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
-
+await query(`
+  CREATE TABLE IF NOT EXISTS user_states (
+    id SERIAL PRIMARY KEY,
+    event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    kakao_user_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    data JSONB NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(event_id, kakao_user_id)
+  );
+`);
   await query(`
     CREATE TABLE IF NOT EXISTS submissions (
       id SERIAL PRIMARY KEY,
@@ -246,6 +256,46 @@ async function createTeam(eventId, kakaoUserId, teamName) {
     [eventId, code, teamName, kakaoUserId, token]
   );
   return result.rows[0];
+}
+async function getUserState(eventId, kakaoUserId) {
+  const result = await query(
+    `SELECT * FROM user_states
+     WHERE event_id=$1 AND kakao_user_id=$2
+     LIMIT 1;`,
+    [eventId, kakaoUserId]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function setUserState(eventId, kakaoUserId, state, data = {}) {
+  await query(
+    `INSERT INTO user_states(event_id, kakao_user_id, state, data, updated_at)
+     VALUES ($1,$2,$3,$4,NOW())
+     ON CONFLICT(event_id, kakao_user_id)
+     DO UPDATE SET state=$3, data=$4, updated_at=NOW();`,
+    [eventId, kakaoUserId, state, JSON.stringify(data)]
+  );
+}
+
+async function clearUserState(eventId, kakaoUserId) {
+  await query(
+    `DELETE FROM user_states
+     WHERE event_id=$1 AND kakao_user_id=$2;`,
+    [eventId, kakaoUserId]
+  );
+}
+
+function isTeamNameEditCommand(text) {
+  return ['팀명 수정', '팀이름 수정', '팀 이름 수정', '이름 수정', '팀명변경', '팀명 변경'].includes(
+    text.toLowerCase()
+  );
+}
+
+function isBlockedTeamName(text) {
+  return ['게임 시작', '시작', '참여', '참가', '참여하기', '도움말', '미션 목록', '순위', '랭킹', '내 점수'].includes(
+    text.trim()
+  );
 }
 
 async function getCompletedMissionIds(teamId) {
@@ -626,34 +676,113 @@ app.post('/kakao/skill', async (req, res) => {
       return res.json(kakaoText('사용자 식별 정보를 확인할 수 없습니다. 카카오 챗봇 설정을 확인해주세요.'));
     }
 
-    let team = await getTeamByKakaoUser(event.id, kakaoUserId);
+let team = await getTeamByKakaoUser(event.id, kakaoUserId);
+const userState = await getUserState(event.id, kakaoUserId);
 
-    if (!team) {
-      if (isStartCommand(utterance)) {
-        return res.json(kakaoText('제주 AI 탐험대에 오신 것을 환영합니다!\n\n팀명을 입력해주세요.\n예: 귤탐험대'));
-      }
-      const teamName = utterance.replace(/^팀명[:：]?/i, '').trim();
-      if (!teamName || teamName.length < 2) {
-        return res.json(kakaoText('먼저 팀 등록이 필요합니다.\n\n팀명을 2글자 이상으로 입력해주세요.\n예: 귤탐험대'));
-      }
-      team = await createTeam(event.id, kakaoUserId, teamName.slice(0, 30));
-      return res.json(kakaoText(`${team.team_name} 등록 완료!\n\n팀코드: ${team.team_code}\n\n장소 안내판의 QR코드를 스캔하면 미션이 시작됩니다.`, ['미션 목록', '도움말']));
-    }
+// 1. 팀명 입력 대기 상태
+if (!team && userState?.state === 'WAIT_TEAM_NAME') {
+  const teamName = utterance.replace(/^(팀명|팀이름|팀 이름)[:：]?/i, '').trim();
 
-    if (!utterance) return res.json(kakaoText('입력값이 비어 있습니다. QR코드 스캔 또는 메뉴를 입력해주세요.', menuQuickReplies));
-    if (isStartCommand(utterance)) return res.json(kakaoText(`${team.team_name}님, 이미 참가 등록되어 있습니다.\n\n팀코드: ${team.team_code}`, menuQuickReplies));
-    if (isHelpCommand(utterance)) return res.json(kakaoText('사용법\n\n1. 미션지의 QR코드를 스캔합니다.\n2. 챗봇이 내는 문제에 답합니다.\n3. 사진/GPS 미션은 버튼을 눌러 인증합니다.\n4. 내 점수 또는 순위를 입력해 확인합니다.', menuQuickReplies));
-    if (isMissionListCommand(utterance)) return res.json(await handleMissionList(event, team));
-    if (isScoreCommand(utterance)) return res.json(await handleScore(team));
-    if (isRankCommand(utterance)) return res.json(await handleRanking(event.id));
-    if (isMissionCode(utterance)) return res.json(await handleMissionStart(req, event, team, utterance.toUpperCase()));
-
-    return res.json(await handleAnswer(req, event, team, utterance));
-  } catch (error) {
-    console.error(error);
-    return res.json(kakaoText(`서버 처리 중 오류가 발생했습니다.\n\n${error.message}`));
+  if (!teamName || teamName.length < 2) {
+    return res.json(
+      kakaoText('팀 이름은 2글자 이상으로 입력해주세요.\n예: 귤탐험대')
+    );
   }
-});
+
+  if (teamName.length > 30) {
+    return res.json(
+      kakaoText('팀 이름은 30글자 이하로 입력해주세요.')
+    );
+  }
+
+  if (isBlockedTeamName(teamName)) {
+    return res.json(
+      kakaoText('사용할 수 없는 팀 이름입니다.\n다른 팀 이름을 입력해주세요.\n예: 귤탐험대')
+    );
+  }
+
+  team = await createTeam(event.id, kakaoUserId, teamName.slice(0, 30));
+  await clearUserState(event.id, kakaoUserId);
+
+  return res.json(
+    kakaoText(
+      `${team.team_name} 등록 완료!\n\n팀코드: ${team.team_code}\n\n이제 현장 QR코드를 스캔하면 미션이 시작됩니다.`,
+      ['미션 목록', '도움말']
+    )
+  );
+}
+
+// 2. 팀명 수정 대기 상태
+if (team && userState?.state === 'WAIT_TEAM_RENAME') {
+  const newTeamName = utterance.replace(/^(팀명|팀이름|팀 이름)[:：]?/i, '').trim();
+
+  if (!newTeamName || newTeamName.length < 2) {
+    return res.json(
+      kakaoText('새 팀 이름은 2글자 이상으로 입력해주세요.\n예: 귤탐험대')
+    );
+  }
+
+  if (newTeamName.length > 30) {
+    return res.json(
+      kakaoText('팀 이름은 30글자 이하로 입력해주세요.')
+    );
+  }
+
+  if (isBlockedTeamName(newTeamName)) {
+    return res.json(
+      kakaoText('사용할 수 없는 팀 이름입니다.\n다른 팀 이름을 입력해주세요.')
+    );
+  }
+
+  const result = await query(
+    `UPDATE teams
+     SET team_name=$1
+     WHERE id=$2
+     RETURNING *;`,
+    [newTeamName.slice(0, 30), team.id]
+  );
+
+  await clearUserState(event.id, kakaoUserId);
+  team = result.rows[0];
+
+  return res.json(
+    kakaoText(
+      `팀 이름이 수정되었습니다.\n\n현재 팀명: ${team.team_name}\n팀코드: ${team.team_code}`,
+      menuQuickReplies
+    )
+  );
+}
+
+// 3. 아직 팀 등록이 안 된 사용자
+if (!team) {
+  if (isStartCommand(utterance)) {
+    await setUserState(event.id, kakaoUserId, 'WAIT_TEAM_NAME');
+
+    return res.json(
+      kakaoText(
+        '제주 AI 탐험대에 오신 것을 환영합니다!\n\n사용할 팀 이름을 입력해주세요.\n예: 귤탐험대'
+      )
+    );
+  }
+
+  return res.json(
+    kakaoText(
+      '먼저 참가 등록이 필요합니다.\n\n"게임 시작"을 입력하면 팀 이름 등록을 시작합니다.',
+      ['게임 시작', '도움말']
+    )
+  );
+}
+
+// 4. 이미 등록된 사용자가 팀명 수정 요청
+if (team && isTeamNameEditCommand(utterance)) {
+  await setUserState(event.id, kakaoUserId, 'WAIT_TEAM_RENAME');
+
+  return res.json(
+    kakaoText(
+      `현재 팀명: ${team.team_name}\n\n새로운 팀 이름을 입력해주세요.`
+    )
+  );
+}
 
 function requireAdmin(req, res, next) {
   const token = req.get('x-admin-password') || req.query.admin_password || req.body.admin_password;
