@@ -321,7 +321,12 @@ async function buildRanking(eventId) {
      LEFT JOIN totals ON totals.team_id=t.id
      LEFT JOIN completed ON completed.team_id=t.id
      WHERE t.event_id=$1
-     ORDER BY total_score DESC, duration_seconds ASC NULLS LAST, t.start_time ASC, t.id ASC;`,
+     ORDER BY
+  CASE WHEN t.finish_time IS NULL THEN 1 ELSE 0 END ASC,
+  duration_seconds ASC NULLS LAST,
+  total_score DESC,
+  t.start_time ASC,
+  t.id ASC;`,
     [eventId]
   );
   return result.rows.map((row, idx) => ({ ...row, rank: idx + 1 }));
