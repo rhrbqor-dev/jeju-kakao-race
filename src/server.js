@@ -1,5 +1,6 @@
 import express from 'express';
 import { Pool } from 'pg';
+import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -62,6 +63,7 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 // public 폴더에 index.html이 있어도 기본 주소(/)는 관리자 페이지가 아니라 상태 확인 문구가 뜨도록 index 자동 제공을 끕니다.
 app.use(express.static(publicDir, { index: false }));
 
@@ -147,6 +149,8 @@ async function initDb() {
       UNIQUE(event_id, mission_code)
     );
   `);
+
+  await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS answer_explanation TEXT NOT NULL DEFAULT '';`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS teams (
@@ -983,9 +987,10 @@ function extractMissionCodeFromQr(body) {
 
 function requireAdmin(req, res, next) {
   const headerPassword = req.headers['x-admin-password'];
-  const queryPassword = req.query.password;
+  const queryPassword = req.query.password || req.query.admin_password;
+  const bodyPassword = req.body?.password;
   const cookiePassword = req.cookies?.admin_password;
-  const password = headerPassword || queryPassword || cookiePassword;
+  const password = headerPassword || queryPassword || bodyPassword || cookiePassword;
 
   if (password !== ADMIN_PASSWORD) {
     return res.status(401).json({ ok: false, message: '관리자 비밀번호가 올바르지 않습니다.' });
@@ -1404,7 +1409,7 @@ function adminPageHtml() {
 }
 
 app.get(['/admin', '/admin.html'], (_req, res) => {
-  res.status(200).type('html').send(adminPageHtml());
+  res.status(200).sendFile(path.join(publicDir, 'index.html'));
 });
 
 app.get('/', (_req, res) => {
@@ -1486,10 +1491,16 @@ function verify(){
 </script></body></html>`);
 });
 
-app.post('/api/public/upload/photo', async (req, res) => {
+app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) => {
   try {
     const event = await getActiveEvent();
-    const { team_code, mission_code, token, comment = '', image_data = '', image_mime = 'image/jpeg' } = req.body || {};
+    const body = req.body || {};
+    const team_code = body.team_code || '';
+    const mission_code = body.mission_code || '';
+    const token = body.token || '';
+    const comment = body.comment || '';
+    const image_data = body.image_data || (req.file ? req.file.buffer.toString('base64') : '');
+    const image_mime = body.image_mime || (req.file ? req.file.mimetype : 'image/jpeg');
     const team = await getTeamByCodeAndToken(event.id, team_code, token);
     const mission = await getMissionByCode(event.id, mission_code);
 
@@ -1557,6 +1568,35 @@ app.post('/api/public/verify/location', async (req, res) => {
   }
 });
 
+
+app.post('/api/admin/login', (req, res) => {
+  const password = req.body?.password || req.headers['x-admin-password'] || req.query.password || req.query.admin_password || req.cookies?.admin_password;
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ ok: false, message: '관리자 비밀번호가 올바르지 않습니다.' });
+  }
+  res.json({ ok: true, message: '로그인 성공' });
+});
+
+app.get('/api/admin/summary', requireAdmin, async (_req, res) => {
+  const event = await getActiveEvent();
+  const [teamCount, finishedCount, missionCount, pendingCount, ranking] = await Promise.all([
+    query(`SELECT COUNT(*)::int AS count FROM teams WHERE event_id=$1;`, [event.id]),
+    query(`SELECT COUNT(*)::int AS count FROM teams WHERE event_id=$1 AND status='finished';`, [event.id]),
+    query(`SELECT COUNT(*)::int AS count FROM missions WHERE event_id=$1;`, [event.id]),
+    query(`SELECT COUNT(*)::int AS count FROM submissions WHERE event_id=$1 AND status='pending';`, [event.id]),
+    buildRanking(event.id),
+  ]);
+
+  res.json({
+    ok: true,
+    teamCount: teamCount.rows[0].count,
+    finishedCount: finishedCount.rows[0].count,
+    missionCount: missionCount.rows[0].count,
+    pendingCount: pendingCount.rows[0].count,
+    topTeam: ranking[0] || null,
+  });
+});
+
 app.get('/api/admin/status', requireAdmin, async (_req, res) => {
   res.json({ ok: true, db_ready: dbReady, db_error: dbInitError, time: nowIso() });
 });
@@ -1594,10 +1634,10 @@ app.post('/api/admin/missions', requireAdmin, async (req, res) => {
   const event = await getActiveEvent();
   const m = req.body;
   const result = await query(
-    `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, question, answer, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+    `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, question, answer, answer_explanation, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
      RETURNING *;`,
-    [event.id, m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false]
+    [event.id, m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false]
   );
   res.json({ ok: true, mission: result.rows[0] });
 });
@@ -1606,10 +1646,10 @@ app.patch('/api/admin/missions/:id', requireAdmin, async (req, res) => {
   const m = req.body;
   const result = await query(
     `UPDATE missions SET
-      mission_code=$1, mission_name=$2, mission_type=$3, question=$4, answer=$5, score=$6,
-      hint=$7, location_name=$8, latitude=$9, longitude=$10, radius_m=$11, sort_order=$12, is_required=$13
-     WHERE id=$14 RETURNING *;`,
-    [m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, req.params.id]
+      mission_code=$1, mission_name=$2, mission_type=$3, question=$4, answer=$5, answer_explanation=$6, score=$7,
+      hint=$8, location_name=$9, latitude=$10, longitude=$11, radius_m=$12, sort_order=$13, is_required=$14
+     WHERE id=$15 RETURNING *;`,
+    [m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, req.params.id]
   );
   res.json({ ok: true, mission: result.rows[0] });
 });
