@@ -180,28 +180,110 @@ function isPhotoAutoApprovalActive(settings = {}, now = new Date()) {
 }
 
 
+
+const MESSAGE_SETTING_DEFINITIONS = [
+  { key: 'start', textKey: 'start_message', label: '게임 시작 멘트', title: '제주 AI 탐험대' },
+  { key: 'returning', textKey: 'returning_team_message', label: '기존 참가자 안내', title: '제주 AI 탐험대' },
+  { key: 'create_prompt', textKey: 'create_team_prompt', label: '팀명 입력 안내', title: '팀 생성' },
+  { key: 'team_name_saved', textKey: 'team_name_saved_message', label: '이름/닉네임 입력 안내', title: '팀 생성' },
+  { key: 'team_created', textKey: 'team_created_message', label: '팀 생성 완료', title: '팀 생성 완료' },
+  { key: 'need_team', textKey: 'need_team_message', label: '팀 필요 안내', title: '참가 안내' },
+  { key: 'finish', textKey: 'finish_message', label: '완주 종료 멘트', title: '완주 완료' },
+];
+
+const MESSAGE_TEXT_KEYS = MESSAGE_SETTING_DEFINITIONS.map((item) => item.textKey);
+const MESSAGE_IMAGE_KEYS = new Set(MESSAGE_SETTING_DEFINITIONS.map((item) => item.key));
+
 const DEFAULT_MESSAGE_SETTINGS = {
-  start_message: '제주 AI 탐험대에 오신 것을 환영합니다!\n\n새 팀을 만들거나 기존 팀에 참가해주세요.',
-  returning_team_message: '{team_name} 팀으로 참여 중입니다.\n\n현장 QR코드를 스캔하거나 메뉴를 선택해주세요.',
-  create_team_prompt: '먼저 팀 이름을 입력해주세요.\n예: 귤탐험대',
-  team_name_saved_message: '{team_name} 팀으로 등록하겠습니다.\n\n이제 팀원 목록에 표시될 이름 또는 닉네임을 입력해주세요.\n예: 홍길동',
-  team_created_message: '{team_name} 등록 완료!\n\n팀장: {member_name}\n팀코드: {team_code}\n\n이제 현장 QR코드를 스캔하면 미션이 시작됩니다.',
-  need_team_message: '먼저 팀을 만들거나 기존 팀에 참가해주세요.',
-  finish_message: '축하합니다! 완주 처리되었습니다.\n\n팀명: {team_name}\n수행자: {actor_name}\n최종 점수: {total}점\n현재 순위: {rank}위',
+  start_message: `제주 AI 탐험대에 오신 것을 환영합니다!
+
+새 팀을 만들거나 기존 팀에 참가해주세요.`,
+  returning_team_message: `{team_name} 팀으로 참여 중입니다.
+
+현장 QR코드를 스캔하거나 메뉴를 선택해주세요.`,
+  create_team_prompt: `먼저 팀 이름을 입력해주세요.
+예: 귤탐험대`,
+  team_name_saved_message: `{team_name} 팀으로 등록하겠습니다.
+
+이제 팀원 목록에 표시될 이름 또는 닉네임을 입력해주세요.
+예: 홍길동`,
+  team_created_message: `{team_name} 등록 완료!
+
+팀장: {member_name}
+팀코드: {team_code}
+
+이제 현장 QR코드를 스캔하면 미션이 시작됩니다.`,
+  need_team_message: `먼저 팀을 만들거나 기존 팀에 참가해주세요.`,
+  finish_message: `축하합니다! 완주 처리되었습니다.
+
+팀명: {team_name}
+수행자: {actor_name}
+최종 점수: {total}점
+현재 순위: {rank}위`,
 };
 
-function normalizeMessageSettings(value = {}) {
-  const merged = { ...DEFAULT_MESSAGE_SETTINGS, ...(value && typeof value === 'object' ? value : {}) };
+function normalizeMessageSettings(value = {}, existing = {}) {
+  const incoming = value && typeof value === 'object' ? value : {};
+  const previous = existing && typeof existing === 'object' ? existing : {};
   const out = {};
-  for (const key of Object.keys(DEFAULT_MESSAGE_SETTINGS)) {
-    const text = String(merged[key] ?? '').trim();
-    out[key] = text || DEFAULT_MESSAGE_SETTINGS[key];
+
+  for (const key of MESSAGE_TEXT_KEYS) {
+    const text = String(incoming[key] ?? previous[key] ?? DEFAULT_MESSAGE_SETTINGS[key] ?? '').trim();
+    out[key] = text || DEFAULT_MESSAGE_SETTINGS[key] || '';
+  }
+
+  for (const item of MESSAGE_SETTING_DEFINITIONS) {
+    const dataKey = `${item.key}_image_data`;
+    const mimeKey = `${item.key}_image_mime`;
+    const clearKey = `clear_${item.key}_image`;
+    const shouldClear = incoming[clearKey] === true || incoming[clearKey] === 'true';
+    const hasNewImage = typeof incoming[dataKey] === 'string' && incoming[dataKey].trim() !== '';
+
+    if (shouldClear) {
+      out[dataKey] = '';
+      out[mimeKey] = '';
+    } else if (hasNewImage) {
+      out[dataKey] = incoming[dataKey].trim();
+      out[mimeKey] = String(incoming[mimeKey] || 'image/jpeg').slice(0, 100);
+    } else {
+      out[dataKey] = String(previous[dataKey] || '');
+      out[mimeKey] = out[dataKey] ? String(previous[mimeKey] || 'image/jpeg').slice(0, 100) : '';
+    }
+  }
+
+  return out;
+}
+
+function publicMessageSettings(settings = {}, req = null) {
+  const out = {};
+  for (const key of MESSAGE_TEXT_KEYS) out[key] = settings[key] || DEFAULT_MESSAGE_SETTINGS[key] || '';
+  for (const item of MESSAGE_SETTING_DEFINITIONS) {
+    const hasImage = Boolean(settings[`${item.key}_image_data`]);
+    out[`${item.key}_has_image`] = hasImage;
+    out[`${item.key}_image_mime`] = hasImage ? settings[`${item.key}_image_mime`] || 'image/jpeg' : '';
+    out[`${item.key}_image_url`] = hasImage && req ? `${baseUrl(req)}/api/public/settings/messages/${item.key}/image` : '';
   }
   return out;
 }
 
 async function getMessageSettings(eventId) {
-  return normalizeMessageSettings(await getSetting(eventId, 'chatbot_messages', DEFAULT_MESSAGE_SETTINGS));
+  const saved = await getSetting(eventId, 'chatbot_messages', DEFAULT_MESSAGE_SETTINGS);
+  return normalizeMessageSettings(saved, DEFAULT_MESSAGE_SETTINGS);
+}
+
+function hasMessageImage(settings = {}, key = '') {
+  return MESSAGE_IMAGE_KEYS.has(key) && Boolean(settings[`${key}_image_data`]);
+}
+
+function messageImageUrl(req, settings = {}, key = '') {
+  if (!hasMessageImage(settings, key)) return '';
+  return `${baseUrl(req)}/api/public/settings/messages/${encodeURIComponent(key)}/image`;
+}
+
+function kakaoConfiguredMessage(req, settings, key, text, quickReplies = [], title = '제주 AI 탐험대') {
+  const imageUrl = messageImageUrl(req, settings, key);
+  if (imageUrl) return kakaoCard(title, text, [], quickReplies, imageUrl);
+  return kakaoText(text, quickReplies);
 }
 
 function renderTemplate(template = '', variables = {}) {
@@ -845,8 +927,10 @@ function kakaoCard(title, description, buttons = [], quickReplies = [], imageUrl
   const basicCard = {
     title: String(title || ''),
     description: String(description || ''),
-    buttons: buttons.slice(0, 3),
   };
+
+  const safeButtons = Array.isArray(buttons) ? buttons.slice(0, 3) : [];
+  if (safeButtons.length > 0) basicCard.buttons = safeButtons;
 
   if (imageUrl) {
     basicCard.thumbnail = { imageUrl, fixedRatio: true };
@@ -1140,7 +1224,10 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
     const ranking = await buildRanking(event.id);
     const myRank = ranking.find((r) => r.id === team.id)?.rank || '-';
 
-    return kakaoText(
+    return kakaoConfiguredMessage(
+      req,
+      messages,
+      'finish',
       renderTemplate(messages.finish_message, {
         team_name: team.team_name,
         team_code: team.team_code,
@@ -1148,7 +1235,8 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
         total,
         rank: myRank,
       }),
-      ['순위', '내 점수']
+      ['순위', '내 점수'],
+      '완주 완료'
     );
   }
 
@@ -1260,7 +1348,7 @@ async function handleKakaoSkill(req, res) {
       }
 
       await setUserState(event.id, kakaoUserId, 'WAIT_LEADER_NAME', { teamName: teamName.slice(0, 30) });
-      return respondKakao(res, kakaoText(renderTemplate(messages.team_name_saved_message, { team_name: teamName.slice(0, 30) }), ['취소']));
+      return respondKakao(res, kakaoConfiguredMessage(req, messages, 'team_name_saved', renderTemplate(messages.team_name_saved_message, { team_name: teamName.slice(0, 30) }), ['취소'], '팀 생성'));
     }
 
     if (!team && userState?.state === 'WAIT_LEADER_NAME') {
@@ -1268,7 +1356,7 @@ async function handleKakaoSkill(req, res) {
       const teamName = String(data.teamName || '').trim();
       if (!teamName) {
         await setUserState(event.id, kakaoUserId, 'WAIT_TEAM_NAME', {});
-        return respondKakao(res, kakaoText(messages.create_team_prompt, ['취소']));
+        return respondKakao(res, kakaoConfiguredMessage(req, messages, 'create_prompt', messages.create_team_prompt, ['취소'], '팀 생성'));
       }
       if (memberName.length < 2) {
         return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동', ['취소']));
@@ -1279,13 +1367,17 @@ async function handleKakaoSkill(req, res) {
 
       return respondKakao(
         res,
-        kakaoText(
+        kakaoConfiguredMessage(
+          req,
+          messages,
+          'team_created',
           renderTemplate(messages.team_created_message, {
             team_name: team.team_name,
             member_name: memberName,
             team_code: team.team_code,
           }),
-          ['미션 목록', '팀원 목록', '도움말']
+          ['미션 목록', '팀원 목록', '도움말'],
+          '팀 생성 완료'
         ),
         event,
         team,
@@ -1361,12 +1453,12 @@ async function handleKakaoSkill(req, res) {
       if (!team) {
         return respondKakao(
           res,
-          kakaoText(messages.start_message, startQuickReplies)
+          kakaoConfiguredMessage(req, messages, 'start', messages.start_message, startQuickReplies, '제주 AI 탐험대')
         );
       }
       return respondKakao(
         res,
-        kakaoText(renderTemplate(messages.returning_team_message, { team_name: team.team_name, team_code: team.team_code }), menuQuickReplies),
+        kakaoConfiguredMessage(req, messages, 'returning', renderTemplate(messages.returning_team_message, { team_name: team.team_name, team_code: team.team_code }), menuQuickReplies, '제주 AI 탐험대'),
         event,
         team,
         kakaoUserId
@@ -1375,7 +1467,7 @@ async function handleKakaoSkill(req, res) {
 
     if (!team && isCreateTeamCommand(utterance)) {
       await setUserState(event.id, kakaoUserId, 'WAIT_TEAM_NAME', {});
-      return respondKakao(res, kakaoText(messages.create_team_prompt, ['취소']));
+      return respondKakao(res, kakaoConfiguredMessage(req, messages, 'create_prompt', messages.create_team_prompt, ['취소'], '팀 생성'));
     }
 
     if (!team && isJoinTeamCommand(utterance)) {
@@ -1384,7 +1476,7 @@ async function handleKakaoSkill(req, res) {
     }
 
     if (!team) {
-      return respondKakao(res, kakaoText(messages.need_team_message, startQuickReplies));
+      return respondKakao(res, kakaoConfiguredMessage(req, messages, 'need_team', messages.need_team_message, startQuickReplies, '참가 안내'));
     }
 
     if (isTeamNameEditCommand(utterance)) {
@@ -1867,6 +1959,23 @@ app.get('/api/public/missions/:id/image', async (req, res) => {
   }
 });
 
+
+app.get('/api/public/settings/messages/:key/image', async (req, res) => {
+  try {
+    if (!MESSAGE_IMAGE_KEYS.has(req.params.key)) return res.status(404).send('message image not found');
+    const event = await getActiveEvent();
+    const settings = await getMessageSettings(event.id);
+    const data = settings[`${req.params.key}_image_data`];
+    const mime = settings[`${req.params.key}_image_mime`] || 'image/jpeg';
+    if (!data) return res.status(404).send('message image not found');
+    res.set('Content-Type', mime);
+    res.set('Cache-Control', 'public, max-age=120');
+    res.send(Buffer.from(data, 'base64'));
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
+
 app.post('/api/admin/login', (req, res) => {
   const password = req.body?.password || req.headers['x-admin-password'] || req.query.password || req.query.admin_password || req.cookies?.admin_password;
   if (password !== ADMIN_PASSWORD) {
@@ -1935,16 +2044,28 @@ app.patch('/api/admin/settings/photo-auto-approval', requireAdmin, async (req, r
 });
 
 
-app.get('/api/admin/settings/messages', requireAdmin, async (_req, res) => {
+app.get('/api/admin/settings/messages', requireAdmin, async (req, res) => {
   const event = await getActiveEvent();
-  res.json({ ok: true, settings: await getMessageSettings(event.id), defaults: DEFAULT_MESSAGE_SETTINGS });
+  const settings = await getMessageSettings(event.id);
+  res.json({
+    ok: true,
+    settings: publicMessageSettings(settings, req),
+    defaults: publicMessageSettings(DEFAULT_MESSAGE_SETTINGS, req),
+    message_items: MESSAGE_SETTING_DEFINITIONS.map(({ key, textKey, label }) => ({ key, textKey, label })),
+  });
 });
 
 app.patch('/api/admin/settings/messages', requireAdmin, async (req, res) => {
   const event = await getActiveEvent();
-  const settings = normalizeMessageSettings(req.body || {});
+  const current = await getMessageSettings(event.id);
+  const settings = normalizeMessageSettings(req.body || {}, current);
   await setSetting(event.id, 'chatbot_messages', settings);
-  res.json({ ok: true, settings, defaults: DEFAULT_MESSAGE_SETTINGS });
+  res.json({
+    ok: true,
+    settings: publicMessageSettings(settings, req),
+    defaults: publicMessageSettings(DEFAULT_MESSAGE_SETTINGS, req),
+    message_items: MESSAGE_SETTING_DEFINITIONS.map(({ key, textKey, label }) => ({ key, textKey, label })),
+  });
 });
 
 app.get('/api/admin/status', requireAdmin, async (_req, res) => {
