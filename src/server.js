@@ -405,6 +405,28 @@ async function getTeamMember(eventId, kakaoUserId) {
   return result.rows[0] || null;
 }
 
+
+async function getMemberDisplayName(eventId, kakaoUserId) {
+  if (!kakaoUserId) return '팀원';
+  const member = await getTeamMember(eventId, kakaoUserId);
+  return member?.member_name || (member?.role === 'leader' ? '팀장' : '팀원');
+}
+
+async function addMissionCompleteNotice(eventId, team, mission, kakaoUserId, actorName, earnedScore = null) {
+  if (!team?.id || !mission?.id) return;
+
+  const scoreText = earnedScore === null || earnedScore === undefined
+    ? ''
+    : ` 획득 점수: ${earnedScore}점`;
+
+  await addTeamNotice(
+    eventId,
+    team.id,
+    `${actorName || '팀원'}님이 ${mission.mission_code} ${mission.mission_name} 미션을 완료했습니다.${scoreText}`,
+    kakaoUserId || ''
+  );
+}
+
 async function joinTeamById(eventId, teamId, kakaoUserId, memberName) {
   const team = await getTeamById(eventId, teamId);
   if (!team) return null;
@@ -873,7 +895,7 @@ async function handleMissionStart(req, event, team, missionCode) {
   return kakaoText(`${mission.mission_code} ${mission.mission_name}\n\n${mission.question}\n\n정답을 입력해주세요.`, menuQuickReplies);
 }
 
-async function handleAnswer(req, event, team, utterance) {
+async function handleAnswer(req, event, team, utterance, kakaoUserId = '') {
   const teamReload = (await query(`SELECT * FROM teams WHERE id=$1;`, [team.id])).rows[0];
   if (!teamReload.current_mission_id) {
     return kakaoText('먼저 QR코드를 스캔해주세요.', ['미션 목록', ...menuQuickReplies]);
@@ -885,6 +907,8 @@ async function handleAnswer(req, event, team, utterance) {
   if (already) {
     return kakaoText(`이미 완료한 미션입니다.\n\n${mission.mission_code} ${mission.mission_name}\n\n다음 미션으로 이동해주세요.`, menuQuickReplies);
   }
+
+  const actorName = await getMemberDisplayName(event.id, kakaoUserId);
 
   if (mission.mission_type === 'quiz') {
     const acceptable = splitAnswers(mission.answer);
@@ -914,6 +938,7 @@ async function handleAnswer(req, event, team, utterance) {
     if (isCorrect) {
       await maybeMarkFinished(team, event.id);
       const total = await teamTotalScore(team.id);
+      await addMissionCompleteNotice(event.id, team, mission, kakaoUserId, actorName, earnedScore);
       const defaultMessage = `정답입니다!\n\n${mission.mission_code} ${mission.mission_name} 완료\n기본 점수: ${baseScore}점\n오답 횟수: ${wrongCount}회\n획득 점수: ${earnedScore}점\n현재 총점: ${total}점`;
       const successMessage = buildMissionSuccessMessage(
         mission,
@@ -953,6 +978,7 @@ async function handleAnswer(req, event, team, utterance) {
       await maybeMarkFinished(team, event.id);
       const total = await teamTotalScore(team.id);
       const score = Number(mission.score || 0);
+      await addMissionCompleteNotice(event.id, team, mission, kakaoUserId, actorName, score);
       const defaultMessage = `방문 인증 완료!\n\n획득 점수: ${score}점\n현재 총점: ${total}점`;
       const successMessage = buildMissionSuccessMessage(
         mission,
@@ -998,6 +1024,7 @@ async function handleAnswer(req, event, team, utterance) {
     const ranking = await buildRanking(event.id);
     const myRank = ranking.find((r) => r.id === team.id)?.rank || '-';
     const score = Number(mission.score || 0);
+    await addMissionCompleteNotice(event.id, team, mission, kakaoUserId, actorName, score);
     const defaultMessage = `축하합니다! 완주 처리되었습니다.\n\n팀명: ${team.team_name}\n최종 점수: ${total}점\n현재 순위: ${myRank}위`;
     const successMessage = buildMissionSuccessMessage(
       mission,
@@ -1220,7 +1247,7 @@ async function handleKakaoSkill(req, res) {
       const memberName = utterance.replace(/^(이름|닉네임)[:：]?/i, '').trim();
 
       if (!memberName || memberName.length < 2) {
-        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예:홍길동'));
+        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동'));
       }
 
       if (memberName.length > 20) {
@@ -1486,7 +1513,7 @@ async function handleKakaoSkill(req, res) {
       return respondKakao(res, await handleMissionStart(req, event, team, utterance.toUpperCase()), event, team, kakaoUserId);
     }
 
-    return respondKakao(res, await handleAnswer(req, event, team, utterance), event, team, kakaoUserId);
+    return respondKakao(res, await handleAnswer(req, event, team, utterance, kakaoUserId), event, team, kakaoUserId);
   } catch (error) {
     console.error('[카카오 스킬 오류]', error);
     return respondKakao(
@@ -1672,6 +1699,12 @@ app.post('/api/admin/submissions/:id/review', requireAdmin, async (req, res) => 
   );
   const team = (await query(`SELECT * FROM teams WHERE id=$1;`, [sub.team_id])).rows[0];
   await maybeMarkFinished(team, sub.event_id);
+  if (decision === 'approved' && sub.status !== 'approved') {
+    const mission = (await query(`SELECT * FROM missions WHERE id=$1;`, [sub.mission_id])).rows[0];
+    if (mission) {
+      await addTeamNotice(sub.event_id, team.id, `${mission.mission_code} ${mission.mission_name} 미션이 운영자 승인으로 완료되었습니다. 획득 점수: ${score}점`);
+    }
+  }
   res.json({ ok: true, submission: result.rows[0] });
 });
 
@@ -1737,6 +1770,9 @@ app.post('/api/public/verify/location', async (req, res) => {
       [event.id, team.id, mission.id, `GPS ${Math.round(distance)}m`, Number(lat), Number(lng), distance, ok ? 'approved' : 'rejected', ok ? mission.score : 0]
     );
     await maybeMarkFinished(team, event.id);
+    if (ok) {
+      await addTeamNotice(event.id, team.id, `${mission.mission_code} ${mission.mission_name} GPS 미션이 완료되었습니다. 획득 점수: ${mission.score}점`);
+    }
     res.json({ ok, distance_m: Math.round(distance), message: ok ? `GPS 인증 완료! ${mission.score}점이 반영되었습니다.` : `현재 위치가 미션 장소에서 ${Math.round(distance)}m 떨어져 있습니다. 현장에서 다시 시도해주세요.` });
   } catch (error) {
     res.status(500).json({ ok: false, message: error.message });
