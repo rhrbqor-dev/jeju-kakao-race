@@ -721,12 +721,9 @@ function renderMissionTemplate(template, values = {}) {
 }
 
 function buildMissionSuccessMessage(mission, values, defaultMessage) {
-  const customMessage = String(mission.correct_message || '').trim();
   const explanation = String(mission.answer_explanation || '').trim();
 
-  let message = customMessage
-    ? renderMissionTemplate(customMessage, values)
-    : defaultMessage;
+  let message = defaultMessage;
 
   if (explanation) {
     message += `
