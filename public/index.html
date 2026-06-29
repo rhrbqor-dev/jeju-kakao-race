@@ -94,7 +94,7 @@
       <section id="tab-missions" class="section grid two hidden">
         <div class="card">
           <h2>미션 목록</h2>
-          <div class="table-wrap"><table><thead><tr><th>코드</th><th>미션명</th><th>유형</th><th>점수</th><th>관리</th></tr></thead><tbody id="missionBody"></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>코드</th><th>미션명</th><th>유형</th><th>점수</th><th>정답설명</th><th>관리</th></tr></thead><tbody id="missionBody"></tbody></table></div>
         </div>
         <div class="card">
           <h2 id="missionFormTitle">미션 추가/수정</h2>
@@ -104,6 +104,9 @@
           <label>유형</label><select id="missionType"><option value="quiz">퀴즈</option><option value="photo">사진</option><option value="gps">GPS</option><option value="visit">방문문구</option><option value="complete">완주</option></select>
           <label>질문/안내문</label><textarea id="missionQuestion" rows="3"></textarea>
           <label>정답(복수 정답은 | 로 구분)</label><input id="missionAnswer" placeholder="해신사|해 신 사" />
+          <label>정답 후 메시지</label><textarea id="missionCorrectMessage" rows="3" placeholder="예: 정답입니다! {missionName} 미션 완료\n획득 점수: {score}점\n현재 총점: {totalScore}점"></textarea>
+          <p class="small">사용 가능 변수: {missionCode}, {missionName}, {score}, {earnedScore}, {baseScore}, {wrongCount}, {totalScore}, {teamName}, {teamCode}, {answer}</p>
+          <label>정답 설명</label><textarea id="missionAnswerExplanation" rows="4" placeholder="예: 해신사는 바다의 안전과 풍어를 기원하던 장소입니다."></textarea>
           <label>점수</label><input id="missionScore" type="number" value="10" />
           <label>힌트</label><input id="missionHint" />
           <label>장소명</label><input id="missionLocation" />
@@ -175,7 +178,7 @@ async function loadSubmissions() {
 async function loadMissions() {
   const data = await api('/api/admin/missions');
   missionsCache = data.missions;
-  $('missionBody').innerHTML = data.missions.map(m => `<tr><td>${m.mission_code}</td><td>${m.mission_name}</td><td>${m.mission_type}</td><td>${m.score}</td><td><button class="secondary" onclick="editMission(${m.id})">수정</button> <button class="danger" onclick="deleteMission(${m.id})">삭제</button></td></tr>`).join('');
+  $('missionBody').innerHTML = data.missions.map(m => `<tr><td>${m.mission_code}</td><td>${m.mission_name}</td><td>${m.mission_type}</td><td>${m.score}</td><td>${m.answer_explanation ? '있음' : '-'}</td><td><button class="secondary" onclick="editMission(${m.id})">수정</button> <button class="danger" onclick="deleteMission(${m.id})">삭제</button></td></tr>`).join('');
 }
 async function review(id, decision) {
   const note = prompt(decision === 'approved' ? '승인 메모(선택)' : '반려 사유(선택)', '') || '';
@@ -188,17 +191,17 @@ function showTab(name) {
 function editMission(id) {
   const m = missionsCache.find(x => x.id === id); if (!m) return;
   $('missionId').value = m.id; $('missionCode').value = m.mission_code; $('missionName').value = m.mission_name; $('missionType').value = m.mission_type;
-  $('missionQuestion').value = m.question; $('missionAnswer').value = m.answer; $('missionScore').value = m.score; $('missionHint').value = m.hint;
+  $('missionQuestion').value = m.question; $('missionAnswer').value = m.answer; $('missionCorrectMessage').value = m.correct_message || ''; $('missionAnswerExplanation').value = m.answer_explanation || ''; $('missionScore').value = m.score; $('missionHint').value = m.hint;
   $('missionLocation').value = m.location_name; $('missionLat').value = m.latitude || ''; $('missionLng').value = m.longitude || ''; $('missionRadius').value = m.radius_m; $('missionOrder').value = m.sort_order;
 }
 function clearMissionForm() {
-  ['missionId','missionCode','missionName','missionQuestion','missionAnswer','missionHint','missionLocation','missionLat','missionLng'].forEach(id => $(id).value='');
+  ['missionId','missionCode','missionName','missionQuestion','missionAnswer','missionCorrectMessage','missionAnswerExplanation','missionHint','missionLocation','missionLat','missionLng'].forEach(id => $(id).value='');
   $('missionType').value='quiz'; $('missionScore').value=10; $('missionRadius').value=80; $('missionOrder').value=1;
 }
 async function saveMission() {
   const body = {
     mission_code:$('missionCode').value.trim(), mission_name:$('missionName').value.trim(), mission_type:$('missionType').value,
-    question:$('missionQuestion').value, answer:$('missionAnswer').value, score:Number($('missionScore').value||0), hint:$('missionHint').value,
+    question:$('missionQuestion').value, answer:$('missionAnswer').value, correct_message:$('missionCorrectMessage').value, answer_explanation:$('missionAnswerExplanation').value, score:Number($('missionScore').value||0), hint:$('missionHint').value,
     location_name:$('missionLocation').value, latitude:$('missionLat').value ? Number($('missionLat').value) : null, longitude:$('missionLng').value ? Number($('missionLng').value) : null,
     radius_m:Number($('missionRadius').value||80), sort_order:Number($('missionOrder').value||0), is_required:true
   };
