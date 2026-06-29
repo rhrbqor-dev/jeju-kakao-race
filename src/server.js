@@ -1120,7 +1120,7 @@ async function handleKakaoSkill(req, res) {
       return respondKakao(
         res,
         kakaoText(
-          `${teamName.slice(0, 30)} 팀으로 생성할게요.\n\n팀장으로 표시할 이름 또는 닉네임을 입력해주세요.\n예: 규백`,
+          `${teamName.slice(0, 30)} 팀으로 생성할게요.\n\n팀장으로 표시할 이름 또는 닉네임을 입력해주세요.\n예: 홍길동`,
           ['취소']
         )
       );
@@ -1137,7 +1137,7 @@ async function handleKakaoSkill(req, res) {
       }
 
       if (!memberName || memberName.length < 2) {
-        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 규백'));
+        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동'));
       }
 
       if (memberName.length > 20) {
@@ -1145,7 +1145,7 @@ async function handleKakaoSkill(req, res) {
       }
 
       if (isBlockedTeamName(memberName)) {
-        return respondKakao(res, kakaoText('사용할 수 없는 이름입니다.\n다른 이름 또는 닉네임을 입력해주세요.\n예: 규백'));
+        return respondKakao(res, kakaoText('사용할 수 없는 이름입니다.\n다른 이름 또는 닉네임을 입력해주세요.\n예:홍길동'));
       }
 
       team = await createTeam(event.id, kakaoUserId, dataTeamName, memberName.slice(0, 20));
@@ -1206,7 +1206,7 @@ async function handleKakaoSkill(req, res) {
         selected_team_name: selectedTeam.team_name,
       });
 
-      return respondKakao(res, kakaoText(`${selectedTeam.team_name} 팀코드가 확인되었습니다.\n\n팀에서 사용할 이름 또는 닉네임을 입력해주세요.\n예: 규백`, ['취소']));
+      return respondKakao(res, kakaoText(`${selectedTeam.team_name} 팀코드가 확인되었습니다.\n\n팀에서 사용할 이름 또는 닉네임을 입력해주세요.\n예: 홍길동`, ['취소']));
     }
 
     // 4. 팀 참가: 참가자 이름 입력 후 합류 완료
@@ -1214,7 +1214,7 @@ async function handleKakaoSkill(req, res) {
       const memberName = utterance.replace(/^(이름|닉네임)[:：]?/i, '').trim();
 
       if (!memberName || memberName.length < 2) {
-        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 규백'));
+        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동'));
       }
 
       if (memberName.length > 20) {
