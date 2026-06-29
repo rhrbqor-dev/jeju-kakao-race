@@ -151,6 +151,8 @@ async function initDb() {
   `);
 
   await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS answer_explanation TEXT NOT NULL DEFAULT '';`);
+  await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS mission_image_data TEXT;`);
+  await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS mission_image_mime TEXT NOT NULL DEFAULT '';`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS teams (
@@ -246,6 +248,8 @@ async function initDb() {
       status TEXT NOT NULL CHECK (status IN ('pending', 'correct', 'wrong', 'approved', 'rejected')),
       score INTEGER NOT NULL DEFAULT 0,
       review_note TEXT NOT NULL DEFAULT '',
+      actor_kakao_user_id TEXT NOT NULL DEFAULT '',
+      actor_name TEXT NOT NULL DEFAULT '',
       submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       reviewed_at TIMESTAMPTZ
     );
@@ -256,7 +260,10 @@ async function initDb() {
   await query(`CREATE INDEX IF NOT EXISTS idx_team_notices_team ON team_notices(team_id);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_submissions_team ON submissions(team_id);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_submissions_mission ON submissions(mission_id);`);
+  await query(`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS actor_kakao_user_id TEXT NOT NULL DEFAULT '';`);
+  await query(`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS actor_name TEXT NOT NULL DEFAULT '';`);
   await query(`CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions(status);`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_submissions_actor ON submissions(actor_kakao_user_id);`);
 
   await query(`
     INSERT INTO team_members(event_id, team_id, kakao_user_id, member_name, role)
@@ -300,7 +307,16 @@ async function getActiveEvent() {
 }
 
 async function getMissions(eventId) {
-  const result = await query(`SELECT * FROM missions WHERE event_id=$1 ORDER BY sort_order ASC, id ASC;`, [eventId]);
+  const result = await query(
+    `SELECT id, event_id, mission_code, mission_name, mission_type, question, answer, answer_explanation, score,
+            hint, location_name, latitude, longitude, radius_m, sort_order, is_required, created_at,
+            mission_image_mime,
+            CASE WHEN mission_image_data IS NULL OR mission_image_data = '' THEN false ELSE true END AS has_mission_image
+     FROM missions
+     WHERE event_id=$1
+     ORDER BY sort_order ASC, id ASC;`,
+    [eventId]
+  );
   return result.rows;
 }
 
@@ -340,6 +356,36 @@ async function getTeamMember(eventId, kakaoUserId) {
     [eventId, kakaoUserId]
   );
   return result.rows[0] || null;
+}
+
+async function resolveActorForTeam(eventId, teamId, actorKakaoUserId = '', fallbackName = '팀원') {
+  const actorId = String(actorKakaoUserId || '').trim();
+  if (actorId) {
+    const result = await query(
+      `SELECT member_name, kakao_user_id
+       FROM team_members
+       WHERE event_id=$1 AND team_id=$2 AND kakao_user_id=$3
+       LIMIT 1;`,
+      [eventId, teamId, actorId]
+    );
+    if (result.rows[0]) {
+      return {
+        actor_kakao_user_id: result.rows[0].kakao_user_id,
+        actor_name: result.rows[0].member_name || fallbackName || '팀원',
+      };
+    }
+  }
+
+  const leader = await query(`SELECT leader_name FROM teams WHERE id=$1 LIMIT 1;`, [teamId]);
+  return {
+    actor_kakao_user_id: actorId,
+    actor_name: fallbackName || leader.rows[0]?.leader_name || '팀원',
+  };
+}
+
+function missionImageUrl(req, mission) {
+  if (!mission?.mission_image_data) return '';
+  return `${baseUrl(req)}/api/public/missions/${mission.id}/image`;
 }
 
 async function getTeamById(eventId, teamId) {
@@ -677,7 +723,7 @@ function kakaoText(text, quickReplies = []) {
   return response;
 }
 
-function kakaoCard(title, description, buttons = [], quickReplies = []) {
+function kakaoCard(title, description, buttons = [], quickReplies = [], imageUrl = '') {
   const safeQuickReplies = Array.isArray(quickReplies)
     ? quickReplies
         .filter((q) => typeof q === 'string' && q.trim() !== '')
@@ -685,18 +731,20 @@ function kakaoCard(title, description, buttons = [], quickReplies = []) {
         .map((q) => ({ action: 'message', label: q, messageText: q }))
     : [];
 
+  const basicCard = {
+    title: String(title || ''),
+    description: String(description || ''),
+    buttons: buttons.slice(0, 3),
+  };
+
+  if (imageUrl) {
+    basicCard.thumbnail = { imageUrl, fixedRatio: true };
+  }
+
   const response = {
     version: '2.0',
     template: {
-      outputs: [
-        {
-          basicCard: {
-            title: String(title || ''),
-            description: String(description || ''),
-            buttons: buttons.slice(0, 3),
-          },
-        },
-      ],
+      outputs: [{ basicCard }],
     },
   };
 
@@ -731,29 +779,54 @@ function isMissionCode(text) {
   return /^m\d+$/i.test(String(text).trim());
 }
 
+async function completedMissionDetails(teamId) {
+  const result = await query(
+    `SELECT DISTINCT ON (s.mission_id)
+       s.mission_id, s.score, s.actor_name, s.submitted_at,
+       m.mission_code, m.mission_name, m.sort_order
+     FROM submissions s
+     JOIN missions m ON m.id=s.mission_id
+     WHERE s.team_id=$1 AND s.status IN ('correct', 'approved') AND s.score > 0
+     ORDER BY s.mission_id, s.score DESC, s.submitted_at ASC;`,
+    [teamId]
+  );
+
+  const map = new Map();
+  for (const row of result.rows) map.set(row.mission_id, row);
+  return map;
+}
+
 async function handleMissionList(event, team) {
   const missions = await getMissions(event.id);
-  const completed = team ? await getCompletedMissionIds(team.id) : new Set();
+  const completedMap = team ? await completedMissionDetails(team.id) : new Map();
   const lines = missions.map((m) => {
-    const done = completed.has(m.id) ? '✅' : '⬜';
-    return `${done} ${m.mission_code} ${m.mission_name} (${m.score}점)`;
+    const done = completedMap.get(m.id);
+    if (done) {
+      const actor = done.actor_name || '팀원';
+      return `✅ ${m.mission_code} ${m.mission_name} (${done.score}점 / 수행자: ${actor})`;
+    }
+    const imageLabel = m.has_mission_image ? ' 🖼️' : '';
+    return `⬜ ${m.mission_code} ${m.mission_name}${imageLabel} (${m.score}점)`;
   });
-  return kakaoText(`미션 목록입니다.\n\n${lines.join('\n')}\n\n장소에 도착하면 QR코드를 스캔해주세요.`, menuQuickReplies);
+  return kakaoText(`미션 목록입니다.\n\n${lines.join('\n')}\n\n✅ 표시된 미션은 팀원 중 누가 수행했는지도 함께 표시됩니다.`, menuQuickReplies);
 }
 
 async function handleScore(team) {
   const total = await teamTotalScore(team.id);
   const result = await query(
-    `SELECT m.mission_code, m.mission_name, MAX(s.score)::int AS score
+    `SELECT DISTINCT ON (m.id)
+       m.sort_order, m.mission_code, m.mission_name, s.score, s.actor_name
      FROM submissions s
      JOIN missions m ON m.id=s.mission_id
-     WHERE s.team_id=$1 AND s.status IN ('correct', 'approved')
-     GROUP BY m.mission_code, m.mission_name, m.sort_order
-     ORDER BY m.sort_order;`,
+     WHERE s.team_id=$1 AND s.status IN ('correct', 'approved') AND s.score > 0
+     ORDER BY m.id, s.score DESC, s.submitted_at ASC;`,
     [team.id]
   );
   const detail = result.rows.length
-    ? result.rows.map((r) => `${r.mission_code} ${r.mission_name}: ${r.score}점`).join('\n')
+    ? result.rows
+        .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0))
+        .map((r) => `${r.mission_code} ${r.mission_name}: ${r.score}점 / 수행자: ${r.actor_name || '팀원'}`)
+        .join('\n')
     : '아직 완료한 미션이 없습니다.';
   return kakaoText(`${team.team_name} 현재 점수\n\n총점: ${total}점\n\n${detail}`, menuQuickReplies);
 }
@@ -797,36 +870,58 @@ async function handleJoinTeamList(event, kakaoUserId) {
   );
 }
 
-async function handleMissionStart(req, event, team, missionCode) {
+async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '') {
   const mission = await getMissionByCode(event.id, missionCode);
   if (!mission) return kakaoText(`'${missionCode}' 미션을 찾을 수 없습니다. 미션 목록을 확인해주세요.`, menuQuickReplies);
 
   await query(`UPDATE teams SET current_mission_id=$1 WHERE id=$2;`, [mission.id, team.id]);
+  const imageUrl = missionImageUrl(req, mission);
 
   if (mission.mission_type === 'photo') {
-    const url = `${baseUrl(req)}/upload?team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}`;
+    const url = `${baseUrl(req)}/upload?team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}&actor=${encodeURIComponent(kakaoUserId)}`;
     return kakaoCard(
       `${mission.mission_code} ${mission.mission_name}`,
       `${mission.question}\n\n아래 버튼을 눌러 사진을 업로드하면 운영자 승인 후 점수가 반영됩니다.`,
       [{ action: 'webLink', label: '사진 업로드', webLinkUrl: url }],
-      menuQuickReplies
+      menuQuickReplies,
+      imageUrl
     );
   }
 
   if (mission.mission_type === 'gps') {
-    const url = `${baseUrl(req)}/gps?team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}`;
+    const url = `${baseUrl(req)}/gps?team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}&actor=${encodeURIComponent(kakaoUserId)}`;
     return kakaoCard(
       `${mission.mission_code} ${mission.mission_name}`,
       `${mission.question}\n\n아래 버튼을 눌러 위치 권한을 허용해주세요.`,
       [{ action: 'webLink', label: 'GPS 인증하기', webLinkUrl: url }],
-      menuQuickReplies
+      menuQuickReplies,
+      imageUrl
     );
   }
 
   if (mission.mission_type === 'complete') {
+    if (imageUrl) {
+      return kakaoCard(
+        `${mission.mission_code} ${mission.mission_name}`,
+        `${mission.question}\n\n완료하려면 '${mission.answer || '완주'}'라고 입력해주세요.`,
+        [],
+        ['완주', ...menuQuickReplies],
+        imageUrl
+      );
+    }
     return kakaoText(
       `${mission.mission_code} ${mission.mission_name}\n\n${mission.question}\n\n완료하려면 '${mission.answer || '완주'}'라고 입력해주세요.`,
       ['완주', ...menuQuickReplies]
+    );
+  }
+
+  if (imageUrl) {
+    return kakaoCard(
+      `${mission.mission_code} ${mission.mission_name}`,
+      `${mission.question}\n\n이미지와 현장 단서를 함께 확인한 뒤 정답을 입력해주세요.`,
+      [],
+      menuQuickReplies,
+      imageUrl
     );
   }
 
@@ -881,9 +976,9 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId) {
     const earnedScore = isCorrect ? Math.max(minimumScore, baseScore - wrongCount * penaltyPerWrong) : 0;
 
     await query(
-      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, status, score)
-       VALUES ($1,$2,$3,$4,$5,$6);`,
-      [event.id, team.id, mission.id, utterance, isCorrect ? 'correct' : 'wrong', earnedScore]
+      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, actor_kakao_user_id, actor_name, status, score)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8);`,
+      [event.id, team.id, mission.id, utterance, kakaoUserId, actorName, isCorrect ? 'correct' : 'wrong', earnedScore]
     );
 
     if (isCorrect) {
@@ -905,9 +1000,9 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId) {
     const ok = acceptable.length ? acceptable.includes(normalizeAnswer(utterance)) : true;
 
     await query(
-      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, status, score)
-       VALUES ($1,$2,$3,$4,$5,$6);`,
-      [event.id, team.id, mission.id, utterance, ok ? 'approved' : 'wrong', ok ? mission.score : 0]
+      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, actor_kakao_user_id, actor_name, status, score)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8);`,
+      [event.id, team.id, mission.id, utterance, kakaoUserId, actorName, ok ? 'approved' : 'wrong', ok ? mission.score : 0]
     );
 
     if (ok) {
@@ -925,9 +1020,9 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId) {
     }
 
     await query(
-      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, status, score)
-       VALUES ($1,$2,$3,$4,'approved',$5);`,
-      [event.id, team.id, mission.id, utterance, mission.score]
+      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, actor_kakao_user_id, actor_name, status, score)
+       VALUES ($1,$2,$3,$4,$5,$6,'approved',$7);`,
+      [event.id, team.id, mission.id, utterance, kakaoUserId, actorName, mission.score]
     );
 
     const total = await afterMissionCompleted(event, team, mission, kakaoUserId, actorName);
@@ -941,7 +1036,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId) {
   }
 
   if (mission.mission_type === 'photo' || mission.mission_type === 'gps') {
-    return handleMissionStart(req, event, team, mission.mission_code);
+    return handleMissionStart(req, event, team, mission.mission_code, kakaoUserId);
   }
 
   return kakaoText('처리할 수 없는 미션 유형입니다. 운영자에게 문의해주세요.', menuQuickReplies);
@@ -1033,30 +1128,35 @@ async function handleKakaoSkill(req, res) {
       return respondKakao(res, kakaoText('진행 중인 입력을 취소했습니다.', team ? menuQuickReplies : startQuickReplies), event, team, kakaoUserId);
     }
 
-    if (!team && userState?.state === 'WAIT_LEADER_NAME') {
-      const memberName = cleanName(utterance);
-      if (memberName.length < 2) {
-        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동'));
-      }
-      await setUserState(event.id, kakaoUserId, 'WAIT_TEAM_NAME', { memberName });
-      return respondKakao(res, kakaoText(`${memberName}님으로 등록하겠습니다.\n\n이제 팀명을 입력해주세요.\n예: 귤탐험대`, ['취소']));
-    }
-
     if (!team && userState?.state === 'WAIT_TEAM_NAME') {
       const teamName = utterance.replace(/^(팀명|팀이름|팀 이름)[:：]?/i, '').trim();
-      const memberName = data.memberName || '팀장';
 
       if (!teamName || teamName.length < 2) {
-        return respondKakao(res, kakaoText('팀 이름은 2글자 이상으로 입력해주세요.\n예: 귤탐험대'));
+        return respondKakao(res, kakaoText('팀 이름은 2글자 이상으로 입력해주세요.\n예: 귤탐험대', ['취소']));
       }
       if (teamName.length > 30) {
-        return respondKakao(res, kakaoText('팀 이름은 30글자 이하로 입력해주세요.'));
+        return respondKakao(res, kakaoText('팀 이름은 30글자 이하로 입력해주세요.', ['취소']));
       }
       if (isBlockedTeamName(teamName)) {
-        return respondKakao(res, kakaoText('사용할 수 없는 팀 이름입니다.\n다른 팀 이름을 입력해주세요.\n예: 귤탐험대'));
+        return respondKakao(res, kakaoText('사용할 수 없는 팀 이름입니다.\n다른 팀 이름을 입력해주세요.\n예: 귤탐험대', ['취소']));
       }
 
-      team = await createTeam(event.id, kakaoUserId, teamName.slice(0, 30), memberName);
+      await setUserState(event.id, kakaoUserId, 'WAIT_LEADER_NAME', { teamName: teamName.slice(0, 30) });
+      return respondKakao(res, kakaoText(`${teamName.slice(0, 30)} 팀으로 등록하겠습니다.\n\n이제 팀원 목록에 표시될 이름 또는 닉네임을 입력해주세요.\n예: 홍길동`, ['취소']));
+    }
+
+    if (!team && userState?.state === 'WAIT_LEADER_NAME') {
+      const memberName = cleanName(utterance);
+      const teamName = String(data.teamName || '').trim();
+      if (!teamName) {
+        await setUserState(event.id, kakaoUserId, 'WAIT_TEAM_NAME', {});
+        return respondKakao(res, kakaoText('팀 이름을 먼저 입력해주세요.\n예: 귤탐험대', ['취소']));
+      }
+      if (memberName.length < 2) {
+        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동', ['취소']));
+      }
+
+      team = await createTeam(event.id, kakaoUserId, teamName, memberName);
       await clearUserState(event.id, kakaoUserId);
 
       return respondKakao(
@@ -1152,8 +1252,8 @@ async function handleKakaoSkill(req, res) {
     }
 
     if (!team && isCreateTeamCommand(utterance)) {
-      await setUserState(event.id, kakaoUserId, 'WAIT_LEADER_NAME', {});
-      return respondKakao(res, kakaoText('팀원 목록에 표시될 이름 또는 닉네임을 입력해주세요.\n예: 홍길동', ['취소']));
+      await setUserState(event.id, kakaoUserId, 'WAIT_TEAM_NAME', {});
+      return respondKakao(res, kakaoText('먼저 팀 이름을 입력해주세요.\n예: 귤탐험대', ['취소']));
     }
 
     if (!team && isJoinTeamCommand(utterance)) {
@@ -1192,7 +1292,7 @@ async function handleKakaoSkill(req, res) {
     }
 
     if (isMissionCode(utterance)) {
-      return respondKakao(res, await handleMissionStart(req, event, team, utterance.toUpperCase()), event, team, kakaoUserId);
+      return respondKakao(res, await handleMissionStart(req, event, team, utterance.toUpperCase(), kakaoUserId), event, team, kakaoUserId);
     }
 
     return respondKakao(res, await handleAnswer(req, event, team, utterance, kakaoUserId), event, team, kakaoUserId);
@@ -1440,31 +1540,8 @@ app.get('/webhook', (_req, res) => {
   res.send('Kakao webhook endpoint is alive. Kakao uses POST.');
 });
 
-app.get('/upload', (req, res) => {
-  const team = String(req.query.team || '');
-  const mission = String(req.query.mission || '');
-  const token = String(req.query.token || '');
-  res.status(200).type('html').send(`<!doctype html>
-<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>사진 업로드</title>
-<style>body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;background:#f6f7f9;color:#111827}main{max-width:560px;margin:0 auto;padding:20px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:18px}input,textarea,button{font:inherit;width:100%;box-sizing:border-box;border:1px solid #d1d5db;border-radius:10px;padding:10px;margin:8px 0}button{background:#111827;color:#fff;cursor:pointer}.msg{white-space:pre-line;margin-top:12px}</style></head>
-<body><main><div class="card"><h2>사진 업로드</h2><p>팀 코드: <b>${team}</b><br>미션: <b>${mission}</b></p><input id="photo" type="file" accept="image/*"><textarea id="comment" placeholder="메모 선택 입력"></textarea><button onclick="sendPhoto()">사진 제출</button><div id="msg" class="msg"></div></div></main>
-<script>
-async function sendPhoto(){
-  const file=document.getElementById('photo').files[0];
-  const msg=document.getElementById('msg');
-  if(!file){msg.textContent='사진을 선택해주세요.';return;}
-  msg.textContent='업로드 중입니다...';
-  const reader=new FileReader();
-  reader.onload=async()=>{
-    try{
-      const r=await fetch('/api/public/upload/photo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({team_code:${JSON.stringify(team)},mission_code:${JSON.stringify(mission)},token:${JSON.stringify(token)},comment:document.getElementById('comment').value||'',image_data:String(reader.result).split(',')[1],image_mime:file.type||'image/jpeg'})});
-      const data=await r.json();
-      msg.textContent=data.message||JSON.stringify(data);
-    }catch(e){msg.textContent='업로드 오류: '+e.message;}
-  };
-  reader.readAsDataURL(file);
-}
-</script></body></html>`);
+app.get('/upload', (_req, res) => {
+  res.sendFile(path.join(publicDir, 'upload.html'));
 });
 
 app.get('/gps', (_req, res) => {
@@ -1475,11 +1552,16 @@ app.get('/gps', (_req, res) => {
 
 app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) => {
   try {
+    if (!dbReady) {
+      return res.status(503).json({ ok: false, message: `서버 DB 준비가 아직 끝나지 않았습니다. 잠시 후 다시 시도해주세요.${dbInitError ? '\n' + dbInitError : ''}` });
+    }
+
     const event = await getActiveEvent();
     const body = req.body || {};
     const team_code = body.team_code || '';
     const mission_code = body.mission_code || '';
     const token = body.token || '';
+    const actorId = body.actor || body.actor_kakao_user_id || '';
     const comment = body.comment || '';
     const image_data = body.image_data || (req.file ? req.file.buffer.toString('base64') : '');
     const image_mime = body.image_mime || (req.file ? req.file.mimetype : 'image/jpeg');
@@ -1493,15 +1575,20 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
     if (String(image_data).length > 8 * 1024 * 1024) return res.status(400).json({ ok: false, message: '사진 용량이 너무 큽니다.' });
     if (await isMissionAlreadyCompleted(team.id, mission.id)) return res.json({ ok: true, message: '이미 완료된 미션입니다.' });
 
+    const actor = await resolveActorForTeam(event.id, team.id, actorId, team.leader_name || '팀원');
+
     await query(
-      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, image_data, image_mime, status, score)
-       VALUES ($1,$2,$3,$4,$5,$6,'pending',0);`,
-      [event.id, team.id, mission.id, comment, String(image_data), String(image_mime || 'image/jpeg')]
+      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, image_data, image_mime, actor_kakao_user_id, actor_name, status, score)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',0);`,
+      [event.id, team.id, mission.id, comment, String(image_data), String(image_mime || 'image/jpeg'), actor.actor_kakao_user_id, actor.actor_name]
     );
 
-    await addTeamNotice(event.id, team.id, `${mission.mission_code} ${mission.mission_name} 사진이 접수되었습니다. 운영자 승인 후 점수가 반영됩니다.`);
-    res.json({ ok: true, message: '사진이 접수되었습니다. 운영자 승인 후 점수가 반영됩니다.' });
+    await addTeamNotice(event.id, team.id, `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} 사진을 업로드했습니다. 운영자 승인 후 점수가 반영됩니다.`, actor.actor_kakao_user_id);
+    res.json({ ok: true, message: `사진이 접수되었습니다.
+업로드한 팀원: ${actor.actor_name}
+운영자 승인 후 점수가 반영됩니다.` });
   } catch (error) {
+    console.error('Photo upload failed:', error);
     res.status(500).json({ ok: false, message: error.message });
   }
 });
@@ -1516,7 +1603,7 @@ app.post('/api/public/verify/location', async (req, res) => {
     }
 
     const event = await getActiveEvent();
-    const { team_code = '', mission_code = '', token = '', lat, lng } = req.body || {};
+    const { team_code = '', mission_code = '', token = '', actor = '', actor_kakao_user_id = '', lat, lng } = req.body || {};
     const userLat = Number(lat);
     const userLng = Number(lng);
 
@@ -1543,16 +1630,18 @@ app.post('/api/public/verify/location', async (req, res) => {
     const distance = haversineMeters(userLat, userLng, Number(mission.latitude), Number(mission.longitude));
     const ok = distance <= Number(mission.radius_m || 80);
 
+    const actorInfo = await resolveActorForTeam(event.id, team.id, actor || actor_kakao_user_id, team.leader_name || '팀원');
+
     await query(
-      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, gps_lat, gps_lng, distance_m, status, score)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9);`,
-      [event.id, team.id, mission.id, `GPS ${Math.round(distance)}m`, userLat, userLng, distance, ok ? 'approved' : 'rejected', ok ? mission.score : 0]
+      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, gps_lat, gps_lng, distance_m, actor_kakao_user_id, actor_name, status, score)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11);`,
+      [event.id, team.id, mission.id, `GPS ${Math.round(distance)}m`, userLat, userLng, distance, actorInfo.actor_kakao_user_id, actorInfo.actor_name, ok ? 'approved' : 'rejected', ok ? mission.score : 0]
     );
 
     if (ok) {
       await maybeMarkFinished(team, event.id);
       const total = await teamTotalScore(team.id);
-      await addTeamNotice(event.id, team.id, `${mission.mission_code} ${mission.mission_name} GPS 인증이 완료되었습니다. 현재 팀 점수는 ${total}점입니다.`);
+      await addTeamNotice(event.id, team.id, `${actorInfo.actor_name}님이 ${mission.mission_code} ${mission.mission_name} GPS 인증을 완료했습니다. 현재 팀 점수는 ${total}점입니다.`, actorInfo.actor_kakao_user_id);
     }
 
     res.json({
@@ -1568,6 +1657,19 @@ app.post('/api/public/verify/location', async (req, res) => {
   }
 });
 
+
+app.get('/api/public/missions/:id/image', async (req, res) => {
+  try {
+    const result = await query(`SELECT mission_image_data, mission_image_mime FROM missions WHERE id=$1 LIMIT 1;`, [req.params.id]);
+    const row = result.rows[0];
+    if (!row || !row.mission_image_data) return res.status(404).send('mission image not found');
+    res.set('Content-Type', row.mission_image_mime || 'image/jpeg');
+    res.set('Cache-Control', 'public, max-age=300');
+    res.send(Buffer.from(row.mission_image_data, 'base64'));
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
 
 app.post('/api/admin/login', (req, res) => {
   const password = req.body?.password || req.headers['x-admin-password'] || req.query.password || req.query.admin_password || req.cookies?.admin_password;
@@ -1634,22 +1736,26 @@ app.post('/api/admin/missions', requireAdmin, async (req, res) => {
   const event = await getActiveEvent();
   const m = req.body;
   const result = await query(
-    `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, question, answer, answer_explanation, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-     RETURNING *;`,
-    [event.id, m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false]
+    `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, question, answer, answer_explanation, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required, mission_image_data, mission_image_mime)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+     RETURNING id, mission_code, mission_name;`,
+    [event.id, m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, m.mission_image_data || null, m.mission_image_mime || '']
   );
   res.json({ ok: true, mission: result.rows[0] });
 });
 
 app.patch('/api/admin/missions/:id', requireAdmin, async (req, res) => {
   const m = req.body;
+  const hasNewImage = Boolean(m.mission_image_data);
+  const clearImage = Boolean(m.clear_mission_image);
   const result = await query(
     `UPDATE missions SET
       mission_code=$1, mission_name=$2, mission_type=$3, question=$4, answer=$5, answer_explanation=$6, score=$7,
-      hint=$8, location_name=$9, latitude=$10, longitude=$11, radius_m=$12, sort_order=$13, is_required=$14
-     WHERE id=$15 RETURNING *;`,
-    [m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, req.params.id]
+      hint=$8, location_name=$9, latitude=$10, longitude=$11, radius_m=$12, sort_order=$13, is_required=$14,
+      mission_image_data = CASE WHEN $15 THEN NULL WHEN $16 THEN $17 ELSE mission_image_data END,
+      mission_image_mime = CASE WHEN $15 THEN '' WHEN $16 THEN $18 ELSE mission_image_mime END
+     WHERE id=$19 RETURNING id, mission_code, mission_name;`,
+    [m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, clearImage, hasNewImage, m.mission_image_data || null, m.mission_image_mime || '', req.params.id]
   );
   res.json({ ok: true, mission: result.rows[0] });
 });
@@ -1674,6 +1780,7 @@ app.get('/api/admin/submissions', requireAdmin, async (req, res) => {
     `SELECT s.id, s.answer_text, s.status, s.score, s.submitted_at, s.reviewed_at, s.review_note,
             s.image_mime, CASE WHEN s.image_data IS NULL THEN false ELSE true END AS has_image,
             s.gps_lat, s.gps_lng, s.distance_m,
+            s.actor_kakao_user_id, s.actor_name,
             t.team_code, t.team_name,
             m.mission_code, m.mission_name, m.mission_type
      FROM submissions s
@@ -1718,7 +1825,8 @@ app.post('/api/admin/submissions/:id/review', requireAdmin, async (req, res) => 
 
   if (decision === 'approved') {
     const total = await teamTotalScore(team.id);
-    await addTeamNotice(sub.event_id, team.id, `${sub.mission_code} ${sub.mission_name} 사진 미션이 승인되었습니다. 현재 팀 점수는 ${total}점입니다.`);
+    const actorLabel = sub.actor_name || '팀원';
+    await addTeamNotice(sub.event_id, team.id, `${actorLabel}님이 업로드한 ${sub.mission_code} ${sub.mission_name} 사진 미션이 승인되었습니다. 현재 팀 점수는 ${total}점입니다.`, sub.actor_kakao_user_id || '');
   }
 
   res.json({ ok: true, submission: result.rows[0] });

@@ -24,6 +24,7 @@
       <input type="hidden" name="team_code" id="team_code" />
       <input type="hidden" name="mission_code" id="mission_code" />
       <input type="hidden" name="token" id="token" />
+      <input type="hidden" name="actor" id="actor" />
       <label>사진 파일</label>
       <input type="file" name="photo" accept="image/*" capture="environment" required />
       <label>메모</label>
@@ -38,6 +39,7 @@ const params = new URLSearchParams(location.search);
 document.getElementById('team_code').value = params.get('team') || '';
 document.getElementById('mission_code').value = params.get('mission') || '';
 document.getElementById('token').value = params.get('token') || '';
+document.getElementById('actor').value = params.get('actor') || '';
 document.getElementById('form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const msg = document.getElementById('msg');

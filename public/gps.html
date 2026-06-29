@@ -35,6 +35,7 @@
   const teamCode = params.get('team') || '';
   const missionCode = params.get('mission') || '';
   const token = params.get('token') || '';
+  const actor = params.get('actor') || '';
   const btn = document.getElementById('gpsBtn');
   const msg = document.getElementById('msg');
   const info = document.getElementById('info');
@@ -60,6 +61,7 @@
       team_code: teamCode,
       mission_code: missionCode,
       token,
+      actor,
       lat: position.coords.latitude,
       lng: position.coords.longitude
     };
