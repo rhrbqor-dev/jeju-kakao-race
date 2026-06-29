@@ -1467,28 +1467,10 @@ async function sendPhoto(){
 </script></body></html>`);
 });
 
-app.get('/gps', (req, res) => {
-  const team = String(req.query.team || '');
-  const mission = String(req.query.mission || '');
-  const token = String(req.query.token || '');
-  res.status(200).type('html').send(`<!doctype html>
-<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>GPS 인증</title>
-<style>body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;background:#f6f7f9;color:#111827}main{max-width:560px;margin:0 auto;padding:20px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:18px}button{font:inherit;width:100%;border:1px solid #111827;border-radius:10px;padding:12px;background:#111827;color:#fff;cursor:pointer}.msg{white-space:pre-line;margin-top:12px}</style></head>
-<body><main><div class="card"><h2>GPS 인증</h2><p>팀 코드: <b>${team}</b><br>미션: <b>${mission}</b></p><button onclick="verify()">현재 위치로 인증하기</button><div id="msg" class="msg"></div></div></main>
-<script>
-function verify(){
- const msg=document.getElementById('msg');
- if(!navigator.geolocation){msg.textContent='이 브라우저는 위치 인증을 지원하지 않습니다.';return;}
- msg.textContent='위치 확인 중입니다...';
- navigator.geolocation.getCurrentPosition(async(pos)=>{
-  try{
-   const r=await fetch('/api/public/verify/location',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({team_code:${JSON.stringify(team)},mission_code:${JSON.stringify(mission)},token:${JSON.stringify(token)},lat:pos.coords.latitude,lng:pos.coords.longitude})});
-   const data=await r.json();
-   msg.textContent=data.message||JSON.stringify(data);
-  }catch(e){msg.textContent='인증 오류: '+e.message;}
- },(err)=>{msg.textContent='위치 권한을 허용해야 인증할 수 있습니다.\n'+err.message;},{enableHighAccuracy:true,timeout:15000,maximumAge:0});
-}
-</script></body></html>`);
+app.get('/gps', (_req, res) => {
+  // GPS 페이지는 public/gps.html 한 곳만 사용합니다.
+  // 이전처럼 server.js 안에 HTML을 직접 넣으면 수정 과정에서 버튼 스크립트가 끊길 수 있어 분리했습니다.
+  res.sendFile(path.join(publicDir, 'gps.html'));
 });
 
 app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) => {
@@ -1526,28 +1508,45 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
 
 app.post('/api/public/verify/location', async (req, res) => {
   try {
+    if (!dbReady) {
+      return res.status(503).json({
+        ok: false,
+        message: `서버 DB 준비가 아직 끝나지 않았습니다. 잠시 후 다시 시도해주세요.${dbInitError ? '\n' + dbInitError : ''}`,
+      });
+    }
+
     const event = await getActiveEvent();
-    const { team_code, mission_code, token, lat, lng } = req.body;
+    const { team_code = '', mission_code = '', token = '', lat, lng } = req.body || {};
+    const userLat = Number(lat);
+    const userLng = Number(lng);
+
+    if (!team_code || !mission_code || !token) {
+      return res.status(400).json({ ok: false, message: 'GPS 인증 주소 정보가 부족합니다. 카카오톡 미션 버튼에서 다시 열어주세요.' });
+    }
+    if (!Number.isFinite(userLat) || !Number.isFinite(userLng)) {
+      return res.status(400).json({ ok: false, message: '휴대폰 위치값을 읽지 못했습니다. 위치 권한을 허용한 뒤 다시 시도해주세요.' });
+    }
+
     const team = await getTeamByCodeAndToken(event.id, team_code, token);
     const mission = await getMissionByCode(event.id, mission_code);
 
     if (!team || !mission || mission.mission_type !== 'gps') {
-      return res.status(400).json({ ok: false, message: '팀/미션 인증 정보가 올바르지 않습니다.' });
+      return res.status(400).json({ ok: false, message: '팀/미션 인증 정보가 올바르지 않습니다. 카카오톡 미션 버튼에서 다시 열어주세요.' });
     }
-    if (mission.latitude === null || mission.longitude === null) {
-      return res.status(400).json({ ok: false, message: '미션 좌표가 설정되어 있지 않습니다.' });
+    if (mission.latitude === null || mission.longitude === null || mission.latitude === undefined || mission.longitude === undefined) {
+      return res.status(400).json({ ok: false, message: '관리자 페이지에서 이 GPS 미션의 위도/경도를 먼저 설정해주세요.' });
     }
     if (await isMissionAlreadyCompleted(team.id, mission.id)) {
-      return res.json({ ok: true, message: '이미 완료된 미션입니다.' });
+      return res.json({ ok: true, message: '이미 완료된 GPS 미션입니다.' });
     }
 
-    const distance = haversineMeters(Number(lat), Number(lng), Number(mission.latitude), Number(mission.longitude));
+    const distance = haversineMeters(userLat, userLng, Number(mission.latitude), Number(mission.longitude));
     const ok = distance <= Number(mission.radius_m || 80);
 
     await query(
       `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, gps_lat, gps_lng, distance_m, status, score)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9);`,
-      [event.id, team.id, mission.id, `GPS ${Math.round(distance)}m`, Number(lat), Number(lng), distance, ok ? 'approved' : 'rejected', ok ? mission.score : 0]
+      [event.id, team.id, mission.id, `GPS ${Math.round(distance)}m`, userLat, userLng, distance, ok ? 'approved' : 'rejected', ok ? mission.score : 0]
     );
 
     if (ok) {
@@ -1564,7 +1563,8 @@ app.post('/api/public/verify/location', async (req, res) => {
         : `현재 위치가 미션 장소에서 ${Math.round(distance)}m 떨어져 있습니다. 현장에서 다시 시도해주세요.`,
     });
   } catch (error) {
-    res.status(500).json({ ok: false, message: error.message });
+    console.error('GPS verify failed:', error);
+    res.status(500).json({ ok: false, message: 'GPS 인증 처리 중 서버 오류가 발생했습니다. ' + error.message });
   }
 });
 
