@@ -532,13 +532,19 @@ async function respondKakao(res, response, event = null, team = null, kakaoUserI
 }
 
 function isTeamNameEditCommand(text) {
-  return ['팀명 수정', '팀이름 수정', '팀 이름 수정', '이름 수정', '팀명변경', '팀명 변경'].includes(
+  return ['팀명 수정', '팀이름 수정', '팀 이름 수정', '팀명변경', '팀명 변경'].includes(
+    String(text).trim().toLowerCase()
+  );
+}
+
+function isMemberNameEditCommand(text) {
+  return ['이름 수정', '닉네임 수정', '내 이름 수정', '내 닉네임 수정', '이름변경', '이름 변경', '닉네임변경', '닉네임 변경'].includes(
     String(text).trim().toLowerCase()
   );
 }
 
 function isBlockedTeamName(text) {
-  return ['게임 시작', '시작', '참여', '참가', '참여하기', '도움말', '미션 목록', '순위', '랭킹', '내 점수', '팀 생성', '팀 참가', '팀명 수정'].includes(
+  return ['게임 시작', '시작', '참여', '참가', '참여하기', '도움말', '미션 목록', '순위', '랭킹', '내 점수', '팀 생성', '팀 참가', '팀명 수정', '이름 수정', '닉네임 수정'].includes(
     String(text).trim()
   );
 }
@@ -737,7 +743,7 @@ ${renderMissionTemplate(explanation, values)}`;
 }
 
 const startQuickReplies = ['팀 생성', '팀 참가', '도움말'];
-const menuQuickReplies = ['미션 목록', '내 점수', '순위', '팀원 목록', '팀명 수정', '도움말'];
+const menuQuickReplies = ['미션 목록', '내 점수', '순위', '팀원 목록', '이름 수정', '팀명 수정', '도움말'];
 
 function isStartCommand(text) {
   return ['시작', '게임 시작', '참여하기', '참가', 'start'].includes(String(text).trim().toLowerCase());
@@ -1145,7 +1151,7 @@ async function handleKakaoSkill(req, res) {
       }
 
       if (isBlockedTeamName(memberName)) {
-        return respondKakao(res, kakaoText('사용할 수 없는 이름입니다.\n다른 이름 또는 닉네임을 입력해주세요.\n예:홍길동'));
+        return respondKakao(res, kakaoText('사용할 수 없는 이름입니다.\n다른 이름 또는 닉네임을 입력해주세요.\n예: 홍길동'));
       }
 
       team = await createTeam(event.id, kakaoUserId, dataTeamName, memberName.slice(0, 20));
@@ -1214,7 +1220,7 @@ async function handleKakaoSkill(req, res) {
       const memberName = utterance.replace(/^(이름|닉네임)[:：]?/i, '').trim();
 
       if (!memberName || memberName.length < 2) {
-        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동'));
+        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예:홍길동'));
       }
 
       if (memberName.length > 20) {
@@ -1298,7 +1304,67 @@ async function handleKakaoSkill(req, res) {
       );
     }
 
-    // 6. 아직 팀 등록이 안 된 사용자
+    // 6. 이름/닉네임 수정 대기 상태
+    if (team && userState?.state === 'WAIT_MEMBER_RENAME') {
+      const newMemberName = utterance.replace(/^(이름|닉네임)[:：]?/i, '').trim();
+      const member = await getTeamMember(event.id, kakaoUserId);
+
+      if (!member) {
+        await clearUserState(event.id, kakaoUserId);
+        return respondKakao(
+          res,
+          kakaoText('팀원 정보를 찾을 수 없습니다. 다시 참가 등록을 확인해주세요.', menuQuickReplies),
+          event,
+          team,
+          kakaoUserId
+        );
+      }
+
+      if (!newMemberName || newMemberName.length < 2) {
+        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.
+예: 홍길동', ['취소']), event, team, kakaoUserId);
+      }
+
+      if (newMemberName.length > 20) {
+        return respondKakao(res, kakaoText('이름 또는 닉네임은 20글자 이하로 입력해주세요.', ['취소']), event, team, kakaoUserId);
+      }
+
+      if (isBlockedTeamName(newMemberName)) {
+        return respondKakao(res, kakaoText('사용할 수 없는 이름입니다.
+다른 이름 또는 닉네임을 입력해주세요.
+예: 홍길동', ['취소']), event, team, kakaoUserId);
+      }
+
+      const oldMemberName = member.member_name || (member.role === 'leader' ? '팀장' : '팀원');
+      const safeMemberName = newMemberName.slice(0, 20);
+
+      await query(
+        `UPDATE team_members
+         SET member_name=$1
+         WHERE event_id=$2 AND kakao_user_id=$3
+         RETURNING *;`,
+        [safeMemberName, event.id, kakaoUserId]
+      );
+
+      if (member.role === 'leader') {
+        await query(`UPDATE teams SET leader_name=$1 WHERE id=$2;`, [safeMemberName, team.id]);
+      }
+
+      await clearUserState(event.id, kakaoUserId);
+      await addTeamNotice(event.id, team.id, `${oldMemberName}님이 이름을 ${safeMemberName}(으)로 변경했습니다.`, kakaoUserId);
+
+      return respondKakao(
+        res,
+        kakaoText(`이름 또는 닉네임이 수정되었습니다.
+
+현재 표시 이름: ${safeMemberName}`, menuQuickReplies),
+        event,
+        team,
+        kakaoUserId
+      );
+    }
+
+    // 7. 아직 팀 등록이 안 된 사용자
     if (!team) {
       if (isStartCommand(utterance)) {
         return respondKakao(
@@ -1328,7 +1394,7 @@ async function handleKakaoSkill(req, res) {
       );
     }
 
-    // 7. 이미 팀에 속한 사용자
+    // 8. 이미 팀에 속한 사용자
     if (!utterance) {
       return respondKakao(res, kakaoText('입력값이 비어 있습니다. QR코드를 스캔하거나 메뉴를 입력해주세요.', menuQuickReplies), event, team, kakaoUserId);
     }
@@ -1347,6 +1413,23 @@ async function handleKakaoSkill(req, res) {
       return respondKakao(
         res,
         kakaoText(`${team.team_name}님, 이미 참가 등록되어 있습니다.\n\n팀코드: ${team.team_code}`, menuQuickReplies),
+        event,
+        team,
+        kakaoUserId
+      );
+    }
+
+    if (isMemberNameEditCommand(utterance)) {
+      const member = await getTeamMember(event.id, kakaoUserId);
+      const currentName = member?.member_name || (member?.role === 'leader' ? '팀장' : '팀원');
+
+      await setUserState(event.id, kakaoUserId, 'WAIT_MEMBER_RENAME');
+      return respondKakao(
+        res,
+        kakaoText(`현재 표시 이름: ${currentName}
+
+새로운 이름 또는 닉네임을 입력해주세요.
+예: 홍길동`, ['취소']),
         event,
         team,
         kakaoUserId
@@ -1378,7 +1461,7 @@ async function handleKakaoSkill(req, res) {
       return respondKakao(
         res,
         kakaoText(
-          '사용법\n\n1. 현장 QR코드를 스캔합니다.\n2. 챗봇이 내는 문제에 답합니다.\n3. 사진/GPS 미션은 버튼을 눌러 인증합니다.\n4. 내 점수 또는 순위를 입력해 확인합니다.\n5. 팀명을 바꾸려면 "팀명 수정"을 입력합니다.\n6. 팀원을 보려면 "팀원 목록"을 입력합니다.',
+          '사용법\n\n1. 현장 QR코드를 스캔합니다.\n2. 챗봇이 내는 문제에 답합니다.\n3. 사진/GPS 미션은 버튼을 눌러 인증합니다.\n4. 내 점수 또는 순위를 입력해 확인합니다.\n5. 내 이름을 바꾸려면 "이름 수정"을 입력합니다.\n6. 팀명을 바꾸려면 "팀명 수정"을 입력합니다.\n7. 팀원을 보려면 "팀원 목록"을 입력합니다.',
           menuQuickReplies
         ),
         event,
