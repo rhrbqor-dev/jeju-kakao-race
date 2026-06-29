@@ -179,6 +179,38 @@ function isPhotoAutoApprovalActive(settings = {}, now = new Date()) {
   return t >= start.getTime() && t <= end.getTime();
 }
 
+
+const DEFAULT_MESSAGE_SETTINGS = {
+  start_message: '제주 AI 탐험대에 오신 것을 환영합니다!\n\n새 팀을 만들거나 기존 팀에 참가해주세요.',
+  returning_team_message: '{team_name} 팀으로 참여 중입니다.\n\n현장 QR코드를 스캔하거나 메뉴를 선택해주세요.',
+  create_team_prompt: '먼저 팀 이름을 입력해주세요.\n예: 귤탐험대',
+  team_name_saved_message: '{team_name} 팀으로 등록하겠습니다.\n\n이제 팀원 목록에 표시될 이름 또는 닉네임을 입력해주세요.\n예: 홍길동',
+  team_created_message: '{team_name} 등록 완료!\n\n팀장: {member_name}\n팀코드: {team_code}\n\n이제 현장 QR코드를 스캔하면 미션이 시작됩니다.',
+  need_team_message: '먼저 팀을 만들거나 기존 팀에 참가해주세요.',
+  finish_message: '축하합니다! 완주 처리되었습니다.\n\n팀명: {team_name}\n수행자: {actor_name}\n최종 점수: {total}점\n현재 순위: {rank}위',
+};
+
+function normalizeMessageSettings(value = {}) {
+  const merged = { ...DEFAULT_MESSAGE_SETTINGS, ...(value && typeof value === 'object' ? value : {}) };
+  const out = {};
+  for (const key of Object.keys(DEFAULT_MESSAGE_SETTINGS)) {
+    const text = String(merged[key] ?? '').trim();
+    out[key] = text || DEFAULT_MESSAGE_SETTINGS[key];
+  }
+  return out;
+}
+
+async function getMessageSettings(eventId) {
+  return normalizeMessageSettings(await getSetting(eventId, 'chatbot_messages', DEFAULT_MESSAGE_SETTINGS));
+}
+
+function renderTemplate(template = '', variables = {}) {
+  return String(template || '').replace(/\{([a-zA-Z0-9_]+)\}/g, (match, key) => {
+    const value = variables[key];
+    return value === undefined || value === null ? match : String(value);
+  });
+}
+
 async function initDb() {
   await query(`
     CREATE TABLE IF NOT EXISTS events (
@@ -1020,7 +1052,7 @@ async function afterMissionCompleted(event, team, mission, kakaoUserId, actorNam
   return total;
 }
 
-async function handleAnswer(req, event, team, utterance, kakaoUserId) {
+async function handleAnswer(req, event, team, utterance, kakaoUserId, messages = DEFAULT_MESSAGE_SETTINGS) {
   const teamReload = (await query(`SELECT * FROM teams WHERE id=$1;`, [team.id])).rows[0];
   const member = await getTeamMember(event.id, kakaoUserId);
   const actorName = member?.member_name || '팀원';
@@ -1109,7 +1141,13 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId) {
     const myRank = ranking.find((r) => r.id === team.id)?.rank || '-';
 
     return kakaoText(
-      `축하합니다! 완주 처리되었습니다.\n\n팀명: ${team.team_name}\n수행자: ${actorName}\n최종 점수: ${total}점\n현재 순위: ${myRank}위`,
+      renderTemplate(messages.finish_message, {
+        team_name: team.team_name,
+        team_code: team.team_code,
+        actor_name: actorName,
+        total,
+        rank: myRank,
+      }),
       ['순위', '내 점수']
     );
   }
@@ -1187,6 +1225,7 @@ async function handleKakaoSkill(req, res) {
     }
 
     const event = await getActiveEvent();
+    const messages = await getMessageSettings(event.id);
     const normalUtterance = String(req.body?.userRequest?.utterance || '').trim();
     const qrMissionCode = extractMissionCodeFromQr(req.body);
     const utterance = String(qrMissionCode || normalUtterance).trim();
@@ -1221,7 +1260,7 @@ async function handleKakaoSkill(req, res) {
       }
 
       await setUserState(event.id, kakaoUserId, 'WAIT_LEADER_NAME', { teamName: teamName.slice(0, 30) });
-      return respondKakao(res, kakaoText(`${teamName.slice(0, 30)} 팀으로 등록하겠습니다.\n\n이제 팀원 목록에 표시될 이름 또는 닉네임을 입력해주세요.\n예: 홍길동`, ['취소']));
+      return respondKakao(res, kakaoText(renderTemplate(messages.team_name_saved_message, { team_name: teamName.slice(0, 30) }), ['취소']));
     }
 
     if (!team && userState?.state === 'WAIT_LEADER_NAME') {
@@ -1229,7 +1268,7 @@ async function handleKakaoSkill(req, res) {
       const teamName = String(data.teamName || '').trim();
       if (!teamName) {
         await setUserState(event.id, kakaoUserId, 'WAIT_TEAM_NAME', {});
-        return respondKakao(res, kakaoText('팀 이름을 먼저 입력해주세요.\n예: 귤탐험대', ['취소']));
+        return respondKakao(res, kakaoText(messages.create_team_prompt, ['취소']));
       }
       if (memberName.length < 2) {
         return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동', ['취소']));
@@ -1241,7 +1280,11 @@ async function handleKakaoSkill(req, res) {
       return respondKakao(
         res,
         kakaoText(
-          `${team.team_name} 등록 완료!\n\n팀장: ${memberName}\n팀코드: ${team.team_code}\n\n이제 현장 QR코드를 스캔하면 미션이 시작됩니다.`,
+          renderTemplate(messages.team_created_message, {
+            team_name: team.team_name,
+            member_name: memberName,
+            team_code: team.team_code,
+          }),
           ['미션 목록', '팀원 목록', '도움말']
         ),
         event,
@@ -1318,12 +1361,12 @@ async function handleKakaoSkill(req, res) {
       if (!team) {
         return respondKakao(
           res,
-          kakaoText('제주 AI 탐험대에 오신 것을 환영합니다!\n\n새 팀을 만들거나 기존 팀에 참가해주세요.', startQuickReplies)
+          kakaoText(messages.start_message, startQuickReplies)
         );
       }
       return respondKakao(
         res,
-        kakaoText(`${team.team_name} 팀으로 참여 중입니다.\n\n현장 QR코드를 스캔하거나 메뉴를 선택해주세요.`, menuQuickReplies),
+        kakaoText(renderTemplate(messages.returning_team_message, { team_name: team.team_name, team_code: team.team_code }), menuQuickReplies),
         event,
         team,
         kakaoUserId
@@ -1332,7 +1375,7 @@ async function handleKakaoSkill(req, res) {
 
     if (!team && isCreateTeamCommand(utterance)) {
       await setUserState(event.id, kakaoUserId, 'WAIT_TEAM_NAME', {});
-      return respondKakao(res, kakaoText('먼저 팀 이름을 입력해주세요.\n예: 귤탐험대', ['취소']));
+      return respondKakao(res, kakaoText(messages.create_team_prompt, ['취소']));
     }
 
     if (!team && isJoinTeamCommand(utterance)) {
@@ -1341,7 +1384,7 @@ async function handleKakaoSkill(req, res) {
     }
 
     if (!team) {
-      return respondKakao(res, kakaoText('먼저 팀을 만들거나 기존 팀에 참가해주세요.', startQuickReplies));
+      return respondKakao(res, kakaoText(messages.need_team_message, startQuickReplies));
     }
 
     if (isTeamNameEditCommand(utterance)) {
@@ -1374,7 +1417,7 @@ async function handleKakaoSkill(req, res) {
       return respondKakao(res, await handleMissionStart(req, event, team, utterance.toUpperCase(), kakaoUserId), event, team, kakaoUserId);
     }
 
-    return respondKakao(res, await handleAnswer(req, event, team, utterance, kakaoUserId), event, team, kakaoUserId);
+    return respondKakao(res, await handleAnswer(req, event, team, utterance, kakaoUserId, messages), event, team, kakaoUserId);
   } catch (error) {
     console.error('Kakao skill error:', error);
     return res.status(200).json(kakaoText(`서버 처리 중 오류가 발생했습니다.\n\n${error.message}`));
@@ -1889,6 +1932,19 @@ app.patch('/api/admin/settings/photo-auto-approval', requireAdmin, async (req, r
     active: isPhotoAutoApprovalActive(settings),
     server_time: nowIso(),
   });
+});
+
+
+app.get('/api/admin/settings/messages', requireAdmin, async (_req, res) => {
+  const event = await getActiveEvent();
+  res.json({ ok: true, settings: await getMessageSettings(event.id), defaults: DEFAULT_MESSAGE_SETTINGS });
+});
+
+app.patch('/api/admin/settings/messages', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent();
+  const settings = normalizeMessageSettings(req.body || {});
+  await setSetting(event.id, 'chatbot_messages', settings);
+  res.json({ ok: true, settings, defaults: DEFAULT_MESSAGE_SETTINGS });
 });
 
 app.get('/api/admin/status', requireAdmin, async (_req, res) => {

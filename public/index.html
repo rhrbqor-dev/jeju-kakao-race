@@ -71,6 +71,7 @@
         <button class="secondary" onclick="showTab('submissions')">제출내역</button>
         <button class="secondary" onclick="showTab('missions')">미션설정</button>
         <button class="secondary" onclick="showTab('settings')">사진 자동 승인</button>
+        <button class="secondary" onclick="showTab('messages')">챗봇 문구 설정</button>
         <button class="secondary" onclick="enableNotifications()">브라우저 알림 허용</button>
         <button class="secondary" onclick="downloadCsv()">CSV 저장</button>
         <button class="danger" onclick="resetEvent()">팀/제출 초기화</button>
@@ -146,6 +147,36 @@
           <div class="notice">
             <b>현재 상태</b>
             <div id="photoAutoStatus" style="margin-top:8px; white-space:pre-wrap;">설정을 불러오는 중입니다.</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-messages" class="section card hidden">
+        <h2>챗봇 문구 설정</h2>
+        <p class="small">게임 시작, 팀 생성, 완주 종료처럼 미션과 별도로 표시되는 카카오톡 안내 문구를 수정합니다. 아래 치환값을 문구 안에 넣을 수 있습니다: {team_name}, {team_code}, {member_name}, {actor_name}, {total}, {rank}</p>
+        <div class="grid two">
+          <div>
+            <label>게임 시작 멘트</label>
+            <textarea id="msgStart" rows="4"></textarea>
+            <label>이미 팀에 속한 참가자가 게임 시작/도움말을 눌렀을 때</label>
+            <textarea id="msgReturning" rows="4"></textarea>
+            <label>팀 생성 버튼을 눌렀을 때 팀명 입력 안내</label>
+            <textarea id="msgCreatePrompt" rows="3"></textarea>
+            <label>팀 이름 입력 후 이름/닉네임 입력 안내</label>
+            <textarea id="msgTeamNameSaved" rows="4"></textarea>
+          </div>
+          <div>
+            <label>팀 생성 완료 멘트</label>
+            <textarea id="msgTeamCreated" rows="5"></textarea>
+            <label>팀 없이 다른 말을 입력했을 때 안내</label>
+            <textarea id="msgNeedTeam" rows="3"></textarea>
+            <label>완주 시 종료 멘트</label>
+            <textarea id="msgFinish" rows="5"></textarea>
+            <div style="height:12px"></div>
+            <button onclick="saveMessageSettings()">문구 저장</button>
+            <button class="secondary" onclick="loadMessageSettings()">다시 불러오기</button>
+            <button class="secondary" onclick="resetMessageSettings()">기본 문구로 채우기</button>
+            <p id="messageSettingsStatus" class="small"></p>
           </div>
         </div>
       </section>
@@ -231,6 +262,50 @@ async function savePhotoAutoApproval() {
   alert('사진 자동 승인 설정이 저장되었습니다.');
 }
 
+
+let messageDefaults = null;
+function fillMessageForm(s = {}) {
+  $('msgStart').value = s.start_message || '';
+  $('msgReturning').value = s.returning_team_message || '';
+  $('msgCreatePrompt').value = s.create_team_prompt || '';
+  $('msgTeamNameSaved').value = s.team_name_saved_message || '';
+  $('msgTeamCreated').value = s.team_created_message || '';
+  $('msgNeedTeam').value = s.need_team_message || '';
+  $('msgFinish').value = s.finish_message || '';
+}
+function collectMessageForm() {
+  return {
+    start_message: $('msgStart').value,
+    returning_team_message: $('msgReturning').value,
+    create_team_prompt: $('msgCreatePrompt').value,
+    team_name_saved_message: $('msgTeamNameSaved').value,
+    team_created_message: $('msgTeamCreated').value,
+    need_team_message: $('msgNeedTeam').value,
+    finish_message: $('msgFinish').value,
+  };
+}
+async function loadMessageSettings() {
+  const data = await api('/api/admin/settings/messages');
+  messageDefaults = data.defaults || null;
+  fillMessageForm(data.settings || {});
+  $('messageSettingsStatus').textContent = '문구 설정을 불러왔습니다.';
+}
+async function saveMessageSettings() {
+  const data = await api('/api/admin/settings/messages', { method:'PATCH', body: JSON.stringify(collectMessageForm()) });
+  messageDefaults = data.defaults || messageDefaults;
+  fillMessageForm(data.settings || {});
+  $('messageSettingsStatus').textContent = '문구 설정이 저장되었습니다.';
+  alert('챗봇 문구 설정이 저장되었습니다.');
+}
+async function resetMessageSettings() {
+  if (!messageDefaults) {
+    const data = await api('/api/admin/settings/messages');
+    messageDefaults = data.defaults || data.settings || {};
+  }
+  fillMessageForm(messageDefaults || {});
+  $('messageSettingsStatus').textContent = '기본 문구로 채웠습니다. 저장 버튼을 눌러야 실제 반영됩니다.';
+}
+
 async function login() {
   adminPassword = $('adminPassword').value.trim();
   try {
@@ -240,6 +315,7 @@ async function login() {
     $('appBox').classList.remove('hidden');
     await loadAll();
     await loadPhotoAutoApproval();
+    await loadMessageSettings();
   } catch(e) { $('loginMsg').textContent = e.message; }
 }
 function logout() { localStorage.removeItem('adminPassword'); location.reload(); }
@@ -316,8 +392,9 @@ async function review(id, decision) {
   await loadAll();
 }
 function showTab(name) {
-  ['ranking','submissions','missions','settings'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
+  ['ranking','submissions','missions','settings','messages'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
   if (name === 'settings') loadPhotoAutoApproval().catch(e => alert(e.message));
+  if (name === 'messages') loadMessageSettings().catch(e => alert(e.message));
 }
 function editMission(id) {
   const m = missionsCache.find(x => x.id === id); if (!m) return;
