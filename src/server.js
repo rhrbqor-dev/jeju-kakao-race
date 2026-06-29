@@ -118,6 +118,67 @@ async function query(sql, params = []) {
   return pool.query(sql, params);
 }
 
+
+async function getSetting(eventId, settingKey, defaultValue = {}) {
+  const result = await query(
+    `SELECT setting_value FROM app_settings WHERE event_id=$1 AND setting_key=$2 LIMIT 1;`,
+    [eventId, settingKey]
+  );
+  if (!result.rows.length) return defaultValue;
+  const value = result.rows[0].setting_value;
+  if (!value) return defaultValue;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return defaultValue;
+  }
+}
+
+async function setSetting(eventId, settingKey, settingValue = {}) {
+  await query(
+    `INSERT INTO app_settings(event_id, setting_key, setting_value, updated_at)
+     VALUES ($1,$2,$3,NOW())
+     ON CONFLICT(event_id, setting_key)
+     DO UPDATE SET setting_value=$3, updated_at=NOW();`,
+    [eventId, settingKey, JSON.stringify(settingValue || {})]
+  );
+}
+
+function normalizePhotoAutoApprovalSettings(value = {}) {
+  return {
+    enabled: Boolean(value.enabled),
+    use_time_window: Boolean(value.use_time_window),
+    start_at: value.start_at ? String(value.start_at) : '',
+    end_at: value.end_at ? String(value.end_at) : '',
+  };
+}
+
+async function getPhotoAutoApprovalSettings(eventId) {
+  return normalizePhotoAutoApprovalSettings(
+    await getSetting(eventId, 'photo_auto_approval', {
+      enabled: false,
+      use_time_window: false,
+      start_at: '',
+      end_at: '',
+    })
+  );
+}
+
+function isPhotoAutoApprovalActive(settings = {}, now = new Date()) {
+  const s = normalizePhotoAutoApprovalSettings(settings);
+  if (!s.enabled) return false;
+  if (!s.use_time_window) return true;
+  if (!s.start_at || !s.end_at) return false;
+
+  const start = new Date(s.start_at);
+  const end = new Date(s.end_at);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return false;
+  if (end.getTime() < start.getTime()) return false;
+  const t = now.getTime();
+  return t >= start.getTime() && t <= end.getTime();
+}
+
 async function initDb() {
   await query(`
     CREATE TABLE IF NOT EXISTS events (
@@ -231,6 +292,21 @@ async function initDb() {
       read_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE(notice_id, kakao_user_id)
     );
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS app_settings (
+      id SERIAL PRIMARY KEY,
+      event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+      setting_key TEXT NOT NULL,
+      setting_value JSONB NOT NULL DEFAULT '{}',
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(event_id, setting_key)
+    );
+  `);
+
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_app_settings_event_key ON app_settings(event_id, setting_key);
   `);
 
   await query(`
@@ -1581,14 +1657,19 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
 
     const actor = await resolveActorForTeam(event.id, team.id, actorId, team.leader_name || '팀원');
 
+    const photoAutoApproval = await getPhotoAutoApprovalSettings(event.id);
+    const autoApprove = isPhotoAutoApprovalActive(photoAutoApproval);
+    const finalStatus = autoApprove ? 'approved' : 'pending';
+    const finalScore = autoApprove ? Number(mission.score || 0) : 0;
+
     const recentDuplicate = await query(
-      `SELECT id
+      `SELECT id, status
        FROM submissions
        WHERE event_id=$1
          AND team_id=$2
          AND mission_id=$3
          AND actor_kakao_user_id=$4
-         AND status='pending'
+         AND status IN ('pending', 'approved', 'correct')
          AND submitted_at > NOW() - INTERVAL '15 seconds'
        ORDER BY submitted_at DESC
        LIMIT 1;`,
@@ -1596,21 +1677,36 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
     );
 
     if (recentDuplicate.rows.length) {
+      const approvedText = recentDuplicate.rows[0].status === 'approved' || recentDuplicate.rows[0].status === 'correct'
+        ? '이미 사진이 승인되었습니다.'
+        : '이미 사진이 접수되었습니다.';
       return res.json({
         ok: true,
         duplicate: true,
-        message: `이미 사진이 접수되었습니다.
-업로드한 팀원: ${actor.actor_name}
-관리자 승인 후 점수가 반영됩니다.`,
+        message: `${approvedText}
+업로드한 팀원: ${actor.actor_name}${recentDuplicate.rows[0].status === 'pending' ? '\n관리자 승인 후 점수가 반영됩니다.' : ''}`,
       });
     }
 
     const insertResult = await query(
-      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, image_data, image_mime, actor_kakao_user_id, actor_name, submission_key, status, score)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending',0)
+      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, image_data, image_mime, actor_kakao_user_id, actor_name, submission_key, status, score, reviewed_at, review_note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,CASE WHEN $10='approved' THEN NOW() ELSE NULL END,$12)
        ON CONFLICT DO NOTHING
-       RETURNING id;`,
-      [event.id, team.id, mission.id, comment, String(image_data), String(image_mime || 'image/jpeg'), actor.actor_kakao_user_id, actor.actor_name, submissionKey]
+       RETURNING id, status;`,
+      [
+        event.id,
+        team.id,
+        mission.id,
+        comment,
+        String(image_data),
+        String(image_mime || 'image/jpeg'),
+        actor.actor_kakao_user_id,
+        actor.actor_name,
+        submissionKey,
+        finalStatus,
+        finalScore,
+        autoApprove ? '사진 자동 승인' : '',
+      ]
     );
 
     if (!insertResult.rows.length) {
@@ -1618,8 +1714,25 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
         ok: true,
         duplicate: true,
         message: `이미 사진이 접수되었습니다.
+업로드한 팀원: ${actor.actor_name}${autoApprove ? '\n자동 승인 설정에 따라 이미 승인 처리되었습니다.' : '\n관리자 승인 후 점수가 반영됩니다.'}`,
+      });
+    }
+
+    if (autoApprove) {
+      await maybeMarkFinished(team, event.id);
+      const total = await teamTotalScore(team.id);
+      await addTeamNotice(
+        event.id,
+        team.id,
+        `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} 사진을 업로드했고 자동 승인되었습니다. 현재 팀 점수는 ${total}점입니다.`,
+        actor.actor_kakao_user_id
+      );
+      return res.json({
+        ok: true,
+        auto_approved: true,
+        message: `사진이 접수되어 자동 승인되었습니다.
 업로드한 팀원: ${actor.actor_name}
-관리자 승인 후 점수가 반영됩니다.`,
+획득 점수: ${mission.score}점`,
       });
     }
 
@@ -1736,6 +1849,45 @@ app.get('/api/admin/summary', requireAdmin, async (_req, res) => {
     missionCount: missionCount.rows[0].count,
     pendingCount: pendingCount.rows[0].count,
     topTeam: ranking[0] || null,
+  });
+});
+
+
+app.get('/api/admin/settings/photo-auto-approval', requireAdmin, async (_req, res) => {
+  const event = await getActiveEvent();
+  const settings = await getPhotoAutoApprovalSettings(event.id);
+  res.json({
+    ok: true,
+    settings,
+    active: isPhotoAutoApprovalActive(settings),
+    server_time: nowIso(),
+  });
+});
+
+app.patch('/api/admin/settings/photo-auto-approval', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent();
+  const settings = normalizePhotoAutoApprovalSettings(req.body || {});
+
+  if (settings.enabled && settings.use_time_window) {
+    if (!settings.start_at || !settings.end_at) {
+      return res.status(400).json({ ok: false, message: '시간 설정을 켠 경우 시작 시간과 종료 시간을 모두 입력해야 합니다.' });
+    }
+    const start = new Date(settings.start_at);
+    const end = new Date(settings.end_at);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      return res.status(400).json({ ok: false, message: '시작/종료 시간 형식이 올바르지 않습니다.' });
+    }
+    if (end.getTime() < start.getTime()) {
+      return res.status(400).json({ ok: false, message: '종료 시간은 시작 시간보다 뒤여야 합니다.' });
+    }
+  }
+
+  await setSetting(event.id, 'photo_auto_approval', settings);
+  res.json({
+    ok: true,
+    settings,
+    active: isPhotoAutoApprovalActive(settings),
+    server_time: nowIso(),
   });
 });
 

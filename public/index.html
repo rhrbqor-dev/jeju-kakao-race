@@ -73,6 +73,7 @@
         <button class="secondary" onclick="showTab('ranking')">순위표</button>
         <button class="secondary" onclick="showTab('submissions')">제출내역</button>
         <button class="secondary" onclick="showTab('missions')">미션설정</button>
+        <button class="secondary" onclick="showTab('settings')">사진 자동 승인</button>
         <button class="secondary" onclick="enableNotifications()">브라우저 알림 허용</button>
         <button class="secondary" onclick="downloadCsv()">CSV 저장</button>
         <button class="danger" onclick="resetEvent()">팀/제출 초기화</button>
@@ -127,6 +128,30 @@
           <button class="secondary" onclick="clearMissionForm()">새 미션 입력</button>
         </div>
       </section>
+
+      <section id="tab-settings" class="section card hidden">
+        <h2>사진 자동 승인 설정</h2>
+        <p class="small">사진 미션을 운영자가 직접 승인하지 않고 자동으로 승인할지 설정합니다. 자동 승인 ON + 시간 설정 OFF이면 항상 자동 승인됩니다. 시간 설정 ON이면 입력한 시간 안에 업로드된 사진만 자동 승인됩니다.</p>
+        <div class="grid two">
+          <div>
+            <label class="inline-check"><input id="photoAutoEnabled" type="checkbox" onchange="togglePhotoAutoTimeFields()" /> 사진 자동 승인 ON</label>
+            <label class="inline-check"><input id="photoAutoUseTime" type="checkbox" onchange="togglePhotoAutoTimeFields()" /> 시간 설정 사용</label>
+            <div id="photoAutoTimeBox">
+              <label>자동 승인 시작 시간</label>
+              <input id="photoAutoStart" type="datetime-local" />
+              <label>자동 승인 종료 시간</label>
+              <input id="photoAutoEnd" type="datetime-local" />
+            </div>
+            <div style="height:12px"></div>
+            <button onclick="savePhotoAutoApproval()">설정 저장</button>
+            <button class="secondary" onclick="loadPhotoAutoApproval()">설정 다시 불러오기</button>
+          </div>
+          <div class="notice">
+            <b>현재 상태</b>
+            <div id="photoAutoStatus" style="margin-top:8px; white-space:pre-wrap;">설정을 불러오는 중입니다.</div>
+          </div>
+        </div>
+      </section>
     </section>
   </main>
 
@@ -148,6 +173,66 @@ function esc(v) { return String(v ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','
 function formatTime(v) { return v ? new Date(v).toLocaleString('ko-KR') : '-'; }
 function duration(sec) { if (!sec) return '-'; const m=Math.floor(sec/60), s=sec%60; return `${m}분 ${s}초`; }
 function badge(status) { return `<span class="badge ${esc(status)}">${esc(status)}</span>`; }
+function toDatetimeLocalValue(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+function datetimeLocalToIso(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toISOString();
+}
+function togglePhotoAutoTimeFields() {
+  const enabled = $('photoAutoEnabled')?.checked;
+  const useTime = $('photoAutoUseTime')?.checked;
+  if ($('photoAutoTimeBox')) $('photoAutoTimeBox').style.opacity = enabled && useTime ? '1' : '.45';
+  if ($('photoAutoStart')) $('photoAutoStart').disabled = !(enabled && useTime);
+  if ($('photoAutoEnd')) $('photoAutoEnd').disabled = !(enabled && useTime);
+}
+function renderPhotoAutoStatus(data) {
+  if (!data || !data.settings) {
+    $('photoAutoStatus').textContent = '설정을 불러오지 못했습니다.';
+    return;
+  }
+  const s = data.settings;
+  const lines = [];
+  lines.push(`자동 승인: ${s.enabled ? 'ON' : 'OFF'}`);
+  lines.push(`시간 설정: ${s.use_time_window ? 'ON' : 'OFF'}`);
+  if (s.use_time_window) {
+    lines.push(`시작: ${s.start_at ? formatTime(s.start_at) : '-'}`);
+    lines.push(`종료: ${s.end_at ? formatTime(s.end_at) : '-'}`);
+  }
+  lines.push(`현재 적용 상태: ${data.active ? '자동 승인 적용 중' : '자동 승인 미적용'}`);
+  lines.push(`서버 시간: ${formatTime(data.server_time)}`);
+  $('photoAutoStatus').textContent = lines.join('\n');
+}
+async function loadPhotoAutoApproval() {
+  const data = await api('/api/admin/settings/photo-auto-approval');
+  const s = data.settings || {};
+  $('photoAutoEnabled').checked = !!s.enabled;
+  $('photoAutoUseTime').checked = !!s.use_time_window;
+  $('photoAutoStart').value = toDatetimeLocalValue(s.start_at);
+  $('photoAutoEnd').value = toDatetimeLocalValue(s.end_at);
+  togglePhotoAutoTimeFields();
+  renderPhotoAutoStatus(data);
+}
+async function savePhotoAutoApproval() {
+  const enabled = $('photoAutoEnabled').checked;
+  const useTime = $('photoAutoUseTime').checked;
+  const body = {
+    enabled,
+    use_time_window: useTime,
+    start_at: useTime ? datetimeLocalToIso($('photoAutoStart').value) : '',
+    end_at: useTime ? datetimeLocalToIso($('photoAutoEnd').value) : '',
+  };
+  const data = await api('/api/admin/settings/photo-auto-approval', { method:'PATCH', body: JSON.stringify(body) });
+  renderPhotoAutoStatus(data);
+  alert('사진 자동 승인 설정이 저장되었습니다.');
+}
 
 async function login() {
   adminPassword = $('adminPassword').value.trim();
@@ -158,6 +243,7 @@ async function login() {
     $('appBox').classList.remove('hidden');
     $('skillUrl').textContent = location.origin + '/kakao/skill';
     await loadAll();
+    await loadPhotoAutoApproval();
   } catch(e) { $('loginMsg').textContent = e.message; }
 }
 function logout() { localStorage.removeItem('adminPassword'); location.reload(); }
@@ -234,7 +320,8 @@ async function review(id, decision) {
   await loadAll();
 }
 function showTab(name) {
-  ['ranking','submissions','missions'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
+  ['ranking','submissions','missions','settings'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
+  if (name === 'settings') loadPhotoAutoApproval().catch(e => alert(e.message));
 }
 function editMission(id) {
   const m = missionsCache.find(x => x.id === id); if (!m) return;
