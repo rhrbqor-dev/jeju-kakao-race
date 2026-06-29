@@ -12,6 +12,7 @@
     label { display:block; margin:12px 0 6px; font-size:14px; color:#657188; }
     input, textarea { width:100%; padding:12px; border:1px solid #dfe5ef; border-radius:12px; font:inherit; box-sizing:border-box; }
     button { margin-top:16px; width:100%; border:0; background:#2f6df6; color:white; padding:13px; border-radius:12px; font-weight:800; font-size:16px; }
+    button:disabled { background:#9aa8c7; cursor:not-allowed; }
     .msg { margin-top:14px; padding:12px; border-radius:12px; background:#eef4ff; }
   </style>
 </head>
@@ -25,11 +26,12 @@
       <input type="hidden" name="mission_code" id="mission_code" />
       <input type="hidden" name="token" id="token" />
       <input type="hidden" name="actor" id="actor" />
+      <input type="hidden" name="submission_key" id="submission_key" />
       <label>사진 파일</label>
       <input type="file" name="photo" accept="image/*" capture="environment" required />
       <label>메모</label>
       <textarea name="comment" rows="3" placeholder="예: T001 포구사진 인증"></textarea>
-      <button type="submit">사진 제출하기</button>
+      <button id="submitBtn" type="submit">사진 제출하기</button>
     </form>
     <div id="msg" class="msg" style="display:none"></div>
   </div>
@@ -40,15 +42,58 @@ document.getElementById('team_code').value = params.get('team') || '';
 document.getElementById('mission_code').value = params.get('mission') || '';
 document.getElementById('token').value = params.get('token') || '';
 document.getElementById('actor').value = params.get('actor') || '';
-document.getElementById('form').addEventListener('submit', async (e) => {
+const form = document.getElementById('form');
+const submitBtn = document.getElementById('submitBtn');
+const submissionKeyInput = document.getElementById('submission_key');
+let isSubmitting = false;
+
+function makeSubmissionKey() {
+  const parts = [
+    document.getElementById('team_code').value || '',
+    document.getElementById('mission_code').value || '',
+    Date.now().toString(36),
+    Math.random().toString(36).slice(2, 10)
+  ];
+  return parts.join('_');
+}
+
+submissionKeyInput.value = makeSubmissionKey();
+
+form.addEventListener('submit', async (e) => {
   e.preventDefault();
+
   const msg = document.getElementById('msg');
-  msg.style.display = 'block'; msg.textContent = '업로드 중입니다...';
+  msg.style.display = 'block';
+
+  if (isSubmitting) {
+    msg.textContent = '이미 업로드 중입니다. 잠시만 기다려주세요.';
+    return;
+  }
+
+  isSubmitting = true;
+  submitBtn.disabled = true;
+  submitBtn.textContent = '업로드 중...';
+  msg.textContent = '업로드 중입니다. 완료될 때까지 버튼을 다시 누르지 마세요.';
+
   try {
-    const res = await fetch('/api/public/upload/photo', { method:'POST', body:new FormData(e.target) });
-    const data = await res.json();
+    const res = await fetch('/api/public/upload/photo', { method:'POST', body:new FormData(form) });
+    const data = await res.json().catch(() => ({}));
     msg.textContent = data.message || (data.ok ? '접수되었습니다.' : '오류가 발생했습니다.');
-  } catch(err) { msg.textContent = err.message; }
+
+    if (res.ok && data.ok !== false) {
+      submitBtn.textContent = '제출 완료';
+      return;
+    }
+
+    isSubmitting = false;
+    submitBtn.disabled = false;
+    submitBtn.textContent = '사진 제출하기';
+  } catch(err) {
+    msg.textContent = err.message || '업로드 중 오류가 발생했습니다.';
+    isSubmitting = false;
+    submitBtn.disabled = false;
+    submitBtn.textContent = '사진 제출하기';
+  }
 });
 </script>
 </body>

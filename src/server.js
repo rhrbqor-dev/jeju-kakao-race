@@ -250,6 +250,7 @@ async function initDb() {
       review_note TEXT NOT NULL DEFAULT '',
       actor_kakao_user_id TEXT NOT NULL DEFAULT '',
       actor_name TEXT NOT NULL DEFAULT '',
+      submission_key TEXT NOT NULL DEFAULT '',
       submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       reviewed_at TIMESTAMPTZ
     );
@@ -262,8 +263,10 @@ async function initDb() {
   await query(`CREATE INDEX IF NOT EXISTS idx_submissions_mission ON submissions(mission_id);`);
   await query(`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS actor_kakao_user_id TEXT NOT NULL DEFAULT '';`);
   await query(`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS actor_name TEXT NOT NULL DEFAULT '';`);
+  await query(`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS submission_key TEXT NOT NULL DEFAULT '';`);
   await query(`CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions(status);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_submissions_actor ON submissions(actor_kakao_user_id);`);
+  await query(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_photo_submission_key ON submissions(event_id, team_id, mission_id, submission_key) WHERE submission_key <> '';`);
 
   await query(`
     INSERT INTO team_members(event_id, team_id, kakao_user_id, member_name, role)
@@ -1563,6 +1566,7 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
     const token = body.token || '';
     const actorId = body.actor || body.actor_kakao_user_id || '';
     const comment = body.comment || '';
+    const submissionKey = String(body.submission_key || body.upload_id || '').trim().slice(0, 120);
     const image_data = body.image_data || (req.file ? req.file.buffer.toString('base64') : '');
     const image_mime = body.image_mime || (req.file ? req.file.mimetype : 'image/jpeg');
     const team = await getTeamByCodeAndToken(event.id, team_code, token);
@@ -1577,11 +1581,47 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
 
     const actor = await resolveActorForTeam(event.id, team.id, actorId, team.leader_name || '팀원');
 
-    await query(
-      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, image_data, image_mime, actor_kakao_user_id, actor_name, status, score)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',0);`,
-      [event.id, team.id, mission.id, comment, String(image_data), String(image_mime || 'image/jpeg'), actor.actor_kakao_user_id, actor.actor_name]
+    const recentDuplicate = await query(
+      `SELECT id
+       FROM submissions
+       WHERE event_id=$1
+         AND team_id=$2
+         AND mission_id=$3
+         AND actor_kakao_user_id=$4
+         AND status='pending'
+         AND submitted_at > NOW() - INTERVAL '15 seconds'
+       ORDER BY submitted_at DESC
+       LIMIT 1;`,
+      [event.id, team.id, mission.id, actor.actor_kakao_user_id]
     );
+
+    if (recentDuplicate.rows.length) {
+      return res.json({
+        ok: true,
+        duplicate: true,
+        message: `이미 사진이 접수되었습니다.
+업로드한 팀원: ${actor.actor_name}
+관리자 승인 후 점수가 반영됩니다.`,
+      });
+    }
+
+    const insertResult = await query(
+      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, image_data, image_mime, actor_kakao_user_id, actor_name, submission_key, status, score)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending',0)
+       ON CONFLICT DO NOTHING
+       RETURNING id;`,
+      [event.id, team.id, mission.id, comment, String(image_data), String(image_mime || 'image/jpeg'), actor.actor_kakao_user_id, actor.actor_name, submissionKey]
+    );
+
+    if (!insertResult.rows.length) {
+      return res.json({
+        ok: true,
+        duplicate: true,
+        message: `이미 사진이 접수되었습니다.
+업로드한 팀원: ${actor.actor_name}
+관리자 승인 후 점수가 반영됩니다.`,
+      });
+    }
 
     await addTeamNotice(event.id, team.id, `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} 사진을 업로드했습니다. 운영자 승인 후 점수가 반영됩니다.`, actor.actor_kakao_user_id);
     res.json({ ok: true, message: `사진이 접수되었습니다.
