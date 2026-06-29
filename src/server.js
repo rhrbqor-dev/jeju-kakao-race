@@ -1,10 +1,4 @@
-import 'dotenv/config';
 import express from 'express';
-import cors from 'cors';
-import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
-import cookieParser from 'cookie-parser';
-import multer from 'multer';
 import { Pool } from 'pg';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -39,22 +33,35 @@ const pool = new Pool({
 });
 
 const app = express();
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    if (!file.mimetype.startsWith('image/')) return cb(new Error('이미지 파일만 업로드할 수 있습니다.'));
-    cb(null, true);
-  },
+app.set('trust proxy', 1);
+
+// 외부 패키지 의존성을 줄이기 위해 기본 헤더/쿠키 처리를 직접 합니다.
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Admin-Password');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+
+  req.cookies = {};
+  const cookieHeader = req.headers.cookie || '';
+  cookieHeader.split(';').forEach((part) => {
+    const idx = part.indexOf('=');
+    if (idx > -1) {
+      const key = part.slice(0, idx).trim();
+      const value = part.slice(idx + 1).trim();
+      try {
+        req.cookies[key] = decodeURIComponent(value);
+      } catch {
+        req.cookies[key] = value;
+      }
+    }
+  });
+
+  next();
 });
 
-app.set('trust proxy', 1);
-app.use(helmet({ contentSecurityPolicy: false }));
-app.use(cors());
-app.use(cookieParser());
-app.use(express.json({ limit: '6mb' }));
-app.use(express.urlencoded({ extended: true, limit: '6mb' }));
-app.use(rateLimit({ windowMs: 60 * 1000, max: 300 }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(express.static(publicDir));
 
 function nowIso() {
@@ -1427,26 +1434,75 @@ app.get('/webhook', (_req, res) => {
   res.send('Kakao webhook endpoint is alive. Kakao uses POST.');
 });
 
-app.get('/upload', (_req, res) => res.sendFile(path.join(publicDir, 'upload.html')));
-app.get('/gps', (_req, res) => res.sendFile(path.join(publicDir, 'gps.html')));
+app.get('/upload', (req, res) => {
+  const team = String(req.query.team || '');
+  const mission = String(req.query.mission || '');
+  const token = String(req.query.token || '');
+  res.status(200).type('html').send(`<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>사진 업로드</title>
+<style>body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;background:#f6f7f9;color:#111827}main{max-width:560px;margin:0 auto;padding:20px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:18px}input,textarea,button{font:inherit;width:100%;box-sizing:border-box;border:1px solid #d1d5db;border-radius:10px;padding:10px;margin:8px 0}button{background:#111827;color:#fff;cursor:pointer}.msg{white-space:pre-line;margin-top:12px}</style></head>
+<body><main><div class="card"><h2>사진 업로드</h2><p>팀 코드: <b>${team}</b><br>미션: <b>${mission}</b></p><input id="photo" type="file" accept="image/*"><textarea id="comment" placeholder="메모 선택 입력"></textarea><button onclick="sendPhoto()">사진 제출</button><div id="msg" class="msg"></div></div></main>
+<script>
+async function sendPhoto(){
+  const file=document.getElementById('photo').files[0];
+  const msg=document.getElementById('msg');
+  if(!file){msg.textContent='사진을 선택해주세요.';return;}
+  msg.textContent='업로드 중입니다...';
+  const reader=new FileReader();
+  reader.onload=async()=>{
+    try{
+      const r=await fetch('/api/public/upload/photo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({team_code:${JSON.stringify(team)},mission_code:${JSON.stringify(mission)},token:${JSON.stringify(token)},comment:document.getElementById('comment').value||'',image_data:String(reader.result).split(',')[1],image_mime:file.type||'image/jpeg'})});
+      const data=await r.json();
+      msg.textContent=data.message||JSON.stringify(data);
+    }catch(e){msg.textContent='업로드 오류: '+e.message;}
+  };
+  reader.readAsDataURL(file);
+}
+</script></body></html>`);
+});
 
-app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) => {
+app.get('/gps', (req, res) => {
+  const team = String(req.query.team || '');
+  const mission = String(req.query.mission || '');
+  const token = String(req.query.token || '');
+  res.status(200).type('html').send(`<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>GPS 인증</title>
+<style>body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;background:#f6f7f9;color:#111827}main{max-width:560px;margin:0 auto;padding:20px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:18px}button{font:inherit;width:100%;border:1px solid #111827;border-radius:10px;padding:12px;background:#111827;color:#fff;cursor:pointer}.msg{white-space:pre-line;margin-top:12px}</style></head>
+<body><main><div class="card"><h2>GPS 인증</h2><p>팀 코드: <b>${team}</b><br>미션: <b>${mission}</b></p><button onclick="verify()">현재 위치로 인증하기</button><div id="msg" class="msg"></div></div></main>
+<script>
+function verify(){
+ const msg=document.getElementById('msg');
+ if(!navigator.geolocation){msg.textContent='이 브라우저는 위치 인증을 지원하지 않습니다.';return;}
+ msg.textContent='위치 확인 중입니다...';
+ navigator.geolocation.getCurrentPosition(async(pos)=>{
+  try{
+   const r=await fetch('/api/public/verify/location',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({team_code:${JSON.stringify(team)},mission_code:${JSON.stringify(mission)},token:${JSON.stringify(token)},lat:pos.coords.latitude,lng:pos.coords.longitude})});
+   const data=await r.json();
+   msg.textContent=data.message||JSON.stringify(data);
+  }catch(e){msg.textContent='인증 오류: '+e.message;}
+ },(err)=>{msg.textContent='위치 권한을 허용해야 인증할 수 있습니다.\n'+err.message;},{enableHighAccuracy:true,timeout:15000,maximumAge:0});
+}
+</script></body></html>`);
+});
+
+app.post('/api/public/upload/photo', async (req, res) => {
   try {
     const event = await getActiveEvent();
-    const { team_code, mission_code, token, comment = '' } = req.body;
+    const { team_code, mission_code, token, comment = '', image_data = '', image_mime = 'image/jpeg' } = req.body || {};
     const team = await getTeamByCodeAndToken(event.id, team_code, token);
     const mission = await getMissionByCode(event.id, mission_code);
 
     if (!team || !mission || mission.mission_type !== 'photo') {
       return res.status(400).json({ ok: false, message: '팀/미션 인증 정보가 올바르지 않습니다.' });
     }
-    if (!req.file) return res.status(400).json({ ok: false, message: '사진 파일이 필요합니다.' });
+    if (!image_data) return res.status(400).json({ ok: false, message: '사진 파일이 필요합니다.' });
+    if (String(image_data).length > 8 * 1024 * 1024) return res.status(400).json({ ok: false, message: '사진 용량이 너무 큽니다.' });
     if (await isMissionAlreadyCompleted(team.id, mission.id)) return res.json({ ok: true, message: '이미 완료된 미션입니다.' });
 
     await query(
       `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, image_data, image_mime, status, score)
        VALUES ($1,$2,$3,$4,$5,$6,'pending',0);`,
-      [event.id, team.id, mission.id, comment, req.file.buffer.toString('base64'), req.file.mimetype]
+      [event.id, team.id, mission.id, comment, String(image_data), String(image_mime || 'image/jpeg')]
     );
 
     await addTeamNotice(event.id, team.id, `${mission.mission_code} ${mission.mission_name} 사진이 접수되었습니다. 운영자 승인 후 점수가 반영됩니다.`);
