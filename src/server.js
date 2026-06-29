@@ -14,20 +14,24 @@ const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, '..', 'public');
 
 const PORT = Number(process.env.PORT || 3000);
-const DATABASE_URL = process.env.DATABASE_URL;
+const DATABASE_URL = process.env.DATABASE_URL || '';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin1234';
 const KAKAO_SKILL_KEY = process.env.KAKAO_SKILL_KEY || '';
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
 
+let dbReady = false;
+let dbInitError = '';
+
 if (!DATABASE_URL) {
-  console.warn('WARNING: DATABASE_URL is not set. The server will fail when DB access is required.');
+  console.warn('WARNING: DATABASE_URL is not set. DB routes will fail until it is configured.');
 }
+
 if (ADMIN_PASSWORD === 'admin1234' || ADMIN_PASSWORD === 'change-this-admin-password') {
   console.warn('WARNING: ADMIN_PASSWORD is using a default/example value. Change it before public operation.');
 }
 
 const pool = new Pool({
-  connectionString: DATABASE_URL,
+  connectionString: DATABASE_URL || undefined,
   ssl: DATABASE_URL && !DATABASE_URL.includes('localhost') ? { rejectUnauthorized: false } : false,
   max: 5,
   idleTimeoutMillis: 30000,
@@ -72,7 +76,7 @@ function normalizeAnswer(value = '') {
 
 function splitAnswers(answer = '') {
   return String(answer)
-    .split(/[|,，\/]/)
+    .split(/[|,，/]/)
     .map((item) => normalizeAnswer(item))
     .filter(Boolean);
 }
@@ -87,7 +91,9 @@ function haversineMeters(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
   return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
@@ -96,8 +102,10 @@ function teamToken() {
 }
 
 async function query(sql, params = []) {
-  const result = await pool.query(sql, params);
-  return result;
+  if (!DATABASE_URL) {
+    throw new Error('DATABASE_URL environment variable is not set.');
+  }
+  return pool.query(sql, params);
 }
 
 async function initDb() {
@@ -121,8 +129,6 @@ async function initDb() {
       answer TEXT NOT NULL DEFAULT '',
       score INTEGER NOT NULL DEFAULT 0,
       hint TEXT NOT NULL DEFAULT '',
-      correct_message TEXT NOT NULL DEFAULT '',
-      answer_explanation TEXT NOT NULL DEFAULT '',
       location_name TEXT NOT NULL DEFAULT '',
       latitude DOUBLE PRECISION,
       longitude DOUBLE PRECISION,
@@ -134,10 +140,6 @@ async function initDb() {
     );
   `);
 
-  // 기존 DB에도 새 필드를 자동으로 추가합니다.
-  await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS correct_message TEXT NOT NULL DEFAULT '';`);
-  await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS answer_explanation TEXT NOT NULL DEFAULT '';`);
-
   await query(`
     CREATE TABLE IF NOT EXISTS teams (
       id SERIAL PRIMARY KEY,
@@ -148,12 +150,25 @@ async function initDb() {
       phone TEXT NOT NULL DEFAULT '',
       kakao_user_id TEXT UNIQUE,
       public_token TEXT NOT NULL UNIQUE,
-      current_mission_id INTEGER REFERENCES missions(id),
+      current_mission_id INTEGER,
       start_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       finish_time TIMESTAMPTZ,
       status TEXT NOT NULL DEFAULT 'playing',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+  `);
+
+  await query(`ALTER TABLE teams ADD COLUMN IF NOT EXISTS leader_name TEXT NOT NULL DEFAULT '';`);
+  await query(`ALTER TABLE teams ADD COLUMN IF NOT EXISTS phone TEXT NOT NULL DEFAULT '';`);
+  await query(`ALTER TABLE teams ADD COLUMN IF NOT EXISTS public_token TEXT;`);
+  await query(`ALTER TABLE teams ADD COLUMN IF NOT EXISTS current_mission_id INTEGER;`);
+  await query(`ALTER TABLE teams ADD COLUMN IF NOT EXISTS finish_time TIMESTAMPTZ;`);
+  await query(`ALTER TABLE teams ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'playing';`);
+
+  await query(`
+    UPDATE teams
+    SET public_token = CONCAT('legacy_', id, '_', REPLACE(CAST(NOW() AS TEXT), ' ', '_'))
+    WHERE public_token IS NULL OR public_token = '';
   `);
 
   await query(`
@@ -169,15 +184,8 @@ async function initDb() {
     );
   `);
 
-  await query(`
-    ALTER TABLE team_members
-    ADD COLUMN IF NOT EXISTS member_name TEXT NOT NULL DEFAULT '';
-  `);
-
-  await query(`
-    ALTER TABLE team_members
-    ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'member';
-  `);
+  await query(`ALTER TABLE team_members ADD COLUMN IF NOT EXISTS member_name TEXT NOT NULL DEFAULT '';`);
+  await query(`ALTER TABLE team_members ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'member';`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS user_states (
@@ -238,12 +246,11 @@ async function initDb() {
   await query(`CREATE INDEX IF NOT EXISTS idx_submissions_mission ON submissions(mission_id);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions(status);`);
 
-  // 기존 버전에서 teams.kakao_user_id에 저장되어 있던 팀장 정보를 team_members로 이관
   await query(`
     INSERT INTO team_members(event_id, team_id, kakao_user_id, member_name, role)
-    SELECT event_id, id, kakao_user_id, COALESCE(NULLIF(team_name, ''), '팀장'), 'leader'
+    SELECT event_id, id, kakao_user_id, COALESCE(NULLIF(leader_name, ''), NULLIF(team_name, ''), '팀장'), 'leader'
     FROM teams
-    WHERE kakao_user_id IS NOT NULL
+    WHERE kakao_user_id IS NOT NULL AND kakao_user_id <> ''
     ON CONFLICT(event_id, kakao_user_id) DO NOTHING;
   `);
 
@@ -262,6 +269,7 @@ async function initDb() {
       ['M4', '현장 GPS 인증', 'gps', '현재 미션 장소에서 GPS 인증을 진행해주세요.', '', 15, 'GPS 인증 버튼을 눌러 현재 위치를 허용해주세요.', '미션 장소', 33.51411, 126.52969, 120, 4],
       ['M5', '완주 선언', 'complete', '모든 미션을 끝냈다면 완주를 선언하세요.', '완주', 10, '앞 미션을 먼저 완료해야 합니다.', '완주지점', null, null, 80, 5],
     ];
+
     for (const m of seedMissions) {
       await query(
         `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, question, answer, score, hint, location_name, latitude, longitude, radius_m, sort_order)
@@ -303,7 +311,6 @@ async function getTeamByKakaoUser(eventId, kakaoUserId) {
   );
   if (result.rows[0]) return result.rows[0];
 
-  // 기존 데이터 호환용
   const fallback = await query(
     `SELECT * FROM teams WHERE event_id=$1 AND kakao_user_id=$2 LIMIT 1;`,
     [eventId, kakaoUserId]
@@ -311,19 +318,20 @@ async function getTeamByKakaoUser(eventId, kakaoUserId) {
   return fallback.rows[0] || null;
 }
 
-async function getTeamByCode(eventId, teamCode) {
+async function getTeamMember(eventId, kakaoUserId) {
   const result = await query(
-    `SELECT * FROM teams WHERE event_id=$1 AND UPPER(team_code)=UPPER($2) LIMIT 1;`,
-    [eventId, teamCode]
+    `SELECT tm.*, t.team_name, t.team_code
+     FROM team_members tm
+     JOIN teams t ON t.id = tm.team_id
+     WHERE tm.event_id=$1 AND tm.kakao_user_id=$2
+     LIMIT 1;`,
+    [eventId, kakaoUserId]
   );
   return result.rows[0] || null;
 }
 
 async function getTeamById(eventId, teamId) {
-  const result = await query(
-    `SELECT * FROM teams WHERE event_id=$1 AND id=$2 LIMIT 1;`,
-    [eventId, teamId]
-  );
+  const result = await query(`SELECT * FROM teams WHERE event_id=$1 AND id=$2 LIMIT 1;`, [eventId, teamId]);
   return result.rows[0] || null;
 }
 
@@ -343,12 +351,11 @@ async function generateTeamCode() {
 async function createTeam(eventId, kakaoUserId, teamName, memberName = '팀장') {
   const code = await generateTeamCode();
   const token = teamToken();
-  const safeMemberName = memberName || '팀장';
   const result = await query(
     `INSERT INTO teams(event_id, team_code, team_name, leader_name, kakao_user_id, public_token)
      VALUES ($1,$2,$3,$4,$5,$6)
      RETURNING *;`,
-    [eventId, code, teamName, safeMemberName, kakaoUserId, token]
+    [eventId, code, teamName, memberName || '팀장', kakaoUserId, token]
   );
 
   const team = result.rows[0];
@@ -358,7 +365,7 @@ async function createTeam(eventId, kakaoUserId, teamName, memberName = '팀장')
      VALUES ($1,$2,$3,$4,'leader')
      ON CONFLICT(event_id, kakao_user_id)
      DO UPDATE SET team_id=$2, member_name=$4, role='leader', joined_at=NOW();`,
-    [eventId, team.id, kakaoUserId, safeMemberName]
+    [eventId, team.id, kakaoUserId, memberName || '팀장']
   );
 
   return team;
@@ -394,39 +401,6 @@ async function getTeamMembers(teamId) {
   return result.rows;
 }
 
-async function getTeamMember(eventId, kakaoUserId) {
-  const result = await query(
-    `SELECT *
-     FROM team_members
-     WHERE event_id=$1 AND kakao_user_id=$2
-     LIMIT 1;`,
-    [eventId, kakaoUserId]
-  );
-  return result.rows[0] || null;
-}
-
-
-async function getMemberDisplayName(eventId, kakaoUserId) {
-  if (!kakaoUserId) return '팀원';
-  const member = await getTeamMember(eventId, kakaoUserId);
-  return member?.member_name || (member?.role === 'leader' ? '팀장' : '팀원');
-}
-
-async function addMissionCompleteNotice(eventId, team, mission, kakaoUserId, actorName, earnedScore = null) {
-  if (!team?.id || !mission?.id) return;
-
-  const scoreText = earnedScore === null || earnedScore === undefined
-    ? ''
-    : ` 획득 점수: ${earnedScore}점`;
-
-  await addTeamNotice(
-    eventId,
-    team.id,
-    `${actorName || '팀원'}님이 ${mission.mission_code} ${mission.mission_name} 미션을 완료했습니다.${scoreText}`,
-    kakaoUserId || ''
-  );
-}
-
 async function joinTeamById(eventId, teamId, kakaoUserId, memberName) {
   const team = await getTeamById(eventId, teamId);
   if (!team) return null;
@@ -444,12 +418,9 @@ async function joinTeamById(eventId, teamId, kakaoUserId, memberName) {
 
 async function getUserState(eventId, kakaoUserId) {
   const result = await query(
-    `SELECT * FROM user_states
-     WHERE event_id=$1 AND kakao_user_id=$2
-     LIMIT 1;`,
+    `SELECT * FROM user_states WHERE event_id=$1 AND kakao_user_id=$2 LIMIT 1;`,
     [eventId, kakaoUserId]
   );
-
   return result.rows[0] || null;
 }
 
@@ -474,11 +445,7 @@ async function setUserState(eventId, kakaoUserId, state, data = {}) {
 }
 
 async function clearUserState(eventId, kakaoUserId) {
-  await query(
-    `DELETE FROM user_states
-     WHERE event_id=$1 AND kakao_user_id=$2;`,
-    [eventId, kakaoUserId]
-  );
+  await query(`DELETE FROM user_states WHERE event_id=$1 AND kakao_user_id=$2;`, [eventId, kakaoUserId]);
 }
 
 async function addTeamNotice(eventId, teamId, noticeText, excludeKakaoUserId = '') {
@@ -553,40 +520,40 @@ async function respondKakao(res, response, event = null, team = null, kakaoUserI
   return res.status(200).json(response);
 }
 
-function isTeamNameEditCommand(text) {
-  return ['팀명 수정', '팀이름 수정', '팀 이름 수정', '팀명변경', '팀명 변경'].includes(
-    String(text).trim().toLowerCase()
-  );
-}
-
-function isMemberNameEditCommand(text) {
-  return ['이름 수정', '닉네임 수정', '내 이름 수정', '내 닉네임 수정', '이름변경', '이름 변경', '닉네임변경', '닉네임 변경'].includes(
-    String(text).trim().toLowerCase()
-  );
+function cleanName(text) {
+  return String(text || '')
+    .replace(/^(이름|닉네임|닉명)[:：]?/i, '')
+    .trim()
+    .slice(0, 30);
 }
 
 function isBlockedTeamName(text) {
-  return ['게임 시작', '시작', '참여', '참가', '참여하기', '도움말', '미션 목록', '순위', '랭킹', '내 점수', '팀 생성', '팀 참가', '팀명 수정', '이름 수정', '닉네임 수정'].includes(
-    String(text).trim()
+  return [
+    '게임 시작', '시작', '참여', '참가', '참여하기', '도움말', '미션 목록', '순위', '랭킹',
+    '내 점수', '팀 생성', '팀 참가', '팀명 수정', '팀원', '팀원 목록', '취소', '완주',
+  ].includes(String(text).trim());
+}
+
+function isTeamNameEditCommand(text) {
+  return ['팀명 수정', '팀이름 수정', '팀 이름 수정', '팀명변경', '팀명 변경'].includes(String(text).trim().toLowerCase());
+}
+
+function isMemberNameEditCommand(text) {
+  return ['이름 수정', '닉네임 수정', '내 이름 수정', '내 닉네임 수정', '이름변경', '닉네임변경'].includes(
+    String(text).trim().toLowerCase()
   );
 }
 
 function isCreateTeamCommand(text) {
-  return ['팀 생성', '팀생성', '새 팀', '새팀', '팀 만들기', '팀만들기'].includes(
-    String(text).trim().toLowerCase()
-  );
+  return ['팀 생성', '팀생성', '새 팀', '새팀', '팀 만들기', '팀만들기'].includes(String(text).trim().toLowerCase());
 }
 
 function isJoinTeamCommand(text) {
-  return ['팀 참가', '팀참가', '팀 합류', '팀합류', '참가코드 입력', '팀코드 입력'].includes(
-    String(text).trim().toLowerCase()
-  );
+  return ['팀 참가', '팀참가', '팀 합류', '팀합류', '참가코드 입력', '팀코드 입력'].includes(String(text).trim().toLowerCase());
 }
 
 function isTeamMembersCommand(text) {
-  return ['팀원', '팀원 목록', '팀원보기', '팀원 보기', '우리 팀'].includes(
-    String(text).trim().toLowerCase()
-  );
+  return ['팀원', '팀원 목록', '팀원보기', '팀원 보기', '우리 팀'].includes(String(text).trim().toLowerCase());
 }
 
 function isCancelCommand(text) {
@@ -636,6 +603,7 @@ async function maybeMarkFinished(team, eventId) {
   const requiredIds = missions.filter((m) => m.is_required).map((m) => m.id);
   const completed = await getCompletedMissionIds(team.id);
   const allDone = requiredIds.every((id) => completed.has(id));
+
   if (allDone && !team.finish_time) {
     await query(`UPDATE teams SET status='finished', finish_time=NOW() WHERE id=$1;`, [team.id]);
   }
@@ -674,40 +642,26 @@ async function buildRanking(eventId) {
        t.id ASC;`,
     [eventId]
   );
+
   return result.rows.map((row, idx) => ({ ...row, rank: idx + 1 }));
 }
 
 function kakaoText(text, quickReplies = []) {
-  const safeText = String(text || '응답 메시지가 없습니다.');
-
   const safeQuickReplies = Array.isArray(quickReplies)
     ? quickReplies
         .filter((q) => typeof q === 'string' && q.trim() !== '')
         .slice(0, 10)
-        .map((q) => ({
-          action: 'message',
-          label: q,
-          messageText: q,
-        }))
+        .map((q) => ({ action: 'message', label: q, messageText: q }))
     : [];
 
   const response = {
     version: '2.0',
     template: {
-      outputs: [
-        {
-          simpleText: {
-            text: safeText,
-          },
-        },
-      ],
+      outputs: [{ simpleText: { text: String(text || '응답 메시지가 없습니다.') } }],
     },
   };
 
-  if (safeQuickReplies.length > 0) {
-    response.template.quickReplies = safeQuickReplies;
-  }
-
+  if (safeQuickReplies.length > 0) response.template.quickReplies = safeQuickReplies;
   return response;
 }
 
@@ -734,38 +688,12 @@ function kakaoCard(title, description, buttons = [], quickReplies = []) {
     },
   };
 
-  if (safeQuickReplies.length > 0) {
-    response.template.quickReplies = safeQuickReplies;
-  }
-
+  if (safeQuickReplies.length > 0) response.template.quickReplies = safeQuickReplies;
   return response;
 }
 
-
-function renderMissionTemplate(template, values = {}) {
-  return String(template || '').replace(/\{([a-zA-Z0-9_]+)\}/g, (_match, key) => {
-    const value = values[key];
-    return value === undefined || value === null ? '' : String(value);
-  });
-}
-
-function buildMissionSuccessMessage(mission, values, defaultMessage) {
-  const explanation = String(mission.answer_explanation || '').trim();
-
-  let message = defaultMessage;
-
-  if (explanation) {
-    message += `
-
-정답 설명
-${renderMissionTemplate(explanation, values)}`;
-  }
-
-  return message;
-}
-
 const startQuickReplies = ['팀 생성', '팀 참가', '도움말'];
-const menuQuickReplies = ['미션 목록', '내 점수', '순위', '팀원 목록', '이름 수정', '팀명 수정', '도움말'];
+const menuQuickReplies = ['미션 목록', '내 점수', '순위', '팀원 목록', '팀명 수정', '이름 수정', '도움말'];
 
 function isStartCommand(text) {
   return ['시작', '게임 시작', '참여하기', '참가', 'start'].includes(String(text).trim().toLowerCase());
@@ -827,9 +755,7 @@ async function handleRanking(eventId) {
 
 async function handleTeamMembers(team) {
   const members = await getTeamMembers(team.id);
-  if (!members.length) {
-    return kakaoText(`${team.team_name} 팀원 정보가 없습니다.`, menuQuickReplies);
-  }
+  if (!members.length) return kakaoText(`${team.team_name} 팀원 정보가 없습니다.`, menuQuickReplies);
 
   const lines = members.map((m, idx) => {
     const roleLabel = m.role === 'leader' ? '팀장' : '팀원';
@@ -844,10 +770,7 @@ async function handleJoinTeamList(event, kakaoUserId) {
   const teams = await listJoinableTeams(event.id);
 
   if (!teams.length) {
-    return kakaoText(
-      '아직 생성된 팀이 없습니다.\n\n새 팀을 만들려면 "팀 생성"을 입력해주세요.',
-      ['팀 생성', '도움말']
-    );
+    return kakaoText('아직 생성된 팀이 없습니다.\n\n새 팀을 만들려면 "팀 생성"을 입력해주세요.', ['팀 생성', '도움말']);
   }
 
   const lines = teams.map((team, index) => `${index + 1}. ${team.team_name} (${team.member_count}명)`);
@@ -857,8 +780,8 @@ async function handleJoinTeamList(event, kakaoUserId) {
 
   const quickReplies = teams.slice(0, 10).map((_, index) => String(index + 1));
   return kakaoText(
-    `참가할 팀을 선택해주세요.\n\n${lines.join('\n')}\n\n번호를 입력하면 팀코드 확인 단계로 넘어갑니다.\n취소하려면 "취소"를 입력하세요.`,
-    quickReplies.length ? quickReplies : ['취소']
+    `참가할 팀을 선택해주세요.\n\n${lines.join('\n')}\n\n번호를 입력하면 이름 또는 닉네임 입력 단계로 넘어갑니다.\n취소하려면 "취소"를 입력하세요.`,
+    [...quickReplies, '취소'].slice(0, 10)
   );
 }
 
@@ -889,17 +812,37 @@ async function handleMissionStart(req, event, team, missionCode) {
   }
 
   if (mission.mission_type === 'complete') {
-    return kakaoText(`${mission.mission_code} ${mission.mission_name}\n\n${mission.question}\n\n완료하려면 '${mission.answer || '완주'}'라고 입력해주세요.`, ['완주', ...menuQuickReplies]);
+    return kakaoText(
+      `${mission.mission_code} ${mission.mission_name}\n\n${mission.question}\n\n완료하려면 '${mission.answer || '완주'}'라고 입력해주세요.`,
+      ['완주', ...menuQuickReplies]
+    );
   }
 
   return kakaoText(`${mission.mission_code} ${mission.mission_name}\n\n${mission.question}\n\n정답을 입력해주세요.`, menuQuickReplies);
 }
 
-async function handleAnswer(req, event, team, utterance, kakaoUserId = '') {
+async function afterMissionCompleted(event, team, mission, kakaoUserId, actorName) {
+  await maybeMarkFinished(team, event.id);
+  const total = await teamTotalScore(team.id);
+  const name = actorName || '팀원';
+  await addTeamNotice(
+    event.id,
+    team.id,
+    `${name}님이 ${mission.mission_code} ${mission.mission_name} 미션을 완료했습니다. 현재 팀 점수는 ${total}점입니다.`,
+    kakaoUserId
+  );
+  return total;
+}
+
+async function handleAnswer(req, event, team, utterance, kakaoUserId) {
   const teamReload = (await query(`SELECT * FROM teams WHERE id=$1;`, [team.id])).rows[0];
+  const member = await getTeamMember(event.id, kakaoUserId);
+  const actorName = member?.member_name || '팀원';
+
   if (!teamReload.current_mission_id) {
     return kakaoText('먼저 QR코드를 스캔해주세요.', ['미션 목록', ...menuQuickReplies]);
   }
+
   const mission = (await query(`SELECT * FROM missions WHERE id=$1;`, [teamReload.current_mission_id])).rows[0];
   if (!mission) return kakaoText('진행 중인 미션 정보를 찾을 수 없습니다. 미션 목록에서 다시 선택해주세요.', menuQuickReplies);
 
@@ -907,8 +850,6 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId = '') {
   if (already) {
     return kakaoText(`이미 완료한 미션입니다.\n\n${mission.mission_code} ${mission.mission_name}\n\n다음 미션으로 이동해주세요.`, menuQuickReplies);
   }
-
-  const actorName = await getMemberDisplayName(event.id, kakaoUserId);
 
   if (mission.mission_type === 'quiz') {
     const acceptable = splitAnswers(mission.answer);
@@ -925,9 +866,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId = '') {
     const baseScore = Number(mission.score || 0);
     const penaltyPerWrong = 2;
     const minimumScore = baseScore > 0 ? Math.min(2, baseScore) : 0;
-    const earnedScore = isCorrect
-      ? Math.max(minimumScore, baseScore - wrongCount * penaltyPerWrong)
-      : 0;
+    const earnedScore = isCorrect ? Math.max(minimumScore, baseScore - wrongCount * penaltyPerWrong) : 0;
 
     await query(
       `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, status, score)
@@ -936,32 +875,15 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId = '') {
     );
 
     if (isCorrect) {
-      await maybeMarkFinished(team, event.id);
-      const total = await teamTotalScore(team.id);
-      await addMissionCompleteNotice(event.id, team, mission, kakaoUserId, actorName, earnedScore);
-      const defaultMessage = `정답입니다!\n\n${mission.mission_code} ${mission.mission_name} 완료\n기본 점수: ${baseScore}점\n오답 횟수: ${wrongCount}회\n획득 점수: ${earnedScore}점\n현재 총점: ${total}점`;
-      const successMessage = buildMissionSuccessMessage(
-        mission,
-        {
-          teamName: team.team_name,
-          teamCode: team.team_code,
-          missionCode: mission.mission_code,
-          missionName: mission.mission_name,
-          answer: utterance,
-          score: earnedScore,
-          earnedScore,
-          baseScore,
-          wrongCount,
-          totalScore: total,
-        },
-        defaultMessage
+      const total = await afterMissionCompleted(event, team, mission, kakaoUserId, actorName);
+      return kakaoText(
+        `정답입니다!\n\n${mission.mission_code} ${mission.mission_name} 완료\n수행자: ${actorName}\n기본 점수: ${baseScore}점\n오답 횟수: ${wrongCount}회\n획득 점수: ${earnedScore}점\n현재 팀 총점: ${total}점\n\n다른 팀원에게도 미션 완료 알림이 표시됩니다.`,
+        menuQuickReplies
       );
-
-      return kakaoText(successMessage, menuQuickReplies);
     }
 
     return kakaoText(
-      `아쉽습니다. 정답이 아닙니다.\n\n현재 오답 횟수: ${wrongCount + 1}회\n다음 정답 시 감점이 적용됩니다.\n\n힌트: ${mission.hint || '현장 안내문을 다시 확인해보세요.'}\n\n다시 정답을 입력해주세요.`,
+      `아쉽습니다. 정답이 아닙니다.\n\n현재 오답 횟수: ${wrongCount + 1}회\n힌트: ${mission.hint || '현장 안내문을 다시 확인해보세요.'}\n\n다시 정답을 입력해주세요.`,
       ['다시 입력하기', ...menuQuickReplies]
     );
   }
@@ -969,81 +891,41 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId = '') {
   if (mission.mission_type === 'visit') {
     const acceptable = splitAnswers(mission.answer);
     const ok = acceptable.length ? acceptable.includes(normalizeAnswer(utterance)) : true;
+
     await query(
       `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, status, score)
        VALUES ($1,$2,$3,$4,$5,$6);`,
       [event.id, team.id, mission.id, utterance, ok ? 'approved' : 'wrong', ok ? mission.score : 0]
     );
+
     if (ok) {
-      await maybeMarkFinished(team, event.id);
-      const total = await teamTotalScore(team.id);
-      const score = Number(mission.score || 0);
-      await addMissionCompleteNotice(event.id, team, mission, kakaoUserId, actorName, score);
-      const defaultMessage = `방문 인증 완료!\n\n획득 점수: ${score}점\n현재 총점: ${total}점`;
-      const successMessage = buildMissionSuccessMessage(
-        mission,
-        {
-          teamName: team.team_name,
-          teamCode: team.team_code,
-          missionCode: mission.mission_code,
-          missionName: mission.mission_name,
-          answer: utterance,
-          score,
-          earnedScore: score,
-          baseScore: score,
-          wrongCount: 0,
-          totalScore: total,
-        },
-        defaultMessage
-      );
-      return kakaoText(successMessage, menuQuickReplies);
+      const total = await afterMissionCompleted(event, team, mission, kakaoUserId, actorName);
+      return kakaoText(`방문 인증 완료!\n\n수행자: ${actorName}\n획득 점수: ${mission.score}점\n현재 팀 총점: ${total}점`, menuQuickReplies);
     }
+
     return kakaoText(`인증 문구가 맞지 않습니다.\n\n힌트: ${mission.hint || '현장 안내판의 인증 문구를 확인해주세요.'}`, menuQuickReplies);
   }
 
   if (mission.mission_type === 'complete') {
-    const missions = await getMissions(event.id);
-    const completed = await getCompletedMissionIds(team.id);
-    const priorRequired = missions.filter((m) => m.is_required && m.id !== mission.id);
-    const missing = priorRequired.filter((m) => !completed.has(m.id));
     const acceptable = splitAnswers(mission.answer || '완주');
-    const okText = acceptable.includes(normalizeAnswer(utterance));
-    if (missing.length) {
-      return kakaoText(`아직 완료하지 않은 미션이 있습니다.\n\n${missing.map((m) => `${m.mission_code} ${m.mission_name}`).join('\n')}`, menuQuickReplies);
+    if (!acceptable.includes(normalizeAnswer(utterance))) {
+      return kakaoText(`완료하려면 '${mission.answer || '완주'}'라고 입력해주세요.`, ['완주', ...menuQuickReplies]);
     }
-    if (!okText) {
-      return kakaoText(`완주 선언 문구가 맞지 않습니다. '${mission.answer || '완주'}'라고 입력해주세요.`, ['완주', ...menuQuickReplies]);
-    }
+
     await query(
       `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, status, score)
        VALUES ($1,$2,$3,$4,'approved',$5);`,
       [event.id, team.id, mission.id, utterance, mission.score]
     );
-    await maybeMarkFinished(team, event.id);
-    const total = await teamTotalScore(team.id);
+
+    const total = await afterMissionCompleted(event, team, mission, kakaoUserId, actorName);
     const ranking = await buildRanking(event.id);
     const myRank = ranking.find((r) => r.id === team.id)?.rank || '-';
-    const score = Number(mission.score || 0);
-    await addMissionCompleteNotice(event.id, team, mission, kakaoUserId, actorName, score);
-    const defaultMessage = `축하합니다! 완주 처리되었습니다.\n\n팀명: ${team.team_name}\n최종 점수: ${total}점\n현재 순위: ${myRank}위`;
-    const successMessage = buildMissionSuccessMessage(
-      mission,
-      {
-        teamName: team.team_name,
-        teamCode: team.team_code,
-        missionCode: mission.mission_code,
-        missionName: mission.mission_name,
-        answer: utterance,
-        score,
-        earnedScore: score,
-        baseScore: score,
-        wrongCount: 0,
-        totalScore: total,
-        rank: myRank,
-      },
-      defaultMessage
+
+    return kakaoText(
+      `축하합니다! 완주 처리되었습니다.\n\n팀명: ${team.team_name}\n수행자: ${actorName}\n최종 점수: ${total}점\n현재 순위: ${myRank}위`,
+      ['순위', '내 점수']
     );
-    return kakaoText(successMessage, ['순위', '내 점수']);
   }
 
   if (mission.mission_type === 'photo' || mission.mission_type === 'gps') {
@@ -1052,15 +934,6 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId = '') {
 
   return kakaoText('처리할 수 없는 미션 유형입니다. 운영자에게 문의해주세요.', menuQuickReplies);
 }
-
-app.get('/health', async (_req, res) => {
-  try {
-    await query('SELECT 1;');
-    res.json({ ok: true, time: nowIso() });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: error.message });
-  }
-});
 
 function extractMissionCodeFromQr(body) {
   const params = body?.action?.params || {};
@@ -1077,7 +950,6 @@ function extractMissionCodeFromQr(body) {
   if (!raw) return '';
 
   let qrText = raw;
-
   try {
     const parsed = JSON.parse(raw);
     qrText = parsed.barcodeData || parsed.value || raw;
@@ -1087,16 +959,12 @@ function extractMissionCodeFromQr(body) {
 
   qrText = String(qrText).trim();
 
-  if (/^M\d+$/i.test(qrText)) {
-    return qrText.toUpperCase();
-  }
+  if (/^M\d+$/i.test(qrText)) return qrText.toUpperCase();
 
   try {
     const url = new URL(qrText);
     const code = url.searchParams.get('mission') || url.searchParams.get('code');
-    if (code && /^M\d+$/i.test(code)) {
-      return code.toUpperCase();
-    }
+    if (code && /^M\d+$/i.test(code)) return code.toUpperCase();
   } catch {
     // URL이 아니면 무시
   }
@@ -1105,17 +973,39 @@ function extractMissionCodeFromQr(body) {
   return found ? found[0].toUpperCase() : '';
 }
 
+function requireAdmin(req, res, next) {
+  const headerPassword = req.headers['x-admin-password'];
+  const queryPassword = req.query.password;
+  const cookiePassword = req.cookies?.admin_password;
+  const password = headerPassword || queryPassword || cookiePassword;
+
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ ok: false, message: '관리자 비밀번호가 올바르지 않습니다.' });
+  }
+
+  next();
+}
+
 async function handleKakaoSkill(req, res) {
   try {
     if (KAKAO_SKILL_KEY && req.query.key !== KAKAO_SKILL_KEY) {
       return respondKakao(res, kakaoText('스킬 서버 인증키가 올바르지 않습니다. 운영자에게 문의해주세요.'));
     }
 
+    if (!dbReady) {
+      return respondKakao(
+        res,
+        kakaoText(`서버는 켜졌지만 DB 준비가 아직 끝나지 않았습니다.\n잠시 후 다시 시도해주세요.\n\nDB상태: ${dbInitError || '초기화 중'}`)
+      );
+    }
+
     const event = await getActiveEvent();
     const normalUtterance = String(req.body?.userRequest?.utterance || '').trim();
     const qrMissionCode = extractMissionCodeFromQr(req.body);
     const utterance = String(qrMissionCode || normalUtterance).trim();
-    const kakaoUserId = String(req.body?.userRequest?.user?.id || req.body?.userRequest?.user?.properties?.plusfriendUserKey || '').trim();
+    const kakaoUserId = String(
+      req.body?.userRequest?.user?.id || req.body?.userRequest?.user?.properties?.plusfriendUserKey || ''
+    ).trim();
 
     if (!kakaoUserId) {
       return respondKakao(res, kakaoText('사용자 식별 정보를 확인할 수 없습니다. 카카오 챗봇 설정을 확인해주세요.'));
@@ -1130,65 +1020,37 @@ async function handleKakaoSkill(req, res) {
       return respondKakao(res, kakaoText('진행 중인 입력을 취소했습니다.', team ? menuQuickReplies : startQuickReplies), event, team, kakaoUserId);
     }
 
-    // 1. 새 팀 생성: 팀명 입력 대기
-    if (!team && userState?.state === 'WAIT_CREATE_TEAM_NAME') {
+    if (!team && userState?.state === 'WAIT_LEADER_NAME') {
+      const memberName = cleanName(utterance);
+      if (memberName.length < 2) {
+        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동'));
+      }
+      await setUserState(event.id, kakaoUserId, 'WAIT_TEAM_NAME', { memberName });
+      return respondKakao(res, kakaoText(`${memberName}님으로 등록하겠습니다.\n\n이제 팀명을 입력해주세요.\n예: 귤탐험대`, ['취소']));
+    }
+
+    if (!team && userState?.state === 'WAIT_TEAM_NAME') {
       const teamName = utterance.replace(/^(팀명|팀이름|팀 이름)[:：]?/i, '').trim();
+      const memberName = data.memberName || '팀장';
 
       if (!teamName || teamName.length < 2) {
         return respondKakao(res, kakaoText('팀 이름은 2글자 이상으로 입력해주세요.\n예: 귤탐험대'));
       }
-
       if (teamName.length > 30) {
         return respondKakao(res, kakaoText('팀 이름은 30글자 이하로 입력해주세요.'));
       }
-
       if (isBlockedTeamName(teamName)) {
         return respondKakao(res, kakaoText('사용할 수 없는 팀 이름입니다.\n다른 팀 이름을 입력해주세요.\n예: 귤탐험대'));
       }
 
-      await setUserState(event.id, kakaoUserId, 'WAIT_CREATE_MEMBER_NAME', {
-        team_name: teamName.slice(0, 30),
-      });
-
-      return respondKakao(
-        res,
-        kakaoText(
-          `${teamName.slice(0, 30)} 팀으로 생성할게요.\n\n팀장으로 표시할 이름 또는 닉네임을 입력해주세요.\n예: 홍길동`,
-          ['취소']
-        )
-      );
-    }
-
-    // 2. 새 팀 생성: 팀장 이름/닉네임 입력 후 생성 완료
-    if (!team && userState?.state === 'WAIT_CREATE_MEMBER_NAME') {
-      const dataTeamName = String(data.team_name || '').trim();
-      const memberName = utterance.replace(/^(이름|닉네임)[:：]?/i, '').trim();
-
-      if (!dataTeamName) {
-        await clearUserState(event.id, kakaoUserId);
-        return respondKakao(res, kakaoText('팀 생성 정보가 사라졌습니다. 다시 "팀 생성"을 입력해주세요.', ['팀 생성']));
-      }
-
-      if (!memberName || memberName.length < 2) {
-        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동'));
-      }
-
-      if (memberName.length > 20) {
-        return respondKakao(res, kakaoText('이름 또는 닉네임은 20글자 이하로 입력해주세요.'));
-      }
-
-      if (isBlockedTeamName(memberName)) {
-        return respondKakao(res, kakaoText('사용할 수 없는 이름입니다.\n다른 이름 또는 닉네임을 입력해주세요.\n예: 홍길동'));
-      }
-
-      team = await createTeam(event.id, kakaoUserId, dataTeamName, memberName.slice(0, 20));
+      team = await createTeam(event.id, kakaoUserId, teamName.slice(0, 30), memberName);
       await clearUserState(event.id, kakaoUserId);
 
       return respondKakao(
         res,
         kakaoText(
-          `${team.team_name} 팀이 생성되었습니다!\n\n팀장: ${memberName.slice(0, 20)}\n팀코드: ${team.team_code}\n\n팀원에게 이 코드를 알려주세요.\n팀원은 "팀 참가"를 누른 뒤 팀을 선택하고 팀코드를 입력하면 합류할 수 있습니다.\n\n이제 현장 QR코드를 스캔하면 미션이 시작됩니다.`,
-          menuQuickReplies
+          `${team.team_name} 등록 완료!\n\n팀장: ${memberName}\n팀코드: ${team.team_code}\n\n이제 현장 QR코드를 스캔하면 미션이 시작됩니다.`,
+          ['미션 목록', '팀원 목록', '도움말']
         ),
         event,
         team,
@@ -1196,305 +1058,112 @@ async function handleKakaoSkill(req, res) {
       );
     }
 
-    // 3. 팀 참가: 팀 목록에서 번호 선택
     if (!team && userState?.state === 'WAIT_SELECT_JOIN_TEAM') {
-      if (!/^\d+$/.test(utterance)) {
-        return respondKakao(res, kakaoText('참가할 팀 번호를 숫자로 입력해주세요.\n취소하려면 "취소"를 입력하세요.'));
+      const index = Number(utterance) - 1;
+      const teams = Array.isArray(data.teams) ? data.teams : [];
+      if (!Number.isInteger(index) || index < 0 || index >= teams.length) {
+        return respondKakao(res, kakaoText('목록에 있는 번호를 입력해주세요.\n예: 1', ['취소']));
       }
-
-      const selectedIndex = Number(utterance) - 1;
-      const selected = Array.isArray(data.teams) ? data.teams[selectedIndex] : null;
-
-      if (!selected) {
-        return respondKakao(res, kakaoText('선택한 번호의 팀을 찾을 수 없습니다.\n팀 참가를 다시 진행해주세요.', ['팀 참가', '취소']));
-      }
-
-      await setUserState(event.id, kakaoUserId, 'WAIT_JOIN_TEAM_CODE', {
-        selected_team_id: selected.id,
-        selected_team_name: selected.name,
-      });
-
+      const selected = teams[index];
+      await setUserState(event.id, kakaoUserId, 'WAIT_JOIN_MEMBER_NAME', { teamId: selected.id, teamName: selected.name });
       return respondKakao(
         res,
-        kakaoText(`${selected.name} 팀을 선택했습니다.\n\n팀장에게 받은 팀코드를 입력해주세요.\n예: T001`, ['취소'])
+        kakaoText(`${selected.name} 팀에 참가합니다.\n\n팀원 목록에 표시될 이름 또는 닉네임을 입력해주세요.\n예: 홍길동`, ['취소'])
       );
     }
 
-    // 3. 팀 참가: 팀코드 확인
-    if (!team && userState?.state === 'WAIT_JOIN_TEAM_CODE') {
-      const selectedTeam = await getTeamById(event.id, Number(data.selected_team_id || 0));
-      const teamCode = utterance.toUpperCase().trim();
-
-      if (!selectedTeam) {
-        await clearUserState(event.id, kakaoUserId);
-        return respondKakao(res, kakaoText('선택한 팀 정보를 찾을 수 없습니다.\n다시 "팀 참가"를 입력해주세요.', ['팀 참가']));
-      }
-
-      if (teamCode !== selectedTeam.team_code.toUpperCase()) {
-        return respondKakao(res, kakaoText('팀코드가 일치하지 않습니다.\n팀장에게 받은 팀코드를 다시 입력해주세요.\n예: T001', ['취소']));
-      }
-
-      await setUserState(event.id, kakaoUserId, 'WAIT_JOIN_MEMBER_NAME', {
-        selected_team_id: selectedTeam.id,
-        selected_team_name: selectedTeam.team_name,
-      });
-
-      return respondKakao(res, kakaoText(`${selectedTeam.team_name} 팀코드가 확인되었습니다.\n\n팀에서 사용할 이름 또는 닉네임을 입력해주세요.\n예: 홍길동`, ['취소']));
-    }
-
-    // 4. 팀 참가: 참가자 이름 입력 후 합류 완료
     if (!team && userState?.state === 'WAIT_JOIN_MEMBER_NAME') {
-      const memberName = utterance.replace(/^(이름|닉네임)[:：]?/i, '').trim();
-
-      if (!memberName || memberName.length < 2) {
-        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동'));
+      const memberName = cleanName(utterance);
+      if (memberName.length < 2) {
+        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동', ['취소']));
       }
-
-      if (memberName.length > 20) {
-        return respondKakao(res, kakaoText('이름 또는 닉네임은 20글자 이하로 입력해주세요.'));
-      }
-
-      const joinedTeam = await joinTeamById(event.id, Number(data.selected_team_id || 0), kakaoUserId, memberName.slice(0, 20));
-
-      if (!joinedTeam) {
+      team = await joinTeamById(event.id, data.teamId, kakaoUserId, memberName);
+      if (!team) {
         await clearUserState(event.id, kakaoUserId);
-        return respondKakao(res, kakaoText('팀 참가 처리 중 오류가 발생했습니다.\n다시 "팀 참가"를 입력해주세요.', ['팀 참가']));
+        return respondKakao(res, kakaoText('선택한 팀을 찾을 수 없습니다. 다시 팀 참가를 진행해주세요.', ['팀 참가', '팀 생성']));
       }
-
       await clearUserState(event.id, kakaoUserId);
-      await addTeamNotice(event.id, joinedTeam.id, `${memberName}님이 ${joinedTeam.team_name} 팀에 참가했습니다.`, kakaoUserId);
-
-      const members = await getTeamMembers(joinedTeam.id);
-      const memberLines = members.map((m, idx) => `${idx + 1}. ${m.member_name || (m.role === 'leader' ? '팀장' : '팀원')}${m.role === 'leader' ? ' (팀장)' : ''}`);
-
+      await addTeamNotice(event.id, team.id, `${memberName}님이 팀에 참가했습니다.`, kakaoUserId);
       return respondKakao(
         res,
-        kakaoText(
-          `${joinedTeam.team_name} 팀에 합류했습니다!\n\n팀코드: ${joinedTeam.team_code}\n\n현재 팀원:\n${memberLines.join('\n')}\n\n이제 같은 팀으로 미션을 수행합니다.`,
-          menuQuickReplies
-        ),
-        event,
-        joinedTeam,
-        kakaoUserId
-      );
-    }
-
-    // 5. 팀명 수정 대기 상태
-    if (team && userState?.state === 'WAIT_TEAM_RENAME') {
-      const newTeamName = utterance.replace(/^(팀명|팀이름|팀 이름)[:：]?/i, '').trim();
-      const member = await getTeamMember(event.id, kakaoUserId);
-
-      if (!member || member.role !== 'leader') {
-        await clearUserState(event.id, kakaoUserId);
-        return respondKakao(
-          res,
-          kakaoText(`팀 이름 수정은 팀장만 가능합니다.
-
-현재 팀명: ${team.team_name}`, menuQuickReplies),
-          event,
-          team,
-          kakaoUserId
-        );
-      }
-
-      if (!newTeamName || newTeamName.length < 2) {
-        return respondKakao(res, kakaoText('새 팀 이름은 2글자 이상으로 입력해주세요.\n예: 귤탐험대'), event, team, kakaoUserId);
-      }
-
-      if (newTeamName.length > 30) {
-        return respondKakao(res, kakaoText('팀 이름은 30글자 이하로 입력해주세요.'), event, team, kakaoUserId);
-      }
-
-      if (isBlockedTeamName(newTeamName)) {
-        return respondKakao(res, kakaoText('사용할 수 없는 팀 이름입니다.\n다른 팀 이름을 입력해주세요.'), event, team, kakaoUserId);
-      }
-
-      const oldTeamName = team.team_name;
-      const result = await query(
-        `UPDATE teams
-         SET team_name=$1
-         WHERE id=$2
-         RETURNING *;`,
-        [newTeamName.slice(0, 30), team.id]
-      );
-
-      await clearUserState(event.id, kakaoUserId);
-      team = result.rows[0];
-      await addTeamNotice(event.id, team.id, `팀명이 ${oldTeamName}에서 ${team.team_name}(으)로 변경되었습니다.`, kakaoUserId);
-
-      return respondKakao(
-        res,
-        kakaoText(`팀 이름이 수정되었습니다.\n\n현재 팀명: ${team.team_name}\n팀코드: ${team.team_code}`, menuQuickReplies),
+        kakaoText(`${team.team_name} 팀 참가 완료!\n\n이름/닉네임: ${memberName}\n팀코드: ${team.team_code}\n\n이제 같은 팀으로 미션을 진행합니다.`, menuQuickReplies),
         event,
         team,
         kakaoUserId
       );
     }
 
-    // 6. 이름/닉네임 수정 대기 상태
-    if (team && userState?.state === 'WAIT_MEMBER_RENAME') {
-      const newMemberName = utterance.replace(/^(이름|닉네임)[:：]?/i, '').trim();
-      const member = await getTeamMember(event.id, kakaoUserId);
-
-      if (!member) {
-        await clearUserState(event.id, kakaoUserId);
-        return respondKakao(
-          res,
-          kakaoText('팀원 정보를 찾을 수 없습니다. 다시 참가 등록을 확인해주세요.', menuQuickReplies),
-          event,
-          team,
-          kakaoUserId
-        );
+    if (team && userState?.state === 'WAIT_EDIT_TEAM_NAME') {
+      const teamName = utterance.replace(/^(팀명|팀이름|팀 이름)[:：]?/i, '').trim();
+      if (!teamName || teamName.length < 2) {
+        return respondKakao(res, kakaoText('팀 이름은 2글자 이상으로 입력해주세요.\n예: 한라탐험대', ['취소']), event, team, kakaoUserId);
       }
-
-      if (!newMemberName || newMemberName.length < 2) {
-        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.
-예: 홍길동', ['취소']), event, team, kakaoUserId);
+      if (teamName.length > 30 || isBlockedTeamName(teamName)) {
+        return respondKakao(res, kakaoText('사용할 수 없는 팀 이름입니다. 다른 팀 이름을 입력해주세요.', ['취소']), event, team, kakaoUserId);
       }
+      await query(`UPDATE teams SET team_name=$1 WHERE id=$2;`, [teamName.slice(0, 30), team.id]);
+      await clearUserState(event.id, kakaoUserId);
+      team = await getTeamByKakaoUser(event.id, kakaoUserId);
+      await addTeamNotice(event.id, team.id, `팀명이 '${team.team_name}'(으)로 변경되었습니다.`, kakaoUserId);
+      return respondKakao(res, kakaoText(`팀명 수정 완료!\n\n새 팀명: ${team.team_name}`, menuQuickReplies), event, team, kakaoUserId);
+    }
 
-      if (newMemberName.length > 20) {
-        return respondKakao(res, kakaoText('이름 또는 닉네임은 20글자 이하로 입력해주세요.', ['취소']), event, team, kakaoUserId);
+    if (team && userState?.state === 'WAIT_EDIT_MEMBER_NAME') {
+      const memberName = cleanName(utterance);
+      if (memberName.length < 2) {
+        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동', ['취소']), event, team, kakaoUserId);
       }
-
-      if (isBlockedTeamName(newMemberName)) {
-        return respondKakao(res, kakaoText('사용할 수 없는 이름입니다.
-다른 이름 또는 닉네임을 입력해주세요.
-예: 홍길동', ['취소']), event, team, kakaoUserId);
-      }
-
-      const oldMemberName = member.member_name || (member.role === 'leader' ? '팀장' : '팀원');
-      const safeMemberName = newMemberName.slice(0, 20);
-
       await query(
-        `UPDATE team_members
-         SET member_name=$1
-         WHERE event_id=$2 AND kakao_user_id=$3
-         RETURNING *;`,
-        [safeMemberName, event.id, kakaoUserId]
+        `UPDATE team_members SET member_name=$1 WHERE event_id=$2 AND kakao_user_id=$3;`,
+        [memberName, event.id, kakaoUserId]
       );
-
-      if (member.role === 'leader') {
-        await query(`UPDATE teams SET leader_name=$1 WHERE id=$2;`, [safeMemberName, team.id]);
-      }
-
       await clearUserState(event.id, kakaoUserId);
-      await addTeamNotice(event.id, team.id, `${oldMemberName}님이 이름을 ${safeMemberName}(으)로 변경했습니다.`, kakaoUserId);
-
-      return respondKakao(
-        res,
-        kakaoText(`이름 또는 닉네임이 수정되었습니다.
-
-현재 표시 이름: ${safeMemberName}`, menuQuickReplies),
-        event,
-        team,
-        kakaoUserId
-      );
+      await addTeamNotice(event.id, team.id, `${memberName}님이 이름/닉네임을 수정했습니다.`, kakaoUserId);
+      return respondKakao(res, kakaoText(`이름/닉네임 수정 완료!\n\n새 이름: ${memberName}`, menuQuickReplies), event, team, kakaoUserId);
     }
 
-    // 7. 아직 팀 등록이 안 된 사용자
-    if (!team) {
-      if (isStartCommand(utterance)) {
+    if (isStartCommand(utterance) || isHelpCommand(utterance)) {
+      if (!team) {
         return respondKakao(
           res,
-          kakaoText(
-            '제주 AI 탐험대에 오신 것을 환영합니다!\n\n새 팀을 만들려면 "팀 생성"\n기존 팀에 합류하려면 "팀 참가"를 선택해주세요.',
-            startQuickReplies
-          )
+          kakaoText('제주 AI 탐험대에 오신 것을 환영합니다!\n\n새 팀을 만들거나 기존 팀에 참가해주세요.', startQuickReplies)
         );
       }
-
-      if (isCreateTeamCommand(utterance)) {
-        await setUserState(event.id, kakaoUserId, 'WAIT_CREATE_TEAM_NAME');
-        return respondKakao(res, kakaoText('새 팀을 생성합니다.\n\n먼저 사용할 팀 이름을 입력해주세요.\n예: 귤탐험대', ['취소']));
-      }
-
-      if (isJoinTeamCommand(utterance)) {
-        return respondKakao(res, await handleJoinTeamList(event, kakaoUserId));
-      }
-
       return respondKakao(
         res,
-        kakaoText(
-          '먼저 참가 등록이 필요합니다.\n\n새 팀을 만들려면 "팀 생성"\n기존 팀에 합류하려면 "팀 참가"를 입력해주세요.',
-          startQuickReplies
-        )
-      );
-    }
-
-    // 8. 이미 팀에 속한 사용자
-    if (!utterance) {
-      return respondKakao(res, kakaoText('입력값이 비어 있습니다. QR코드를 스캔하거나 메뉴를 입력해주세요.', menuQuickReplies), event, team, kakaoUserId);
-    }
-
-    if (isCreateTeamCommand(utterance) || isJoinTeamCommand(utterance)) {
-      return respondKakao(
-        res,
-        kakaoText(`${team.team_name} 팀에 이미 참가되어 있습니다.\n\n팀코드: ${team.team_code}`, menuQuickReplies),
+        kakaoText(`${team.team_name} 팀으로 참여 중입니다.\n\n현장 QR코드를 스캔하거나 메뉴를 선택해주세요.`, menuQuickReplies),
         event,
         team,
         kakaoUserId
       );
     }
 
-    if (isStartCommand(utterance)) {
-      return respondKakao(
-        res,
-        kakaoText(`${team.team_name}님, 이미 참가 등록되어 있습니다.\n\n팀코드: ${team.team_code}`, menuQuickReplies),
-        event,
-        team,
-        kakaoUserId
-      );
+    if (!team && isCreateTeamCommand(utterance)) {
+      await setUserState(event.id, kakaoUserId, 'WAIT_LEADER_NAME', {});
+      return respondKakao(res, kakaoText('팀원 목록에 표시될 이름 또는 닉네임을 입력해주세요.\n예: 홍길동', ['취소']));
     }
 
-    if (isMemberNameEditCommand(utterance)) {
-      const member = await getTeamMember(event.id, kakaoUserId);
-      const currentName = member?.member_name || (member?.role === 'leader' ? '팀장' : '팀원');
+    if (!team && isJoinTeamCommand(utterance)) {
+      const response = await handleJoinTeamList(event, kakaoUserId);
+      return respondKakao(res, response);
+    }
 
-      await setUserState(event.id, kakaoUserId, 'WAIT_MEMBER_RENAME');
-      return respondKakao(
-        res,
-        kakaoText(`현재 표시 이름: ${currentName}
-
-새로운 이름 또는 닉네임을 입력해주세요.
-예: 홍길동`, ['취소']),
-        event,
-        team,
-        kakaoUserId
-      );
+    if (!team) {
+      return respondKakao(res, kakaoText('먼저 팀을 만들거나 기존 팀에 참가해주세요.', startQuickReplies));
     }
 
     if (isTeamNameEditCommand(utterance)) {
-      const member = await getTeamMember(event.id, kakaoUserId);
+      await setUserState(event.id, kakaoUserId, 'WAIT_EDIT_TEAM_NAME', {});
+      return respondKakao(res, kakaoText('새 팀명을 입력해주세요.\n예: 한라탐험대', ['취소']), event, team, kakaoUserId);
+    }
 
-      if (!member || member.role !== 'leader') {
-        return respondKakao(
-          res,
-          kakaoText(`팀 이름 수정은 팀장만 가능합니다.\n\n현재 팀명: ${team.team_name}`, menuQuickReplies),
-          event,
-          team,
-          kakaoUserId
-        );
-      }
-
-      await setUserState(event.id, kakaoUserId, 'WAIT_TEAM_RENAME');
-      return respondKakao(res, kakaoText(`현재 팀명: ${team.team_name}\n\n새로운 팀 이름을 입력해주세요.`, ['취소']), event, team, kakaoUserId);
+    if (isMemberNameEditCommand(utterance)) {
+      await setUserState(event.id, kakaoUserId, 'WAIT_EDIT_MEMBER_NAME', {});
+      return respondKakao(res, kakaoText('새 이름 또는 닉네임을 입력해주세요.\n예: 홍길동', ['취소']), event, team, kakaoUserId);
     }
 
     if (isTeamMembersCommand(utterance)) {
       return respondKakao(res, await handleTeamMembers(team), event, team, kakaoUserId);
-    }
-
-    if (isHelpCommand(utterance)) {
-      return respondKakao(
-        res,
-        kakaoText(
-          '사용법\n\n1. 현장 QR코드를 스캔합니다.\n2. 챗봇이 내는 문제에 답합니다.\n3. 사진/GPS 미션은 버튼을 눌러 인증합니다.\n4. 내 점수 또는 순위를 입력해 확인합니다.\n5. 내 이름을 바꾸려면 "이름 수정"을 입력합니다.\n6. 팀명을 바꾸려면 "팀명 수정"을 입력합니다.\n7. 팀원을 보려면 "팀원 목록"을 입력합니다.',
-          menuQuickReplies
-        ),
-        event,
-        team,
-        kakaoUserId
-      );
     }
 
     if (isMissionListCommand(utterance)) {
@@ -1515,45 +1184,114 @@ async function handleKakaoSkill(req, res) {
 
     return respondKakao(res, await handleAnswer(req, event, team, utterance, kakaoUserId), event, team, kakaoUserId);
   } catch (error) {
-    console.error('[카카오 스킬 오류]', error);
-    return respondKakao(
-      res,
-      kakaoText('서버 처리 중 오류가 발생했습니다.\n\n관리자에게 문의해주세요.')
-    );
+    console.error('Kakao skill error:', error);
+    return res.status(200).json(kakaoText(`서버 처리 중 오류가 발생했습니다.\n\n${error.message}`));
   }
 }
+
+app.get('/', (_req, res) => {
+  res.status(200).send('Jeju Kakao Race Server Running');
+});
+
+app.get('/health', async (_req, res) => {
+  if (!DATABASE_URL) {
+    return res.status(200).json({ ok: true, server: 'running', db_ready: false, db_error: 'DATABASE_URL is not set', time: nowIso() });
+  }
+
+  try {
+    await query('SELECT 1;');
+    res.status(200).json({ ok: true, server: 'running', db_ready: dbReady, time: nowIso() });
+  } catch (error) {
+    res.status(200).json({ ok: true, server: 'running', db_ready: false, db_error: error.message, time: nowIso() });
+  }
+});
 
 app.post('/kakao/skill', handleKakaoSkill);
 app.post('/webhook', handleKakaoSkill);
 
-function requireAdmin(req, res, next) {
-  const token = req.get('x-admin-password') || req.query.admin_password || req.body.admin_password;
-  if (token !== ADMIN_PASSWORD) return res.status(401).json({ ok: false, message: '관리자 비밀번호가 필요합니다.' });
-  next();
-}
-
-app.post('/api/admin/login', (req, res) => {
-  if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ ok: false, message: '비밀번호가 틀렸습니다.' });
-  res.json({ ok: true });
+app.get('/kakao/skill', (_req, res) => {
+  res.send('Kakao skill endpoint is alive. Kakao uses POST.');
 });
 
-app.get('/api/admin/summary', requireAdmin, async (_req, res) => {
-  const event = await getActiveEvent();
-  const ranking = await buildRanking(event.id);
-  const missions = await getMissions(event.id);
-  const pending = await query(`SELECT COUNT(*)::int AS count FROM submissions WHERE event_id=$1 AND status='pending';`, [event.id]);
-  const wrong = await query(`SELECT COUNT(*)::int AS count FROM submissions WHERE event_id=$1 AND status='wrong';`, [event.id]);
-  const finished = ranking.filter((r) => r.status === 'finished').length;
-  res.json({
-    ok: true,
-    event,
-    teamCount: ranking.length,
-    finishedCount: finished,
-    missionCount: missions.length,
-    pendingCount: pending.rows[0].count,
-    wrongCount: wrong.rows[0].count,
-    topTeam: ranking[0] || null,
-  });
+app.get('/webhook', (_req, res) => {
+  res.send('Kakao webhook endpoint is alive. Kakao uses POST.');
+});
+
+app.get('/upload', (_req, res) => res.sendFile(path.join(publicDir, 'upload.html')));
+app.get('/gps', (_req, res) => res.sendFile(path.join(publicDir, 'gps.html')));
+
+app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) => {
+  try {
+    const event = await getActiveEvent();
+    const { team_code, mission_code, token, comment = '' } = req.body;
+    const team = await getTeamByCodeAndToken(event.id, team_code, token);
+    const mission = await getMissionByCode(event.id, mission_code);
+
+    if (!team || !mission || mission.mission_type !== 'photo') {
+      return res.status(400).json({ ok: false, message: '팀/미션 인증 정보가 올바르지 않습니다.' });
+    }
+    if (!req.file) return res.status(400).json({ ok: false, message: '사진 파일이 필요합니다.' });
+    if (await isMissionAlreadyCompleted(team.id, mission.id)) return res.json({ ok: true, message: '이미 완료된 미션입니다.' });
+
+    await query(
+      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, image_data, image_mime, status, score)
+       VALUES ($1,$2,$3,$4,$5,$6,'pending',0);`,
+      [event.id, team.id, mission.id, comment, req.file.buffer.toString('base64'), req.file.mimetype]
+    );
+
+    await addTeamNotice(event.id, team.id, `${mission.mission_code} ${mission.mission_name} 사진이 접수되었습니다. 운영자 승인 후 점수가 반영됩니다.`);
+    res.json({ ok: true, message: '사진이 접수되었습니다. 운영자 승인 후 점수가 반영됩니다.' });
+  } catch (error) {
+    res.status(500).json({ ok: false, message: error.message });
+  }
+});
+
+app.post('/api/public/verify/location', async (req, res) => {
+  try {
+    const event = await getActiveEvent();
+    const { team_code, mission_code, token, lat, lng } = req.body;
+    const team = await getTeamByCodeAndToken(event.id, team_code, token);
+    const mission = await getMissionByCode(event.id, mission_code);
+
+    if (!team || !mission || mission.mission_type !== 'gps') {
+      return res.status(400).json({ ok: false, message: '팀/미션 인증 정보가 올바르지 않습니다.' });
+    }
+    if (mission.latitude === null || mission.longitude === null) {
+      return res.status(400).json({ ok: false, message: '미션 좌표가 설정되어 있지 않습니다.' });
+    }
+    if (await isMissionAlreadyCompleted(team.id, mission.id)) {
+      return res.json({ ok: true, message: '이미 완료된 미션입니다.' });
+    }
+
+    const distance = haversineMeters(Number(lat), Number(lng), Number(mission.latitude), Number(mission.longitude));
+    const ok = distance <= Number(mission.radius_m || 80);
+
+    await query(
+      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, gps_lat, gps_lng, distance_m, status, score)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9);`,
+      [event.id, team.id, mission.id, `GPS ${Math.round(distance)}m`, Number(lat), Number(lng), distance, ok ? 'approved' : 'rejected', ok ? mission.score : 0]
+    );
+
+    if (ok) {
+      await maybeMarkFinished(team, event.id);
+      const total = await teamTotalScore(team.id);
+      await addTeamNotice(event.id, team.id, `${mission.mission_code} ${mission.mission_name} GPS 인증이 완료되었습니다. 현재 팀 점수는 ${total}점입니다.`);
+    }
+
+    res.json({
+      ok,
+      distance_m: Math.round(distance),
+      message: ok
+        ? `GPS 인증 완료! ${mission.score}점이 반영되었습니다.`
+        : `현재 위치가 미션 장소에서 ${Math.round(distance)}m 떨어져 있습니다. 현장에서 다시 시도해주세요.`,
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, message: error.message });
+  }
+});
+
+app.get('/api/admin/status', requireAdmin, async (_req, res) => {
+  res.json({ ok: true, db_ready: dbReady, db_error: dbInitError, time: nowIso() });
 });
 
 app.get('/api/admin/rankings', requireAdmin, async (_req, res) => {
@@ -1564,9 +1302,7 @@ app.get('/api/admin/rankings', requireAdmin, async (_req, res) => {
 app.get('/api/admin/teams', requireAdmin, async (_req, res) => {
   const event = await getActiveEvent();
   const result = await query(
-    `SELECT
-       t.*,
-       COUNT(tm.id)::int AS member_count
+    `SELECT t.*, COUNT(tm.id)::int AS member_count
      FROM teams t
      LEFT JOIN team_members tm ON tm.team_id=t.id
      WHERE t.event_id=$1
@@ -1591,27 +1327,10 @@ app.post('/api/admin/missions', requireAdmin, async (req, res) => {
   const event = await getActiveEvent();
   const m = req.body;
   const result = await query(
-    `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, question, answer, score, hint, correct_message, answer_explanation, location_name, latitude, longitude, radius_m, sort_order, is_required)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+    `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, question, answer, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
      RETURNING *;`,
-    [
-      event.id,
-      m.mission_code,
-      m.mission_name,
-      m.mission_type,
-      m.question || '',
-      m.answer || '',
-      Number(m.score || 0),
-      m.hint || '',
-      m.correct_message || '',
-      m.answer_explanation || '',
-      m.location_name || '',
-      m.latitude || null,
-      m.longitude || null,
-      Number(m.radius_m || 80),
-      Number(m.sort_order || 0),
-      m.is_required !== false,
-    ]
+    [event.id, m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false]
   );
   res.json({ ok: true, mission: result.rows[0] });
 });
@@ -1621,26 +1340,9 @@ app.patch('/api/admin/missions/:id', requireAdmin, async (req, res) => {
   const result = await query(
     `UPDATE missions SET
       mission_code=$1, mission_name=$2, mission_type=$3, question=$4, answer=$5, score=$6,
-      hint=$7, correct_message=$8, answer_explanation=$9, location_name=$10, latitude=$11, longitude=$12, radius_m=$13, sort_order=$14, is_required=$15
-     WHERE id=$16 RETURNING *;`,
-    [
-      m.mission_code,
-      m.mission_name,
-      m.mission_type,
-      m.question || '',
-      m.answer || '',
-      Number(m.score || 0),
-      m.hint || '',
-      m.correct_message || '',
-      m.answer_explanation || '',
-      m.location_name || '',
-      m.latitude || null,
-      m.longitude || null,
-      Number(m.radius_m || 80),
-      Number(m.sort_order || 0),
-      m.is_required !== false,
-      req.params.id,
-    ]
+      hint=$7, location_name=$8, latitude=$9, longitude=$10, radius_m=$11, sort_order=$12, is_required=$13
+     WHERE id=$14 RETURNING *;`,
+    [m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, req.params.id]
   );
   res.json({ ok: true, mission: result.rows[0] });
 });
@@ -1655,10 +1357,12 @@ app.get('/api/admin/submissions', requireAdmin, async (req, res) => {
   const status = req.query.status;
   const params = [event.id];
   let where = 's.event_id=$1';
+
   if (status) {
     params.push(status);
     where += ` AND s.status=$${params.length}`;
   }
+
   const result = await query(
     `SELECT s.id, s.answer_text, s.status, s.score, s.submitted_at, s.reviewed_at, s.review_note,
             s.image_mime, CASE WHEN s.image_data IS NULL THEN false ELSE true END AS has_image,
@@ -1686,25 +1390,30 @@ app.get('/api/admin/submissions/:id/image', requireAdmin, async (req, res) => {
 
 app.post('/api/admin/submissions/:id/review', requireAdmin, async (req, res) => {
   const { decision, note = '' } = req.body;
-  if (!['approved', 'rejected'].includes(decision)) return res.status(400).json({ ok: false, message: 'decision은 approved 또는 rejected여야 합니다.' });
-  const sub = (await query(
-    `SELECT s.*, m.score AS mission_score FROM submissions s JOIN missions m ON m.id=s.mission_id WHERE s.id=$1;`,
-    [req.params.id]
-  )).rows[0];
+  if (!['approved', 'rejected'].includes(decision)) {
+    return res.status(400).json({ ok: false, message: 'decision은 approved 또는 rejected여야 합니다.' });
+  }
+
+  const sub = (
+    await query(`SELECT s.*, m.score AS mission_score, m.mission_code, m.mission_name FROM submissions s JOIN missions m ON m.id=s.mission_id WHERE s.id=$1;`, [req.params.id])
+  ).rows[0];
+
   if (!sub) return res.status(404).json({ ok: false, message: '제출 기록을 찾을 수 없습니다.' });
+
   const score = decision === 'approved' ? Number(sub.mission_score || 0) : 0;
   const result = await query(
     `UPDATE submissions SET status=$1, score=$2, review_note=$3, reviewed_at=NOW() WHERE id=$4 RETURNING *;`,
     [decision, score, note, req.params.id]
   );
+
   const team = (await query(`SELECT * FROM teams WHERE id=$1;`, [sub.team_id])).rows[0];
   await maybeMarkFinished(team, sub.event_id);
-  if (decision === 'approved' && sub.status !== 'approved') {
-    const mission = (await query(`SELECT * FROM missions WHERE id=$1;`, [sub.mission_id])).rows[0];
-    if (mission) {
-      await addTeamNotice(sub.event_id, team.id, `${mission.mission_code} ${mission.mission_name} 미션이 운영자 승인으로 완료되었습니다. 획득 점수: ${score}점`);
-    }
+
+  if (decision === 'approved') {
+    const total = await teamTotalScore(team.id);
+    await addTeamNotice(sub.event_id, team.id, `${sub.mission_code} ${sub.mission_name} 사진 미션이 승인되었습니다. 현재 팀 점수는 ${total}점입니다.`);
   }
+
   res.json({ ok: true, submission: result.rows[0] });
 });
 
@@ -1730,73 +1439,26 @@ app.post('/api/admin/reset-event', requireAdmin, async (_req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/upload', (_req, res) => res.sendFile(path.join(publicDir, 'upload.html')));
-app.get('/gps', (_req, res) => res.sendFile(path.join(publicDir, 'gps.html')));
-
-app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) => {
-  try {
-    const event = await getActiveEvent();
-    const { team_code, mission_code, token, comment = '' } = req.body;
-    const team = await getTeamByCodeAndToken(event.id, team_code, token);
-    const mission = await getMissionByCode(event.id, mission_code);
-    if (!team || !mission || mission.mission_type !== 'photo') return res.status(400).json({ ok: false, message: '팀/미션 인증 정보가 올바르지 않습니다.' });
-    if (!req.file) return res.status(400).json({ ok: false, message: '사진 파일이 필요합니다.' });
-    if (await isMissionAlreadyCompleted(team.id, mission.id)) return res.json({ ok: true, message: '이미 완료된 미션입니다.' });
-    await query(
-      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, image_data, image_mime, status, score)
-       VALUES ($1,$2,$3,$4,$5,$6,'pending',0);`,
-      [event.id, team.id, mission.id, comment, req.file.buffer.toString('base64'), req.file.mimetype]
-    );
-    res.json({ ok: true, message: '사진이 접수되었습니다. 운영자 승인 후 점수가 반영됩니다.' });
-  } catch (error) {
-    res.status(500).json({ ok: false, message: error.message });
-  }
-});
-
-app.post('/api/public/verify/location', async (req, res) => {
-  try {
-    const event = await getActiveEvent();
-    const { team_code, mission_code, token, lat, lng } = req.body;
-    const team = await getTeamByCodeAndToken(event.id, team_code, token);
-    const mission = await getMissionByCode(event.id, mission_code);
-    if (!team || !mission || mission.mission_type !== 'gps') return res.status(400).json({ ok: false, message: '팀/미션 인증 정보가 올바르지 않습니다.' });
-    if (mission.latitude === null || mission.longitude === null) return res.status(400).json({ ok: false, message: '미션 좌표가 설정되어 있지 않습니다.' });
-    if (await isMissionAlreadyCompleted(team.id, mission.id)) return res.json({ ok: true, message: '이미 완료된 미션입니다.' });
-    const distance = haversineMeters(Number(lat), Number(lng), Number(mission.latitude), Number(mission.longitude));
-    const ok = distance <= Number(mission.radius_m || 80);
-    await query(
-      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, gps_lat, gps_lng, distance_m, status, score)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9);`,
-      [event.id, team.id, mission.id, `GPS ${Math.round(distance)}m`, Number(lat), Number(lng), distance, ok ? 'approved' : 'rejected', ok ? mission.score : 0]
-    );
-    await maybeMarkFinished(team, event.id);
-    if (ok) {
-      await addTeamNotice(event.id, team.id, `${mission.mission_code} ${mission.mission_name} GPS 미션이 완료되었습니다. 획득 점수: ${mission.score}점`);
-    }
-    res.json({ ok, distance_m: Math.round(distance), message: ok ? `GPS 인증 완료! ${mission.score}점이 반영되었습니다.` : `현재 위치가 미션 장소에서 ${Math.round(distance)}m 떨어져 있습니다. 현장에서 다시 시도해주세요.` });
-  } catch (error) {
-    res.status(500).json({ ok: false, message: error.message });
-  }
-});
-
 app.use((err, _req, res, _next) => {
   console.error(err);
   res.status(500).json({ ok: false, message: err.message || '서버 오류' });
 });
 
-app.get('/kakao/skill', (_req, res) => {
-  res.send('Kakao skill endpoint is alive. Kakao uses POST.');
-});
+// 중요: Render 배포 실패를 막기 위해 DB 초기화보다 먼저 포트를 엽니다.
+// Render Web Service는 반드시 process.env.PORT로 0.0.0.0에 바인딩되어야 합니다.
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Jeju Kakao Race server running on 0.0.0.0:${PORT}`);
 
-app.get('/webhook', (_req, res) => {
-  res.send('Kakao webhook endpoint is alive. Kakao uses POST.');
+  initDb()
+    .then(() => {
+      dbReady = true;
+      dbInitError = '';
+      console.log('DB initialization completed.');
+    })
+    .catch((error) => {
+      dbReady = false;
+      dbInitError = error.message;
+      console.error('DB initialization failed:', error);
+      // process.exit(1)을 하지 않습니다. 그래야 Render가 포트 감지에 성공합니다.
+    });
 });
-
-initDb()
-  .then(() => {
-    app.listen(PORT, () => console.log(`Jeju Kakao Race server running on :${PORT}`));
-  })
-  .catch((error) => {
-    console.error('DB initialization failed:', error);
-    process.exit(1);
-  });
