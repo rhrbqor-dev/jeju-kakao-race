@@ -343,11 +343,12 @@ async function generateTeamCode() {
 async function createTeam(eventId, kakaoUserId, teamName, memberName = '팀장') {
   const code = await generateTeamCode();
   const token = teamToken();
+  const safeMemberName = memberName || '팀장';
   const result = await query(
-    `INSERT INTO teams(event_id, team_code, team_name, kakao_user_id, public_token)
-     VALUES ($1,$2,$3,$4,$5)
+    `INSERT INTO teams(event_id, team_code, team_name, leader_name, kakao_user_id, public_token)
+     VALUES ($1,$2,$3,$4,$5,$6)
      RETURNING *;`,
-    [eventId, code, teamName, kakaoUserId, token]
+    [eventId, code, teamName, safeMemberName, kakaoUserId, token]
   );
 
   const team = result.rows[0];
@@ -357,7 +358,7 @@ async function createTeam(eventId, kakaoUserId, teamName, memberName = '팀장')
      VALUES ($1,$2,$3,$4,'leader')
      ON CONFLICT(event_id, kakao_user_id)
      DO UPDATE SET team_id=$2, member_name=$4, role='leader', joined_at=NOW();`,
-    [eventId, team.id, kakaoUserId, memberName || '팀장']
+    [eventId, team.id, kakaoUserId, safeMemberName]
   );
 
   return team;
@@ -1112,13 +1113,48 @@ async function handleKakaoSkill(req, res) {
         return respondKakao(res, kakaoText('사용할 수 없는 팀 이름입니다.\n다른 팀 이름을 입력해주세요.\n예: 귤탐험대'));
       }
 
-      team = await createTeam(event.id, kakaoUserId, teamName.slice(0, 30), '팀장');
+      await setUserState(event.id, kakaoUserId, 'WAIT_CREATE_MEMBER_NAME', {
+        team_name: teamName.slice(0, 30),
+      });
+
+      return respondKakao(
+        res,
+        kakaoText(
+          `${teamName.slice(0, 30)} 팀으로 생성할게요.\n\n팀장으로 표시할 이름 또는 닉네임을 입력해주세요.\n예: 규백`,
+          ['취소']
+        )
+      );
+    }
+
+    // 2. 새 팀 생성: 팀장 이름/닉네임 입력 후 생성 완료
+    if (!team && userState?.state === 'WAIT_CREATE_MEMBER_NAME') {
+      const dataTeamName = String(data.team_name || '').trim();
+      const memberName = utterance.replace(/^(이름|닉네임)[:：]?/i, '').trim();
+
+      if (!dataTeamName) {
+        await clearUserState(event.id, kakaoUserId);
+        return respondKakao(res, kakaoText('팀 생성 정보가 사라졌습니다. 다시 "팀 생성"을 입력해주세요.', ['팀 생성']));
+      }
+
+      if (!memberName || memberName.length < 2) {
+        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 규백'));
+      }
+
+      if (memberName.length > 20) {
+        return respondKakao(res, kakaoText('이름 또는 닉네임은 20글자 이하로 입력해주세요.'));
+      }
+
+      if (isBlockedTeamName(memberName)) {
+        return respondKakao(res, kakaoText('사용할 수 없는 이름입니다.\n다른 이름 또는 닉네임을 입력해주세요.\n예: 규백'));
+      }
+
+      team = await createTeam(event.id, kakaoUserId, dataTeamName, memberName.slice(0, 20));
       await clearUserState(event.id, kakaoUserId);
 
       return respondKakao(
         res,
         kakaoText(
-          `${team.team_name} 팀이 생성되었습니다!\n\n팀코드: ${team.team_code}\n\n팀원에게 이 코드를 알려주세요.\n팀원은 "팀 참가"를 누른 뒤 팀을 선택하고 팀코드를 입력하면 합류할 수 있습니다.\n\n이제 현장 QR코드를 스캔하면 미션이 시작됩니다.`,
+          `${team.team_name} 팀이 생성되었습니다!\n\n팀장: ${memberName.slice(0, 20)}\n팀코드: ${team.team_code}\n\n팀원에게 이 코드를 알려주세요.\n팀원은 "팀 참가"를 누른 뒤 팀을 선택하고 팀코드를 입력하면 합류할 수 있습니다.\n\n이제 현장 QR코드를 스캔하면 미션이 시작됩니다.`,
           menuQuickReplies
         ),
         event,
@@ -1127,7 +1163,7 @@ async function handleKakaoSkill(req, res) {
       );
     }
 
-    // 2. 팀 참가: 팀 목록에서 번호 선택
+    // 3. 팀 참가: 팀 목록에서 번호 선택
     if (!team && userState?.state === 'WAIT_SELECT_JOIN_TEAM') {
       if (!/^\d+$/.test(utterance)) {
         return respondKakao(res, kakaoText('참가할 팀 번호를 숫자로 입력해주세요.\n취소하려면 "취소"를 입력하세요.'));
@@ -1170,7 +1206,7 @@ async function handleKakaoSkill(req, res) {
         selected_team_name: selectedTeam.team_name,
       });
 
-      return respondKakao(res, kakaoText(`${selectedTeam.team_name} 팀코드가 확인되었습니다.\n\n팀에서 사용할 이름을 입력해주세요.\n예: 규백`, ['취소']));
+      return respondKakao(res, kakaoText(`${selectedTeam.team_name} 팀코드가 확인되었습니다.\n\n팀에서 사용할 이름 또는 닉네임을 입력해주세요.\n예: 규백`, ['취소']));
     }
 
     // 4. 팀 참가: 참가자 이름 입력 후 합류 완료
@@ -1178,11 +1214,11 @@ async function handleKakaoSkill(req, res) {
       const memberName = utterance.replace(/^(이름|닉네임)[:：]?/i, '').trim();
 
       if (!memberName || memberName.length < 2) {
-        return respondKakao(res, kakaoText('이름은 2글자 이상으로 입력해주세요.\n예: 규백'));
+        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 규백'));
       }
 
       if (memberName.length > 20) {
-        return respondKakao(res, kakaoText('이름은 20글자 이하로 입력해주세요.'));
+        return respondKakao(res, kakaoText('이름 또는 닉네임은 20글자 이하로 입력해주세요.'));
       }
 
       const joinedTeam = await joinTeamById(event.id, Number(data.selected_team_id || 0), kakaoUserId, memberName.slice(0, 20));
@@ -1276,7 +1312,7 @@ async function handleKakaoSkill(req, res) {
 
       if (isCreateTeamCommand(utterance)) {
         await setUserState(event.id, kakaoUserId, 'WAIT_CREATE_TEAM_NAME');
-        return respondKakao(res, kakaoText('새 팀을 생성합니다.\n\n사용할 팀 이름을 입력해주세요.\n예: 귤탐험대', ['취소']));
+        return respondKakao(res, kakaoText('새 팀을 생성합니다.\n\n먼저 사용할 팀 이름을 입력해주세요.\n예: 귤탐험대', ['취소']));
       }
 
       if (isJoinTeamCommand(utterance)) {
