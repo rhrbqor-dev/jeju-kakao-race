@@ -1189,6 +1189,216 @@ async function handleKakaoSkill(req, res) {
   }
 }
 
+
+function adminPageHtml() {
+  return `<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>제주 AI 탐험대 관리자</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #f6f7f9; color: #111827; }
+    header { background: #111827; color: #fff; padding: 18px 22px; }
+    header h1 { margin: 0; font-size: 22px; }
+    main { max-width: 1180px; margin: 0 auto; padding: 18px; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    input, select, textarea, button { font: inherit; border-radius: 10px; border: 1px solid #d1d5db; padding: 9px 10px; }
+    input, select, textarea { background: #fff; }
+    button { cursor: pointer; background: #111827; color: #fff; border-color: #111827; }
+    button.secondary { background: #fff; color: #111827; }
+    button.danger { background: #b91c1c; border-color: #b91c1c; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
+    th, td { border-bottom: 1px solid #e5e7eb; text-align: left; padding: 8px; vertical-align: top; }
+    th { background: #f9fafb; }
+    .muted { color: #6b7280; font-size: 13px; }
+    .ok { color: #047857; font-weight: 700; }
+    .bad { color: #b91c1c; font-weight: 700; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+    .section-title { margin: 0 0 10px; font-size: 18px; }
+    .scroll { overflow-x: auto; }
+    .hidden { display: none; }
+    img.preview { max-width: 180px; max-height: 140px; border-radius: 8px; border: 1px solid #e5e7eb; }
+  </style>
+</head>
+<body>
+  <header><h1>제주 AI 탐험대 관리자</h1></header>
+  <main>
+    <div class="card" id="loginCard">
+      <h2 class="section-title">관리자 로그인</h2>
+      <p class="muted">Render 환경변수 <b>ADMIN_PASSWORD</b>에 설정한 비밀번호를 입력하세요. 설정하지 않았다면 기본값은 <b>admin1234</b>입니다.</p>
+      <div class="row">
+        <input id="password" type="password" placeholder="관리자 비밀번호" />
+        <button onclick="savePassword()">로그인</button>
+        <button class="secondary" onclick="loadAll()">새로고침</button>
+      </div>
+      <p id="loginMsg" class="muted"></p>
+    </div>
+
+    <div id="adminArea" class="hidden">
+      <div class="grid">
+        <div class="card">
+          <h2 class="section-title">서버 상태</h2>
+          <div id="statusBox" class="muted">불러오는 중...</div>
+        </div>
+        <div class="card">
+          <h2 class="section-title">관리</h2>
+          <div class="row">
+            <button onclick="loadAll()">전체 새로고침</button>
+            <button class="secondary" onclick="downloadCsv()">순위 CSV 다운로드</button>
+            <button class="danger" onclick="resetEvent()">팀/기록 초기화</button>
+          </div>
+          <p class="muted">초기화는 팀, 팀원, 제출 기록, 알림을 삭제합니다. 미션 설정은 유지됩니다.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="section-title">순위</h2>
+        <div class="scroll"><table id="rankingTable"></table></div>
+      </div>
+
+      <div class="card">
+        <h2 class="section-title">팀 목록</h2>
+        <div class="scroll"><table id="teamTable"></table></div>
+      </div>
+
+      <div class="card">
+        <h2 class="section-title">미션 목록</h2>
+        <p class="muted">미션 수정/추가는 현재 서버 API는 준비되어 있지만, 안전을 위해 이 화면에서는 목록 확인만 제공합니다.</p>
+        <div class="scroll"><table id="missionTable"></table></div>
+      </div>
+
+      <div class="card">
+        <h2 class="section-title">사진/GPS 제출 확인</h2>
+        <div class="row">
+          <select id="submissionStatus" onchange="loadSubmissions()">
+            <option value="">전체</option>
+            <option value="pending">사진 승인 대기</option>
+            <option value="approved">승인</option>
+            <option value="rejected">반려</option>
+            <option value="correct">퀴즈 정답</option>
+            <option value="wrong">퀴즈 오답</option>
+          </select>
+          <button onclick="loadSubmissions()">제출 새로고침</button>
+        </div>
+        <div class="scroll"><table id="submissionTable"></table></div>
+      </div>
+    </div>
+  </main>
+<script>
+  function getPassword() {
+    return localStorage.getItem('admin_password') || '';
+  }
+  function setCookiePassword(pw) {
+    document.cookie = 'admin_password=' + encodeURIComponent(pw) + '; path=/; max-age=86400; SameSite=Lax';
+  }
+  function savePassword() {
+    var pw = document.getElementById('password').value.trim();
+    if (!pw) { alert('비밀번호를 입력해주세요.'); return; }
+    localStorage.setItem('admin_password', pw);
+    setCookiePassword(pw);
+    document.getElementById('loginMsg').textContent = '비밀번호 저장됨. 관리자 데이터를 불러옵니다.';
+    loadAll();
+  }
+  async function api(path, options) {
+    options = options || {};
+    options.headers = Object.assign({ 'x-admin-password': getPassword(), 'Content-Type': 'application/json' }, options.headers || {});
+    var res = await fetch(path, options);
+    var text = await res.text();
+    var data;
+    try { data = text ? JSON.parse(text) : {}; } catch (e) { data = { ok:false, message:text }; }
+    if (!res.ok || data.ok === false) throw new Error(data.message || ('HTTP ' + res.status));
+    return data;
+  }
+  function esc(v) {
+    return String(v === null || v === undefined ? '' : v).replace(/[&<>"]/g, function(c) {
+      return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]);
+    });
+  }
+  function fmtDate(v) {
+    if (!v) return '';
+    try { return new Date(v).toLocaleString('ko-KR'); } catch (e) { return v; }
+  }
+  function setTable(id, headers, rows) {
+    var html = '<thead><tr>' + headers.map(function(h){ return '<th>' + esc(h) + '</th>'; }).join('') + '</tr></thead>';
+    html += '<tbody>' + (rows.length ? rows.map(function(row){ return '<tr>' + row.map(function(cell){ return '<td>' + cell + '</td>'; }).join('') + '</tr>'; }).join('') : '<tr><td colspan="' + headers.length + '" class="muted">데이터가 없습니다.</td></tr>') + '</tbody>';
+    document.getElementById(id).innerHTML = html;
+  }
+  async function loadStatus() {
+    var box = document.getElementById('statusBox');
+    var data = await api('/api/admin/status');
+    box.innerHTML = '서버: <span class="ok">작동 중</span><br>DB 준비: ' + (data.db_ready ? '<span class="ok">완료</span>' : '<span class="bad">대기/오류</span>') + '<br>시간: ' + esc(fmtDate(data.time)) + (data.db_error ? '<br>DB 오류: <span class="bad">' + esc(data.db_error) + '</span>' : '');
+  }
+  async function loadRankings() {
+    var data = await api('/api/admin/rankings');
+    setTable('rankingTable', ['순위','팀코드','팀명','점수','완료미션','상태','소요초'], data.rankings.map(function(r){
+      return [esc(r.rank), esc(r.team_code), esc(r.team_name), esc(r.total_score), esc(r.completed_count), esc(r.status), esc(r.duration_seconds || '')];
+    }));
+  }
+  async function loadTeams() {
+    var data = await api('/api/admin/teams');
+    setTable('teamTable', ['팀코드','팀명','팀장','팀원수','상태','시작시간','완료시간'], data.teams.map(function(t){
+      return [esc(t.team_code), esc(t.team_name), esc(t.leader_name), esc(t.member_count), esc(t.status), esc(fmtDate(t.start_time)), esc(fmtDate(t.finish_time))];
+    }));
+  }
+  async function loadMissions() {
+    var data = await api('/api/admin/missions');
+    setTable('missionTable', ['순서','코드','미션명','유형','점수','필수','질문','정답'], data.missions.map(function(m){
+      return [esc(m.sort_order), esc(m.mission_code), esc(m.mission_name), esc(m.mission_type), esc(m.score), esc(m.is_required ? 'Y':'N'), esc(m.question), esc(m.answer)];
+    }));
+  }
+  async function loadSubmissions() {
+    var status = document.getElementById('submissionStatus').value;
+    var data = await api('/api/admin/submissions' + (status ? '?status=' + encodeURIComponent(status) : ''));
+    setTable('submissionTable', ['제출시간','팀','미션','유형','상태','점수','답변/거리','사진','처리'], data.submissions.map(function(s){
+      var image = s.has_image ? '<a target="_blank" href="/api/admin/submissions/' + encodeURIComponent(s.id) + '/image?password=' + encodeURIComponent(getPassword()) + '">사진 보기</a>' : '';
+      var action = s.status === 'pending'
+        ? '<button onclick="review(' + s.id + ', \'approved\')">승인</button> <button class="danger" onclick="review(' + s.id + ', \'rejected\')">반려</button>'
+        : '';
+      var answer = s.answer_text || '';
+      if (s.distance_m !== null && s.distance_m !== undefined) answer += ' / ' + Math.round(s.distance_m) + 'm';
+      return [esc(fmtDate(s.submitted_at)), esc(s.team_name + ' (' + s.team_code + ')'), esc(s.mission_code + ' ' + s.mission_name), esc(s.mission_type), esc(s.status), esc(s.score), esc(answer), image, action];
+    }));
+  }
+  async function review(id, decision) {
+    if (!confirm(decision === 'approved' ? '승인할까요?' : '반려할까요?')) return;
+    await api('/api/admin/submissions/' + id + '/review', { method:'POST', body: JSON.stringify({ decision: decision }) });
+    await loadSubmissions();
+    await loadRankings();
+  }
+  function downloadCsv() {
+    var pw = getPassword();
+    window.open('/api/admin/export/rankings.csv?password=' + encodeURIComponent(pw), '_blank');
+  }
+  async function resetEvent() {
+    if (!confirm('정말 팀/팀원/제출기록을 초기화할까요? 미션 설정은 유지됩니다.')) return;
+    await api('/api/admin/reset-event', { method:'POST', body:'{}' });
+    await loadAll();
+  }
+  async function loadAll() {
+    try {
+      document.getElementById('adminArea').classList.remove('hidden');
+      await loadStatus();
+      await Promise.all([loadRankings(), loadTeams(), loadMissions(), loadSubmissions()]);
+      document.getElementById('loginMsg').textContent = '관리자 페이지가 정상 작동 중입니다.';
+    } catch (e) {
+      document.getElementById('adminArea').classList.add('hidden');
+      document.getElementById('loginMsg').innerHTML = '<span class="bad">오류: ' + esc(e.message) + '</span>';
+    }
+  }
+  document.getElementById('password').value = getPassword();
+  if (getPassword()) loadAll();
+</script>
+</body>
+</html>`;
+}
+
+app.get(['/admin', '/admin.html'], (_req, res) => {
+  res.status(200).type('html').send(adminPageHtml());
+});
+
 app.get('/', (_req, res) => {
   res.status(200).send('Jeju Kakao Race Server Running');
 });
