@@ -63,9 +63,6 @@
     </section>
 
     <section id="appBox" class="hidden">
-      <div class="notice">
-        카카오 오픈빌더 스킬 URL은 <b><span id="skillUrl"></span></b> 입니다. KAKAO_SKILL_KEY를 설정했다면 뒤에 <b>?key=설정값</b>을 붙여 등록하세요.
-      </div>
       <div id="photoAlert" class="alert hidden"></div>
 
       <nav>
@@ -241,7 +238,6 @@ async function login() {
     localStorage.setItem('adminPassword', adminPassword);
     $('loginBox').classList.add('hidden');
     $('appBox').classList.remove('hidden');
-    $('skillUrl').textContent = location.origin + '/kakao/skill';
     await loadAll();
     await loadPhotoAutoApproval();
   } catch(e) { $('loginMsg').textContent = e.message; }
