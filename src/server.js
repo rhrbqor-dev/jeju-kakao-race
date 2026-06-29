@@ -62,7 +62,8 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-app.use(express.static(publicDir));
+// public 폴더에 index.html이 있어도 기본 주소(/)는 관리자 페이지가 아니라 상태 확인 문구가 뜨도록 index 자동 제공을 끕니다.
+app.use(express.static(publicDir, { index: false }));
 
 function nowIso() {
   return new Date().toISOString();
