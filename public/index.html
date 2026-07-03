@@ -69,6 +69,7 @@
         <button onclick="loadAll()">새로고침</button>
         <button class="secondary" onclick="showTab('ranking')">순위표</button>
         <a class="btn secondary" href="/ranking" target="_blank">실시간 랭킹 화면</a>
+        <button class="secondary" onclick="showTab('rankingSettings')">랭킹 화면 설정</button>
         <button class="secondary" onclick="showTab('submissions')">제출내역</button>
         <button class="secondary" onclick="showTab('missions')">미션설정</button>
         <button class="secondary" onclick="showTab('settings')">사진 자동 승인</button>
@@ -160,10 +161,12 @@
             <div id="photoAutoStatus" style="margin-top:8px; white-space:pre-wrap;">설정을 불러오는 중입니다.</div>
           </div>
         </div>
+      </section>
 
-        <hr style="border:0; border-top:1px solid #e5e7eb; margin:22px 0;" />
+
+      <section id="tab-rankingSettings" class="section card hidden">
         <h2>실시간 랭킹 화면 설정</h2>
-        <p class="small">빔프로젝터나 TV에 띄우는 실시간 랭킹 화면의 상단 제목과 설명 문구를 수정합니다.</p>
+        <p class="small">빔프로젝터나 TV에 띄우는 실시간 랭킹 화면의 상단 제목과 설명 문구를 수정합니다. 저장하면 /ranking 화면에 자동 반영됩니다.</p>
         <div class="grid two">
           <div>
             <label>랭킹 화면 제목</label>
@@ -173,12 +176,13 @@
             <div style="height:12px"></div>
             <button onclick="saveRankingDisplaySettings()">랭킹 화면 설정 저장</button>
             <button class="secondary" onclick="loadRankingDisplaySettings()">설정 다시 불러오기</button>
+            <a class="btn secondary" href="/ranking" target="_blank">실시간 랭킹 화면 열기</a>
           </div>
           <div class="notice">
             <b>화면 주소</b>
             <div class="small" style="margin-top:8px; line-height:1.7;">
               <a href="/ranking" target="_blank">/ranking</a><br />
-              제목을 저장하면 실시간 랭킹 화면에 자동 반영됩니다.
+              제목과 설명 문구는 프로그램마다 다르게 설정할 수 있습니다.
             </div>
             <div id="rankingDisplayStatus" style="margin-top:8px; white-space:pre-wrap;">설정을 불러오는 중입니다.</div>
           </div>
@@ -562,9 +566,11 @@ async function review(id, decision) {
   await loadAll();
 }
 function showTab(name) {
-  ['ranking','submissions','missions','settings','messages'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
+  ['ranking','submissions','missions','settings','rankingSettings','messages'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
   if (name === 'settings') {
     loadPhotoAutoApproval().catch(e => alert(e.message));
+  }
+  if (name === 'rankingSettings') {
     loadRankingDisplaySettings().catch(e => alert(e.message));
   }
   if (name === 'messages') loadMessageSettings().catch(e => alert(e.message));
