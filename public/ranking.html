@@ -72,7 +72,7 @@
     <header>
       <div>
         <h1 id="title">실시간 랭킹</h1>
-        <div class="subtitle">점수 우선 · 동점 시 완주 소요시간 기준</div>
+        <div class="subtitle" id="subtitle">점수 우선 · 동점 시 완주 소요시간 기준</div>
       </div>
       <div class="status">
         <div class="pill"><span class="dot"></span><span>자동 갱신 중</span></div>
@@ -173,7 +173,11 @@
       const data = await res.json();
       if (!res.ok || !data.ok) throw new Error(data.message || '랭킹 조회 실패');
       const rankings = data.rankings || [];
-      if (data.event?.event_name) $('title').textContent = `${data.event.event_name} 실시간 랭킹`;
+      const display = data.display || {};
+      const titleText = display.title || (data.event?.event_name ? `${data.event.event_name} 실시간 랭킹` : '실시간 랭킹');
+      $('title').textContent = titleText;
+      document.title = titleText;
+      if ($('subtitle')) $('subtitle').textContent = display.subtitle || '점수 우선 · 동점 시 완주 소요시간 기준';
       renderTop3(rankings);
       renderTable(rankings);
       const now = new Date(data.server_time || Date.now());

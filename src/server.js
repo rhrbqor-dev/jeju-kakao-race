@@ -160,6 +160,29 @@ async function setSetting(eventId, settingKey, settingValue = {}) {
   );
 }
 
+
+
+const DEFAULT_RANKING_DISPLAY_SETTINGS = {
+  title: '제주 AI 탐험대 실시간 랭킹',
+  subtitle: '점수 우선 · 동점 시 완주 소요시간 기준',
+};
+
+function normalizeRankingDisplaySettings(value = {}) {
+  const incoming = value && typeof value === 'object' ? value : {};
+  const title = String(incoming.title ?? DEFAULT_RANKING_DISPLAY_SETTINGS.title).trim();
+  const subtitle = String(incoming.subtitle ?? DEFAULT_RANKING_DISPLAY_SETTINGS.subtitle).trim();
+  return {
+    title: title || DEFAULT_RANKING_DISPLAY_SETTINGS.title,
+    subtitle: subtitle || DEFAULT_RANKING_DISPLAY_SETTINGS.subtitle,
+  };
+}
+
+async function getRankingDisplaySettings(eventId) {
+  return normalizeRankingDisplaySettings(
+    await getSetting(eventId, 'ranking_display', DEFAULT_RANKING_DISPLAY_SETTINGS)
+  );
+}
+
 function normalizePhotoAutoApprovalSettings(value = {}) {
   return {
     enabled: Boolean(value.enabled),
@@ -2098,6 +2121,7 @@ app.get('/api/public/rankings', async (_req, res) => {
 
     const event = await getActiveEvent();
     const rankings = await buildRanking(event.id);
+    const display = await getRankingDisplaySettings(event.id);
 
     res.json({
       ok: true,
@@ -2106,6 +2130,7 @@ app.get('/api/public/rankings', async (_req, res) => {
         event_name: event.event_name,
         status: event.status,
       },
+      display,
       rankings: rankings.map((r) => ({
         rank: r.rank,
         team_code: r.team_code,
@@ -2431,6 +2456,20 @@ app.patch('/api/admin/settings/photo-auto-approval', requireAdmin, async (req, r
 });
 
 
+
+app.get('/api/admin/settings/ranking-display', requireAdmin, async (_req, res) => {
+  const event = await getActiveEvent();
+  const settings = await getRankingDisplaySettings(event.id);
+  res.json({ ok: true, settings });
+});
+
+app.patch('/api/admin/settings/ranking-display', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent();
+  const settings = normalizeRankingDisplaySettings(req.body || {});
+  await setSetting(event.id, 'ranking_display', settings);
+  res.json({ ok: true, settings });
+});
+
 app.get('/api/admin/settings/messages', requireAdmin, async (req, res) => {
   const event = await getActiveEvent();
   const settings = await getMessageSettings(event.id);
@@ -2455,6 +2494,20 @@ app.patch('/api/admin/settings/messages', requireAdmin, async (req, res) => {
   });
 });
 
+
+
+app.get('/api/admin/ranking-display', requireAdmin, async (_req, res) => {
+  const event = await getActiveEvent();
+  const settings = await getRankingDisplaySettings(event.id);
+  res.json({ ok: true, settings });
+});
+
+app.patch('/api/admin/ranking-display', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent();
+  const settings = normalizeRankingDisplaySettings(req.body || {});
+  await setSetting(event.id, 'ranking_display', settings);
+  res.json({ ok: true, settings });
+});
 
 // Compatibility aliases for older/newer admin pages.
 // These keep the settings buttons working even if the browser cached an older index.html.
