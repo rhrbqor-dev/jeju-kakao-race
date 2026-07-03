@@ -183,6 +183,108 @@ async function getRankingDisplaySettings(eventId) {
   );
 }
 
+
+const DEFAULT_CERTIFICATE_SETTINGS = {
+  enabled: false,
+  title: '수료증',
+  program_name: '제주 AI 탐험대',
+  recipient_template: '{member_name} 님',
+  body: '귀하는 “{program_name}”을 성실히 완주하였기에 이 증서를 드립니다.',
+  issuer: '이벤트인제주',
+  seal_text: '',
+  date_label: '{finish_date}',
+  background_image_data: '',
+  background_image_mime: '',
+};
+
+const CERTIFICATE_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const CERTIFICATE_IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
+function normalizeCertificateSettings(value = {}, current = DEFAULT_CERTIFICATE_SETTINGS) {
+  const incoming = value && typeof value === 'object' ? value : {};
+  const base = { ...DEFAULT_CERTIFICATE_SETTINGS, ...(current && typeof current === 'object' ? current : {}) };
+  const removeBackground = Boolean(incoming.remove_background);
+  let backgroundImageData = removeBackground ? '' : String(base.background_image_data || '');
+  let backgroundImageMime = removeBackground ? '' : String(base.background_image_mime || '');
+
+  if (incoming.background_image_data) {
+    const imageData = String(incoming.background_image_data || '').replace(/^data:[^;]+;base64,/, '').trim();
+    const imageMime = String(incoming.background_image_mime || 'image/jpeg').trim().toLowerCase();
+    if (!CERTIFICATE_IMAGE_MIMES.has(imageMime)) throw new Error('수료증 배경은 JPG, PNG, WEBP 이미지만 업로드할 수 있습니다.');
+    if (base64ByteLength(imageData) > CERTIFICATE_IMAGE_MAX_BYTES) throw new Error('수료증 배경 이미지는 최대 5MB까지만 업로드할 수 있습니다.');
+    backgroundImageData = imageData;
+    backgroundImageMime = imageMime;
+  }
+
+  return {
+    enabled: Boolean(incoming.enabled),
+    title: String(incoming.title ?? base.title ?? DEFAULT_CERTIFICATE_SETTINGS.title).trim() || DEFAULT_CERTIFICATE_SETTINGS.title,
+    program_name: String(incoming.program_name ?? base.program_name ?? DEFAULT_CERTIFICATE_SETTINGS.program_name).trim() || DEFAULT_CERTIFICATE_SETTINGS.program_name,
+    recipient_template: String(incoming.recipient_template ?? base.recipient_template ?? DEFAULT_CERTIFICATE_SETTINGS.recipient_template).trim() || DEFAULT_CERTIFICATE_SETTINGS.recipient_template,
+    body: String(incoming.body ?? base.body ?? DEFAULT_CERTIFICATE_SETTINGS.body).trim() || DEFAULT_CERTIFICATE_SETTINGS.body,
+    issuer: String(incoming.issuer ?? base.issuer ?? DEFAULT_CERTIFICATE_SETTINGS.issuer).trim(),
+    seal_text: String(incoming.seal_text ?? base.seal_text ?? '').trim(),
+    date_label: String(incoming.date_label ?? base.date_label ?? DEFAULT_CERTIFICATE_SETTINGS.date_label).trim() || DEFAULT_CERTIFICATE_SETTINGS.date_label,
+    background_image_data: backgroundImageData,
+    background_image_mime: backgroundImageMime,
+  };
+}
+
+async function getCertificateSettings(eventId) {
+  const saved = await getSetting(eventId, 'certificate_settings', DEFAULT_CERTIFICATE_SETTINGS);
+  return normalizeCertificateSettings(saved, saved);
+}
+
+function publicCertificateSettings(settings = {}, req = null) {
+  const normalized = normalizeCertificateSettings(settings, settings);
+  const hasBackground = Boolean(normalized.background_image_data);
+  return {
+    enabled: normalized.enabled,
+    title: normalized.title,
+    program_name: normalized.program_name,
+    recipient_template: normalized.recipient_template,
+    body: normalized.body,
+    issuer: normalized.issuer,
+    seal_text: normalized.seal_text,
+    date_label: normalized.date_label,
+    has_background_image: hasBackground,
+    background_image_mime: hasBackground ? normalized.background_image_mime || 'image/jpeg' : '',
+    background_image_url: hasBackground && req ? `${baseUrl(req)}/api/public/settings/certificate/background` : '',
+  };
+}
+
+function formatKoreanDate(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value || Date.now());
+  const parts = new Intl.DateTimeFormat('ko-KR', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const year = parts.find((p) => p.type === 'year')?.value || String(date.getFullYear());
+  const month = parts.find((p) => p.type === 'month')?.value || String(date.getMonth() + 1).padStart(2, '0');
+  const day = parts.find((p) => p.type === 'day')?.value || String(date.getDate()).padStart(2, '0');
+  return `${year}년 ${month}월 ${day}일`;
+}
+
+function escapeHtml(value = '') {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function certificateUrl(req, team, actorName = '') {
+  const params = new URLSearchParams();
+  params.set('team', team.team_code);
+  params.set('token', team.public_token || '');
+  if (actorName) params.set('member', actorName);
+  return `${baseUrl(req)}/certificate?${params.toString()}`;
+}
+
+
 function normalizePhotoAutoApprovalSettings(value = {}) {
   return {
     enabled: Boolean(value.enabled),
@@ -1578,20 +1680,22 @@ ${explanation}` : ''}
     const ranking = await buildRanking(event.id);
     const myRank = ranking.find((r) => r.id === team.id)?.rank || '-';
 
-    return kakaoConfiguredMessage(
-      req,
-      messages,
-      'finish',
-      renderTemplate(messages.finish_message, {
-        team_name: team.team_name,
-        team_code: team.team_code,
-        actor_name: actorName,
-        total,
-        rank: myRank,
-      }),
-      ['순위', '내 점수'],
-      '완주 완료'
-    );
+    const finishText = renderTemplate(messages.finish_message, {
+      team_name: team.team_name,
+      team_code: team.team_code,
+      actor_name: actorName,
+      total,
+      rank: myRank,
+    });
+    const certificateSettings = await getCertificateSettings(event.id);
+    const certificateButton = certificateSettings.enabled
+      ? [{ action: 'webLink', label: '수료증 보기', webLinkUrl: certificateUrl(req, team, actorName) }]
+      : [];
+    const finishImageUrl = messageImageUrl(req, messages, 'finish');
+    if (certificateButton.length || finishImageUrl) {
+      return kakaoCard('완주 완료', finishText, certificateButton, ['순위', '내 점수'], finishImageUrl);
+    }
+    return kakaoText(finishText, ['순위', '내 점수']);
   }
 
   if (mission.mission_type === 'photo' || mission.mission_type === 'gps') {
@@ -2456,6 +2560,120 @@ app.patch('/api/admin/settings/photo-auto-approval', requireAdmin, async (req, r
 });
 
 
+
+
+app.get('/api/admin/settings/certificate', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent();
+  const settings = await getCertificateSettings(event.id);
+  res.json({ ok: true, settings: publicCertificateSettings(settings, req), defaults: publicCertificateSettings(DEFAULT_CERTIFICATE_SETTINGS, req) });
+});
+
+app.patch('/api/admin/settings/certificate', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent();
+  const current = await getCertificateSettings(event.id);
+  const settings = normalizeCertificateSettings(req.body || {}, current);
+  await setSetting(event.id, 'certificate_settings', settings);
+  res.json({ ok: true, settings: publicCertificateSettings(settings, req), defaults: publicCertificateSettings(DEFAULT_CERTIFICATE_SETTINGS, req) });
+});
+
+app.get('/api/public/settings/certificate/background', async (_req, res) => {
+  const event = await getActiveEvent();
+  const settings = await getCertificateSettings(event.id);
+  if (!settings.background_image_data) return res.status(404).send('background not found');
+  res.set('Content-Type', settings.background_image_mime || 'image/jpeg');
+  res.set('Cache-Control', 'public, max-age=60');
+  res.send(Buffer.from(settings.background_image_data, 'base64'));
+});
+
+app.get('/certificate', async (req, res) => {
+  try {
+    const event = await getActiveEvent();
+    const settings = await getCertificateSettings(event.id);
+    if (!settings.enabled) {
+      return res.status(404).send('<!doctype html><meta charset="utf-8"><title>수료증</title><p>수료증 기능이 꺼져 있습니다.</p>');
+    }
+    const teamCode = String(req.query.team || '').trim();
+    const token = String(req.query.token || '').trim();
+    const team = await getTeamByCodeAndToken(event.id, teamCode, token);
+    if (!team) return res.status(403).send('<!doctype html><meta charset="utf-8"><title>수료증</title><p>수료증 접근 정보가 올바르지 않습니다.</p>');
+    if (!team.finish_time) return res.status(403).send('<!doctype html><meta charset="utf-8"><title>수료증</title><p>완주한 팀만 수료증을 확인할 수 있습니다.</p>');
+
+    const ranking = await buildRanking(event.id);
+    const myRank = ranking.find((r) => r.id === team.id)?.rank || '-';
+    const total = await teamTotalScore(team.id);
+    const memberName = String(req.query.member || team.team_name || '').trim() || team.team_name;
+    const finishDate = formatKoreanDate(team.finish_time || new Date());
+    const vars = {
+      team_name: team.team_name,
+      team_code: team.team_code,
+      member_name: memberName,
+      program_name: settings.program_name,
+      finish_date: finishDate,
+      total,
+      score: total,
+      rank: myRank,
+    };
+    const title = renderTemplate(settings.title, vars);
+    const recipient = renderTemplate(settings.recipient_template, vars);
+    const body = renderTemplate(settings.body, vars);
+    const issuer = renderTemplate(settings.issuer, vars);
+    const sealText = renderTemplate(settings.seal_text, vars);
+    const dateLabel = renderTemplate(settings.date_label, vars);
+    const backgroundUrl = settings.background_image_data ? '/api/public/settings/certificate/background' : '';
+    const bodyHtml = escapeHtml(body).split(/\r?\n/).filter(Boolean).map((line) => `<div>${line}</div>`).join('');
+    const sealHtml = sealText ? `<div class="seal">${escapeHtml(sealText).split('').map((ch, idx) => `${escapeHtml(ch)}${(idx + 1) % 4 === 0 ? '<br>' : ''}`).join('')}</div>` : '';
+
+    return res.status(200).send(`<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(title)}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root { --paper-w:720px; --paper-h:1024px; }
+    *{box-sizing:border-box} body{margin:0;background:#e9edf4;font-family:'Noto Sans KR','Malgun Gothic',sans-serif;color:#111;}
+    .wrap{min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:14px;padding:18px;}
+    .cert{position:relative;width:min(100%,var(--paper-w));aspect-ratio:720/1024;background:#fff;box-shadow:0 12px 32px rgba(0,0,0,.18);overflow:hidden;}
+    .bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;}
+    .layer{position:absolute;inset:0;padding:0 72px;text-align:center;display:flex;flex-direction:column;align-items:center;}
+    .title{margin-top:155px;font-size:48px;font-weight:800;letter-spacing:.22em;text-indent:.22em;}
+    .recipient{margin-top:70px;font-size:28px;font-weight:700;}
+    .body{margin-top:250px;font-size:25px;font-weight:500;line-height:1.85;white-space:normal;word-break:keep-all;}
+    .date{position:absolute;bottom:220px;left:0;right:0;font-size:24px;font-weight:500;}
+    .issuer{position:absolute;bottom:140px;left:72px;right:72px;font-size:25px;font-weight:500;}
+    .seal{position:absolute;right:95px;bottom:80px;border:4px solid #e11;color:#e11;font-weight:800;font-size:22px;line-height:1.18;letter-spacing:.08em;padding:10px 12px;background:rgba(255,255,255,.75);}
+    .toolbar{width:min(100%,var(--paper-w));display:flex;gap:8px;justify-content:center;flex-wrap:wrap;}
+    button,a.btn{border:0;border-radius:10px;background:#2458d8;color:#fff;font-weight:800;padding:10px 14px;text-decoration:none;cursor:pointer;}
+    .hint{font-size:13px;color:#596579;text-align:center;}
+    @media print{body{background:#fff}.wrap{padding:0}.toolbar,.hint{display:none}.cert{width:720px;box-shadow:none}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div id="certificate" class="cert">
+      ${backgroundUrl ? `<img class="bg" src="${backgroundUrl}" alt="수료증 배경" />` : ''}
+      <div class="layer">
+        <div class="title">${escapeHtml(title)}</div>
+        <div class="recipient">${escapeHtml(recipient)}</div>
+        <div class="body">${bodyHtml}</div>
+        <div class="date">${escapeHtml(dateLabel)}</div>
+        <div class="issuer">${escapeHtml(issuer)}</div>
+        ${sealHtml}
+      </div>
+    </div>
+    <div class="toolbar"><button onclick="window.print()">인쇄 / PDF 저장</button><a class="btn" href="/ranking" target="_blank">랭킹 보기</a></div>
+    <div class="hint">화면 캡처 또는 인쇄 기능을 이용해 이미지/PDF로 저장할 수 있습니다.</div>
+  </div>
+</body>
+</html>`);
+  } catch (error) {
+    console.error('[certificate error]', error);
+    return res.status(500).send('<!doctype html><meta charset="utf-8"><title>수료증 오류</title><p>수료증 생성 중 오류가 발생했습니다.</p>');
+  }
+});
 
 app.get('/api/admin/settings/ranking-display', requireAdmin, async (_req, res) => {
   const event = await getActiveEvent();

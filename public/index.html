@@ -70,6 +70,7 @@
         <button class="secondary" onclick="showTab('ranking')">순위표</button>
         <a class="btn secondary" href="/ranking" target="_blank">실시간 랭킹 화면</a>
         <button class="secondary" onclick="showTab('rankingSettings')">랭킹 화면 설정</button>
+        <button class="secondary" onclick="showTab('certificate')">수료증 설정</button>
         <button class="secondary" onclick="showTab('submissions')">제출내역</button>
         <button class="secondary" onclick="showTab('missions')">미션설정</button>
         <button class="secondary" onclick="showTab('settings')">사진 자동 승인</button>
@@ -185,6 +186,57 @@
               제목과 설명 문구는 프로그램마다 다르게 설정할 수 있습니다.
             </div>
             <div id="rankingDisplayStatus" style="margin-top:8px; white-space:pre-wrap;">설정을 불러오는 중입니다.</div>
+          </div>
+        </div>
+      </section>
+
+
+      <section id="tab-certificate" class="section card hidden">
+        <h2>수료증 설정</h2>
+        <p class="small">완주한 참가자에게 보여줄 수료증 화면을 설정합니다. 배경 이미지를 업로드하고 문구를 입력하면 완주 후 카카오톡에 “수료증 보기” 버튼이 표시됩니다.</p>
+        <div class="grid two">
+          <div>
+            <label class="inline-check"><input id="certificateEnabled" type="checkbox" /> 수료증 기능 사용</label>
+            <label>수료증 배경 이미지</label>
+            <input id="certificateBg" type="file" accept="image/jpeg,image/png,image/webp" />
+            <label class="inline-check"><input id="certificateRemoveBg" type="checkbox" /> 현재 배경 이미지 삭제</label>
+            <div id="certificateBgStatus" class="small">등록된 배경 이미지 없음</div>
+            <p class="small">제한: 배경 이미지 1장, 최대 5MB, JPG/PNG/WEBP만 업로드할 수 있습니다. 권장 비율은 세로형 A4 또는 720×1024 비율입니다.</p>
+
+            <label>수료증 제목</label>
+            <input id="certificateTitle" placeholder="예: 수료증" />
+            <label>프로그램명</label>
+            <input id="certificateProgramName" placeholder="예: 화북옛길 AI 레이스" />
+            <label>수령자 표시 문구</label>
+            <input id="certificateRecipient" placeholder="예: {member_name} 님" />
+            <label>본문 문구</label>
+            <textarea id="certificateBody" rows="5" placeholder="예: 귀하는 “{program_name}”을 성실히 완주하였기에 이 증서를 드립니다."></textarea>
+            <label>발급 날짜 문구</label>
+            <input id="certificateDateLabel" placeholder="예: {finish_date}" />
+            <label>발급기관</label>
+            <input id="certificateIssuer" placeholder="예: 이벤트인제주" />
+            <label>도장 문구</label>
+            <input id="certificateSealText" placeholder="예: 제주특별자치도민속자연사박물관인" />
+            <div style="height:12px"></div>
+            <button onclick="saveCertificateSettings()">수료증 설정 저장</button>
+            <button class="secondary" onclick="loadCertificateSettings()">설정 다시 불러오기</button>
+            <button class="secondary" onclick="resetCertificateDefaults()">기본 문구 채우기</button>
+          </div>
+          <div class="notice">
+            <b>사용 가능한 치환값</b>
+            <div class="small" style="margin-top:8px; line-height:1.8;">
+              {team_name} 팀명<br />
+              {team_code} 팀코드<br />
+              {member_name} 참가자 이름/닉네임<br />
+              {program_name} 프로그램명<br />
+              {finish_date} 완주 날짜<br />
+              {total} 최종 점수<br />
+              {rank} 순위
+            </div>
+            <div id="certificateStatus" style="margin-top:12px; white-space:pre-wrap;">설정을 불러오는 중입니다.</div>
+            <div style="margin-top:12px;">
+              <a class="btn secondary" href="/certificate" target="_blank">수료증 화면 테스트</a>
+            </div>
           </div>
         </div>
       </section>
@@ -377,7 +429,77 @@ async function saveRankingDisplaySettings() {
 }
 
 
+
+function certificateBgStatusHtml(s) {
+  if (s && s.has_background_image) {
+    const url = s.background_image_url || '/api/public/settings/certificate/background';
+    return `현재 배경 이미지: <a href="${url}" target="_blank">보기</a>`;
+  }
+  return '등록된 배경 이미지 없음';
+}
+function fillCertificateForm(s = {}) {
+  if ($('certificateEnabled')) $('certificateEnabled').checked = Boolean(s.enabled);
+  if ($('certificateTitle')) $('certificateTitle').value = s.title || '';
+  if ($('certificateProgramName')) $('certificateProgramName').value = s.program_name || '';
+  if ($('certificateRecipient')) $('certificateRecipient').value = s.recipient_template || '';
+  if ($('certificateBody')) $('certificateBody').value = s.body || '';
+  if ($('certificateDateLabel')) $('certificateDateLabel').value = s.date_label || '';
+  if ($('certificateIssuer')) $('certificateIssuer').value = s.issuer || '';
+  if ($('certificateSealText')) $('certificateSealText').value = s.seal_text || '';
+  if ($('certificateBg')) $('certificateBg').value = '';
+  if ($('certificateRemoveBg')) $('certificateRemoveBg').checked = false;
+  if ($('certificateBgStatus')) $('certificateBgStatus').innerHTML = certificateBgStatusHtml(s);
+  if ($('certificateStatus')) $('certificateStatus').textContent = `현재 상태: ${s.enabled ? '사용' : '사용 안 함'}\n제목: ${s.title || '-'}\n프로그램명: ${s.program_name || '-'}`;
+}
+async function loadCertificateSettings() {
+  const data = await api('/api/admin/settings/certificate');
+  certificateDefaults = data.defaults || certificateDefaults;
+  fillCertificateForm(data.settings || {});
+}
+async function readCertificateBackground() {
+  const file = $('certificateBg')?.files?.[0];
+  if (!file) return null;
+  const allowed = ['image/jpeg','image/png','image/webp'];
+  if (!allowed.includes(file.type)) throw new Error('수료증 배경은 JPG, PNG, WEBP만 업로드할 수 있습니다.');
+  if (file.size > 5 * 1024 * 1024) throw new Error('수료증 배경 이미지는 최대 5MB까지만 업로드할 수 있습니다.');
+  const data = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1]);
+    reader.onerror = () => reject(new Error('수료증 배경 이미지를 읽지 못했습니다.'));
+    reader.readAsDataURL(file);
+  });
+  return { background_image_data: data, background_image_mime: file.type };
+}
+async function saveCertificateSettings() {
+  const image = await readCertificateBackground();
+  const body = {
+    enabled: $('certificateEnabled').checked,
+    title: $('certificateTitle').value.trim(),
+    program_name: $('certificateProgramName').value.trim(),
+    recipient_template: $('certificateRecipient').value.trim(),
+    body: $('certificateBody').value.trim(),
+    date_label: $('certificateDateLabel').value.trim(),
+    issuer: $('certificateIssuer').value.trim(),
+    seal_text: $('certificateSealText').value.trim(),
+    remove_background: $('certificateRemoveBg').checked,
+  };
+  if (image) Object.assign(body, image);
+  const data = await api('/api/admin/settings/certificate', { method:'PATCH', body: JSON.stringify(body) });
+  certificateDefaults = data.defaults || certificateDefaults;
+  fillCertificateForm(data.settings || {});
+  alert('수료증 설정이 저장되었습니다.');
+}
+async function resetCertificateDefaults() {
+  if (!certificateDefaults) {
+    const data = await api('/api/admin/settings/certificate');
+    certificateDefaults = data.defaults || data.settings || {};
+  }
+  fillCertificateForm(certificateDefaults || {});
+  if ($('certificateStatus')) $('certificateStatus').textContent = '기본 문구를 입력했습니다. 저장 버튼을 눌러야 실제 반영됩니다. 배경 이미지는 삭제 체크를 하지 않으면 유지됩니다.';
+}
+
 let messageDefaults = null;
+let certificateDefaults = null;
 const messageImageFields = [
   { key:'start', input:'imgStart', clear:'clearImgStart', status:'imgStartStatus' },
   { key:'returning', input:'imgReturning', clear:'clearImgReturning', status:'imgReturningStatus' },
@@ -484,6 +606,7 @@ async function login() {
     await loadAll();
     await loadPhotoAutoApproval();
     await loadMessageSettings();
+    await loadCertificateSettings();
   } catch(e) { $('loginMsg').textContent = e.message; }
 }
 function logout() {
@@ -566,13 +689,14 @@ async function review(id, decision) {
   await loadAll();
 }
 function showTab(name) {
-  ['ranking','submissions','missions','settings','rankingSettings','messages'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
+  ['ranking','submissions','missions','settings','rankingSettings','certificate','messages'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
   if (name === 'settings') {
     loadPhotoAutoApproval().catch(e => alert(e.message));
   }
   if (name === 'rankingSettings') {
     loadRankingDisplaySettings().catch(e => alert(e.message));
   }
+  if (name === 'certificate') loadCertificateSettings().catch(e => alert(e.message));
   if (name === 'messages') loadMessageSettings().catch(e => alert(e.message));
 }
 function editMission(id) {
