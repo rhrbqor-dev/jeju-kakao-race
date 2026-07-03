@@ -369,6 +369,8 @@ async function initDb() {
   await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS mission_image_data TEXT;`);
   await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS mission_image_mime TEXT NOT NULL DEFAULT '';`);
   await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS wrong_message TEXT NOT NULL DEFAULT '';`);
+  await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS wrong_penalty INTEGER NOT NULL DEFAULT -5;`);
+  await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS hint_penalty INTEGER NOT NULL DEFAULT -10;`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS mission_images (
@@ -544,6 +546,27 @@ async function initDb() {
   await query(`CREATE INDEX IF NOT EXISTS idx_team_members_team ON team_members(team_id);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members(kakao_user_id);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_team_notices_team ON team_notices(team_id);`);
+  await query(`
+    CREATE TABLE IF NOT EXISTS score_events (
+      id SERIAL PRIMARY KEY,
+      event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+      team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      mission_id INTEGER REFERENCES missions(id) ON DELETE CASCADE,
+      actor_kakao_user_id TEXT NOT NULL DEFAULT '',
+      actor_name TEXT NOT NULL DEFAULT '',
+      event_type TEXT NOT NULL DEFAULT '',
+      event_key TEXT NOT NULL DEFAULT '',
+      score_delta INTEGER NOT NULL DEFAULT 0,
+      memo TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await query(`CREATE INDEX IF NOT EXISTS idx_score_events_team ON score_events(team_id);`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_score_events_event ON score_events(event_id);`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_score_events_mission ON score_events(mission_id);`);
+  await query(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_score_events_key ON score_events(event_id, team_id, mission_id, event_type, event_key) WHERE event_key <> '';`);
+
   await query(`CREATE INDEX IF NOT EXISTS idx_submissions_team ON submissions(team_id);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_submissions_mission ON submissions(mission_id);`);
   await query(`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS actor_kakao_user_id TEXT NOT NULL DEFAULT '';`);
@@ -598,7 +621,7 @@ async function getMissions(eventId) {
   const result = await query(
     `SELECT
        m.id, m.event_id, m.mission_code, m.mission_name, m.mission_type, m.question, m.answer,
-       m.answer_explanation, m.wrong_message, m.score, m.hint, m.location_name, m.latitude, m.longitude,
+       m.answer_explanation, m.wrong_message, m.wrong_penalty, m.hint_penalty, m.score, m.hint, m.location_name, m.latitude, m.longitude,
        m.radius_m, m.sort_order, m.is_required, m.created_at,
        COALESCE(mi.mission_image_count, 0)::int AS mission_image_count,
        COALESCE(ai.answer_image_count, 0)::int AS answer_image_count,
@@ -928,7 +951,7 @@ function cleanName(text) {
 function isBlockedTeamName(text) {
   return [
     '게임 시작', '시작', '참여', '참가', '참여하기', '도움말', '미션 목록', '순위', '랭킹',
-    '내 점수', '팀 생성', '팀 참가', '팀명 수정', '팀원', '팀원 목록', '취소', '완주',
+    '내 점수', '팀 생성', '팀 참가', '팀명 수정', '팀원', '팀원 목록', '취소', '완주', '힌트',
   ].includes(String(text).trim());
 }
 
@@ -958,6 +981,38 @@ function isCancelCommand(text) {
   return ['취소', '그만', '중지', '처음으로'].includes(String(text).trim().toLowerCase());
 }
 
+function isHintCommand(text) {
+  return ['힌트', '힌트 보기', '힌트보기', 'hint'].includes(String(text).trim().toLowerCase());
+}
+
+async function addScoreEvent({ eventId, teamId, missionId = null, kakaoUserId = '', actorName = '', eventType = '', eventKey = '', scoreDelta = 0, memo = '' }) {
+  const result = await query(
+    `INSERT INTO score_events(event_id, team_id, mission_id, actor_kakao_user_id, actor_name, event_type, event_key, score_delta, memo)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+     ON CONFLICT(event_id, team_id, mission_id, event_type, event_key) WHERE event_key <> '' DO NOTHING
+     RETURNING *;`,
+    [eventId, teamId, missionId, kakaoUserId, actorName || '', eventType, eventKey || '', Number(scoreDelta || 0), memo || '']
+  );
+  return result.rows[0] || null;
+}
+
+async function scoreAdjustmentsTotal(teamId) {
+  const result = await query(`SELECT COALESCE(SUM(score_delta), 0)::int AS total FROM score_events WHERE team_id=$1;`, [teamId]);
+  return Number(result.rows[0]?.total || 0);
+}
+
+async function scoreAdjustmentDetails(teamId) {
+  const result = await query(
+    `SELECT se.*, m.mission_code, m.mission_name
+     FROM score_events se
+     LEFT JOIN missions m ON m.id=se.mission_id
+     WHERE se.team_id=$1
+     ORDER BY se.created_at ASC, se.id ASC;`,
+    [teamId]
+  );
+  return result.rows;
+}
+
 async function getCompletedMissionIds(teamId) {
   const result = await query(
     `SELECT DISTINCT mission_id
@@ -983,7 +1038,9 @@ async function bestScoresByMission(teamId) {
 
 async function teamTotalScore(teamId) {
   const map = await bestScoresByMission(teamId);
-  return [...map.values()].reduce((sum, v) => sum + v, 0);
+  const missionTotal = [...map.values()].reduce((sum, v) => sum + v, 0);
+  const adjustmentTotal = await scoreAdjustmentsTotal(teamId);
+  return missionTotal + adjustmentTotal;
 }
 
 async function isMissionAlreadyCompleted(teamId, missionId) {
@@ -1014,9 +1071,14 @@ async function buildRanking(eventId) {
        FROM submissions
        WHERE event_id=$1 AND status IN ('correct', 'approved')
        GROUP BY team_id, mission_id
-     ), totals AS (
-       SELECT team_id, COALESCE(SUM(best_score), 0)::int AS total_score
+     ), mission_totals AS (
+       SELECT team_id, COALESCE(SUM(best_score), 0)::int AS mission_score
        FROM best GROUP BY team_id
+     ), adjustments AS (
+       SELECT team_id, COALESCE(SUM(score_delta), 0)::int AS adjustment_score
+       FROM score_events
+       WHERE event_id=$1
+       GROUP BY team_id
      ), completed AS (
        SELECT team_id, COUNT(DISTINCT mission_id)::int AS completed_count
        FROM submissions
@@ -1025,17 +1087,17 @@ async function buildRanking(eventId) {
      )
      SELECT
        t.id, t.team_code, t.team_name, t.start_time, t.finish_time, t.status,
-       COALESCE(totals.total_score, 0)::int AS total_score,
+       (COALESCE(mission_totals.mission_score, 0) + COALESCE(adjustments.adjustment_score, 0))::int AS total_score,
        COALESCE(completed.completed_count, 0)::int AS completed_count,
        CASE WHEN t.finish_time IS NULL THEN NULL ELSE EXTRACT(EPOCH FROM (t.finish_time - t.start_time))::int END AS duration_seconds
      FROM teams t
-     LEFT JOIN totals ON totals.team_id=t.id
+     LEFT JOIN mission_totals ON mission_totals.team_id=t.id
+     LEFT JOIN adjustments ON adjustments.team_id=t.id
      LEFT JOIN completed ON completed.team_id=t.id
      WHERE t.event_id=$1
      ORDER BY
-       CASE WHEN t.finish_time IS NULL THEN 1 ELSE 0 END ASC,
-       duration_seconds ASC NULLS LAST,
        total_score DESC,
+       duration_seconds ASC NULLS LAST,
        t.start_time ASC,
        t.id ASC;`,
     [eventId]
@@ -1116,7 +1178,7 @@ function buildImageCards(title, description, imageUrls = [], buttons = []) {
 }
 
 const startQuickReplies = ['팀 생성', '팀 참가', '도움말'];
-const menuQuickReplies = ['미션 목록', '내 점수', '순위', '팀원 목록', '팀명 수정', '이름 수정', '도움말'];
+const menuQuickReplies = ['미션 목록', '힌트', '내 점수', '순위', '팀원 목록', '팀명 수정', '이름 수정', '도움말'];
 
 function isStartCommand(text) {
   return ['시작', '게임 시작', '참여하기', '참가', 'start'].includes(String(text).trim().toLowerCase());
@@ -1185,13 +1247,32 @@ async function handleScore(team) {
      ORDER BY m.id, s.score DESC, s.submitted_at ASC;`,
     [team.id]
   );
-  const detail = result.rows.length
+  const missionDetail = result.rows.length
     ? result.rows
         .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0))
-        .map((r) => `${r.mission_code} ${r.mission_name}: ${r.score}점 / 수행자: ${r.actor_name || '팀원'}`)
+        .map((r) => `${r.mission_code} ${r.mission_name}: +${r.score}점 / 수행자: ${r.actor_name || '팀원'}`)
         .join('\n')
     : '아직 완료한 미션이 없습니다.';
-  return kakaoText(`${team.team_name} 현재 점수\n\n총점: ${total}점\n\n${detail}`, menuQuickReplies);
+
+  const adjustments = await scoreAdjustmentDetails(team.id);
+  const adjustmentDetail = adjustments.length
+    ? adjustments.map((a) => {
+        const missionLabel = a.mission_code ? `${a.mission_code} ${a.mission_name}` : '공통';
+        const actor = a.actor_name ? ` / ${a.actor_name}` : '';
+        const delta = Number(a.score_delta || 0);
+        return `${missionLabel}: ${delta > 0 ? '+' : ''}${delta}점 (${a.memo || a.event_type}${actor})`;
+      }).join('\n')
+    : '감점/보너스 내역이 없습니다.';
+
+  return kakaoText(`${team.team_name} 현재 점수
+
+총점: ${total}점
+
+미션 점수
+${missionDetail}
+
+감점/보너스 내역
+${adjustmentDetail}`, menuQuickReplies);
 }
 
 async function handleRanking(eventId) {
@@ -1285,6 +1366,64 @@ async function afterMissionCompleted(event, team, mission, kakaoUserId, actorNam
   return total;
 }
 
+
+async function handleHintRequest(event, team, kakaoUserId) {
+  const teamReload = (await query(`SELECT * FROM teams WHERE id=$1;`, [team.id])).rows[0];
+  const member = await getTeamMember(event.id, kakaoUserId);
+  const actorName = member?.member_name || '팀원';
+
+  if (!teamReload.current_mission_id) {
+    return kakaoText('먼저 QR코드를 스캔한 뒤 힌트를 사용할 수 있습니다.', ['미션 목록', ...menuQuickReplies]);
+  }
+
+  const mission = (await query(`SELECT * FROM missions WHERE id=$1;`, [teamReload.current_mission_id])).rows[0];
+  if (!mission) return kakaoText('진행 중인 미션 정보를 찾을 수 없습니다. 미션 목록에서 다시 선택해주세요.', menuQuickReplies);
+
+  const hintText = String(mission.hint || '').trim();
+  if (!hintText) {
+    return kakaoText(`${mission.mission_code} ${mission.mission_name} 미션에는 등록된 힌트가 없습니다.`, menuQuickReplies);
+  }
+
+  const already = await isMissionAlreadyCompleted(team.id, mission.id);
+  if (already) {
+    return kakaoText(`이미 완료한 미션입니다.
+
+${mission.mission_code} ${mission.mission_name}
+
+힌트 감점 없이 다음 미션으로 이동해주세요.`, menuQuickReplies);
+  }
+
+  const penaltyRaw = Number(mission.hint_penalty ?? -10);
+  const penalty = penaltyRaw > 0 ? -penaltyRaw : penaltyRaw;
+  const eventKey = `hint:${mission.id}`;
+  const inserted = await addScoreEvent({
+    eventId: event.id,
+    teamId: team.id,
+    missionId: mission.id,
+    kakaoUserId,
+    actorName,
+    eventType: 'hint',
+    eventKey,
+    scoreDelta: penalty,
+    memo: '힌트 사용',
+  });
+  const total = await teamTotalScore(team.id);
+
+  if (inserted) {
+    await addTeamNotice(event.id, team.id, `${actorName}님이 ${mission.mission_code} ${mission.mission_name} 미션에서 힌트를 사용했습니다. ${penalty}점이 반영되었습니다.`, kakaoUserId);
+  }
+
+  return kakaoText(
+    `${mission.mission_code} ${mission.mission_name} 힌트
+
+${hintText}
+
+${inserted ? `힌트 사용 감점: ${penalty}점` : '이 미션의 힌트 감점은 이미 반영되었습니다.'}
+현재 팀 총점: ${total}점`,
+    menuQuickReplies
+  );
+}
+
 async function handleAnswer(req, event, team, utterance, kakaoUserId, messages = DEFAULT_MESSAGE_SETTINGS) {
   const teamReload = (await query(`SELECT * FROM teams WHERE id=$1;`, [team.id])).rows[0];
   const member = await getTeamMember(event.id, kakaoUserId);
@@ -1315,15 +1454,29 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
 
     const wrongCount = Number(wrongCountResult.rows[0]?.count || 0);
     const baseScore = Number(mission.score || 0);
-    const penaltyPerWrong = 2;
-    const minimumScore = baseScore > 0 ? Math.min(2, baseScore) : 0;
-    const earnedScore = isCorrect ? Math.max(minimumScore, baseScore - wrongCount * penaltyPerWrong) : 0;
+    const wrongPenaltyRaw = Number(mission.wrong_penalty ?? -5);
+    const wrongPenalty = wrongPenaltyRaw > 0 ? -wrongPenaltyRaw : wrongPenaltyRaw;
+    const earnedScore = isCorrect ? baseScore : 0;
 
     await query(
       `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, actor_kakao_user_id, actor_name, status, score)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8);`,
       [event.id, team.id, mission.id, utterance, kakaoUserId, actorName, isCorrect ? 'correct' : 'wrong', earnedScore]
     );
+
+    if (!isCorrect && wrongPenalty !== 0) {
+      await addScoreEvent({
+        eventId: event.id,
+        teamId: team.id,
+        missionId: mission.id,
+        kakaoUserId,
+        actorName,
+        eventType: 'wrong',
+        eventKey: `wrong:${mission.id}:${wrongCount + 1}:${Date.now()}`,
+        scoreDelta: wrongPenalty,
+        memo: `오답 ${wrongCount + 1}회`,
+      });
+    }
 
     if (isCorrect) {
       const total = await afterMissionCompleted(event, team, mission, kakaoUserId, actorName);
@@ -1333,7 +1486,8 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
 ${mission.mission_code} ${mission.mission_name} 완료
 수행자: ${actorName}
 기본 점수: ${baseScore}점
-오답 횟수: ${wrongCount}회
+오답 횟수: ${wrongCount}회${wrongCount > 0 ? `
+오답 감점은 이미 팀 점수에 반영되었습니다.` : ''}
 획득 점수: ${earnedScore}점
 현재 팀 총점: ${total}점${explanation ? `
 
@@ -1347,14 +1501,17 @@ ${explanation}` : ''}
       if (answerImageUrls.length === 1) return kakaoCard(`${mission.mission_code} ${mission.mission_name} 정답 설명`, successText, [], menuQuickReplies, answerImageUrls[0]);
       return kakaoText(successText, menuQuickReplies);
     }
+    const totalAfterWrong = await teamTotalScore(team.id);
     const wrongTemplate = String(mission.wrong_message || '').trim();
     const wrongText = wrongTemplate
-      ? renderTemplate(wrongTemplate, { mission_code: mission.mission_code, mission_name: mission.mission_name, wrong_count: wrongCount + 1, hint: mission.hint || '현장 안내문을 다시 확인해보세요.', answer: utterance, team_name: team.team_name, actor_name: actorName })
+      ? renderTemplate(wrongTemplate, { mission_code: mission.mission_code, mission_name: mission.mission_name, wrong_count: wrongCount + 1, wrong_penalty: wrongPenalty, total_score: totalAfterWrong, hint: mission.hint || '현장 안내문을 다시 확인해보세요.', answer: utterance, team_name: team.team_name, actor_name: actorName })
       : `아쉽습니다. 정답이 아닙니다.
 
 현재 오답 횟수: ${wrongCount + 1}회
-힌트: ${mission.hint || '현장 안내문을 다시 확인해보세요.'}
+오답 감점: ${wrongPenalty}점
+현재 팀 총점: ${totalAfterWrong}점
 
+힌트가 필요하면 "힌트"라고 입력해주세요.
 다시 정답을 입력해주세요.`;
     return kakaoText(wrongText, ['다시 입력하기', ...menuQuickReplies]);
   }
@@ -1671,6 +1828,10 @@ async function handleKakaoSkill(req, res) {
       return respondKakao(res, await handleMissionList(event, team), event, team, kakaoUserId);
     }
 
+    if (isHintCommand(utterance)) {
+      return respondKakao(res, await handleHintRequest(event, team, kakaoUserId), event, team, kakaoUserId);
+    }
+
     if (isScoreCommand(utterance)) {
       return respondKakao(res, await handleScore(team), event, team, kakaoUserId);
     }
@@ -1922,6 +2083,50 @@ app.get('/kakao/skill', (_req, res) => {
 
 app.get('/webhook', (_req, res) => {
   res.send('Kakao webhook endpoint is alive. Kakao uses POST.');
+});
+
+
+app.get('/api/public/rankings', async (_req, res) => {
+  try {
+    if (!dbReady) {
+      return res.status(503).json({
+        ok: false,
+        message: `서버 DB 준비가 아직 끝나지 않았습니다.${dbInitError ? '\n' + dbInitError : ''}`,
+        server_time: nowIso(),
+      });
+    }
+
+    const event = await getActiveEvent();
+    const rankings = await buildRanking(event.id);
+
+    res.json({
+      ok: true,
+      event: {
+        id: event.id,
+        event_name: event.event_name,
+        status: event.status,
+      },
+      rankings: rankings.map((r) => ({
+        rank: r.rank,
+        team_code: r.team_code,
+        team_name: r.team_name,
+        total_score: Number(r.total_score || 0),
+        completed_count: Number(r.completed_count || 0),
+        status: r.status,
+        start_time: r.start_time,
+        finish_time: r.finish_time,
+        duration_seconds: r.duration_seconds === null || r.duration_seconds === undefined ? null : Number(r.duration_seconds),
+      })),
+      server_time: nowIso(),
+    });
+  } catch (error) {
+    console.error('[공개 랭킹 조회 오류]', error);
+    res.status(500).json({ ok: false, message: error.message || '랭킹 조회 실패', server_time: nowIso() });
+  }
+});
+
+app.get(['/ranking', '/rankings', '/live-ranking', '/ranking.html'], (_req, res) => {
+  res.status(200).sendFile(path.join(publicDir, 'ranking.html'));
 });
 
 app.get('/upload', (_req, res) => {
@@ -2317,10 +2522,10 @@ app.post('/api/admin/missions', requireAdmin, async (req, res) => {
   const event = await getActiveEvent();
   const m = req.body;
   const result = await query(
-    `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, question, answer, answer_explanation, wrong_message, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+    `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, question, answer, answer_explanation, wrong_message, wrong_penalty, hint_penalty, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
      RETURNING id, mission_code, mission_name;`,
-    [event.id, m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false]
+    [event.id, m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty || -5), Number(m.hint_penalty || -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false]
   );
   res.json({ ok: true, mission: result.rows[0] });
 });
@@ -2328,8 +2533,8 @@ app.post('/api/admin/missions', requireAdmin, async (req, res) => {
 app.patch('/api/admin/missions/:id', requireAdmin, async (req, res) => {
   const m = req.body;
   const result = await query(
-    `UPDATE missions SET mission_code=$1, mission_name=$2, mission_type=$3, question=$4, answer=$5, answer_explanation=$6, wrong_message=$7, score=$8, hint=$9, location_name=$10, latitude=$11, longitude=$12, radius_m=$13, sort_order=$14, is_required=$15 WHERE id=$16 RETURNING id, mission_code, mission_name;`,
-    [m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, req.params.id]
+    `UPDATE missions SET mission_code=$1, mission_name=$2, mission_type=$3, question=$4, answer=$5, answer_explanation=$6, wrong_message=$7, wrong_penalty=$8, hint_penalty=$9, score=$10, hint=$11, location_name=$12, latitude=$13, longitude=$14, radius_m=$15, sort_order=$16, is_required=$17 WHERE id=$18 RETURNING id, mission_code, mission_name;`,
+    [m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty || -5), Number(m.hint_penalty || -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, req.params.id]
   );
   res.json({ ok: true, mission: result.rows[0] });
 });

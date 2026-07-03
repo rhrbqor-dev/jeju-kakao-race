@@ -68,6 +68,7 @@
       <nav>
         <button onclick="loadAll()">새로고침</button>
         <button class="secondary" onclick="showTab('ranking')">순위표</button>
+        <a class="btn secondary" href="/ranking" target="_blank">실시간 랭킹 화면</a>
         <button class="secondary" onclick="showTab('submissions')">제출내역</button>
         <button class="secondary" onclick="showTab('missions')">미션설정</button>
         <button class="secondary" onclick="showTab('settings')">사진 자동 승인</button>
@@ -100,7 +101,7 @@
       <section id="tab-missions" class="section grid two hidden">
         <div class="card">
           <h2>미션 목록</h2>
-          <div class="table-wrap"><table><thead><tr><th>코드</th><th>미션명</th><th>유형</th><th>점수</th><th>미션 이미지</th><th>정답 설명 이미지</th><th>오답멘트</th><th>정답설명</th><th>관리</th></tr></thead><tbody id="missionBody"></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>코드</th><th>미션명</th><th>유형</th><th>점수</th><th>오답감점</th><th>힌트감점</th><th>미션 이미지</th><th>정답 설명 이미지</th><th>오답멘트</th><th>정답설명</th><th>관리</th></tr></thead><tbody id="missionBody"></tbody></table></div>
         </div>
         <div class="card">
           <h2 id="missionFormTitle">미션 추가/수정</h2>
@@ -120,8 +121,12 @@
           <input id="answerImages" type="file" accept="image/jpeg,image/png,image/webp" multiple />
           <div id="answerImageStatus" class="small">등록된 정답 설명 이미지 없음</div>
           <p class="small">제한: 정답 설명 이미지 최대 5장, 이미지 1장당 최대 2MB, JPG/PNG/WEBP만 업로드할 수 있습니다. 정답을 맞힌 뒤 설명과 함께 표시됩니다.</p>
-          <label>점수</label><input id="missionScore" type="number" value="10" />
-          <label>힌트</label><input id="missionHint" />
+          <label>정답/완료 점수</label><input id="missionScore" type="number" value="100" />
+          <label>오답 1회 감점</label><input id="missionWrongPenalty" type="number" value="-5" />
+          <p class="small">예: -5로 입력하면 오답을 1회 입력할 때마다 팀 점수에서 5점이 차감됩니다.</p>
+          <label>힌트 사용 감점</label><input id="missionHintPenalty" type="number" value="-10" />
+          <p class="small">예: -10으로 입력하면 해당 미션에서 힌트를 처음 사용할 때 팀 점수에서 10점이 차감됩니다.</p>
+          <label>힌트</label><input id="missionHint" placeholder="플레이어가 힌트라고 입력하면 표시됩니다." />
           <label>장소명</label><input id="missionLocation" />
           <label>GPS 위도</label><input id="missionLat" type="number" step="0.000001" />
           <label>GPS 경도</label><input id="missionLng" type="number" step="0.000001" />
@@ -498,7 +503,7 @@ async function loadMissions() {
   $('missionBody').innerHTML = data.missions.map(m => {
     const missionImg = Number(m.mission_image_count || 0) > 0 ? `${m.mission_image_count}장` : (m.has_mission_image ? '1장' : '-');
     const answerImg = Number(m.answer_image_count || 0) > 0 ? `${m.answer_image_count}장` : '-';
-    return `<tr><td>${esc(m.mission_code)}</td><td>${esc(m.mission_name)}</td><td>${esc(m.mission_type)}</td><td>${m.score}</td><td>${missionImg}</td><td>${answerImg}</td><td>${m.wrong_message ? '있음' : '-'}</td><td>${m.answer_explanation ? '있음' : '-'}</td><td><button class="secondary" onclick="editMission(${m.id})">수정</button> <button class="danger" onclick="deleteMission(${m.id})">삭제</button></td></tr>`;
+    return `<tr><td>${esc(m.mission_code)}</td><td>${esc(m.mission_name)}</td><td>${esc(m.mission_type)}</td><td>${m.score}</td><td>${m.wrong_penalty ?? -5}</td><td>${m.hint_penalty ?? -10}</td><td>${missionImg}</td><td>${answerImg}</td><td>${m.wrong_message ? '있음' : '-'}</td><td>${m.answer_explanation ? '있음' : '-'}</td><td><button class="secondary" onclick="editMission(${m.id})">수정</button> <button class="danger" onclick="deleteMission(${m.id})">삭제</button></td></tr>`;
   }).join('');
 }
 async function review(id, decision) {
@@ -515,7 +520,7 @@ function editMission(id) {
   const m = missionsCache.find(x => x.id === id); if (!m) return;
   $('missionFormTitle').textContent = '미션 수정';
   $('missionId').value = m.id; $('missionCode').value = m.mission_code; $('missionName').value = m.mission_name; $('missionType').value = m.mission_type;
-  $('missionQuestion').value = m.question; $('missionAnswer').value = m.answer; $('missionWrongMessage').value = m.wrong_message || ''; $('missionAnswerExplanation').value = m.answer_explanation || ''; $('missionScore').value = m.score; $('missionHint').value = m.hint;
+  $('missionQuestion').value = m.question; $('missionAnswer').value = m.answer; $('missionWrongMessage').value = m.wrong_message || ''; $('missionAnswerExplanation').value = m.answer_explanation || ''; $('missionScore').value = m.score; $('missionWrongPenalty').value = m.wrong_penalty ?? -5; $('missionHintPenalty').value = m.hint_penalty ?? -10; $('missionHint').value = m.hint;
   $('missionLocation').value = m.location_name; $('missionLat').value = m.latitude || ''; $('missionLng').value = m.longitude || ''; $('missionRadius').value = m.radius_m; $('missionOrder').value = m.sort_order;
   $('missionImages').value = ''; $('answerImages').value = '';
   loadMissionImagesForForm(m.id, 'mission').catch(e => $('missionImageStatus').textContent = e.message);
@@ -524,7 +529,7 @@ function editMission(id) {
 function clearMissionForm() {
   ['missionId','missionCode','missionName','missionQuestion','missionAnswer','missionWrongMessage','missionAnswerExplanation','missionHint','missionLocation','missionLat','missionLng'].forEach(id => $(id).value='');
   $('missionFormTitle').textContent = '미션 추가/수정';
-  $('missionType').value='quiz'; $('missionScore').value=10; $('missionRadius').value=80; $('missionOrder').value=1;
+  $('missionType').value='quiz'; $('missionScore').value=100; $('missionWrongPenalty').value=-5; $('missionHintPenalty').value=-10; $('missionRadius').value=80; $('missionOrder').value=1;
   $('missionImages').value=''; $('answerImages').value='';
   $('missionImageStatus').textContent='등록된 미션 이미지 없음';
   $('answerImageStatus').textContent='등록된 정답 설명 이미지 없음';
@@ -574,7 +579,7 @@ async function uploadMissionImages(missionId, kind, inputId) {
 async function saveMission() {
   const body = {
     mission_code:$('missionCode').value.trim(), mission_name:$('missionName').value.trim(), mission_type:$('missionType').value,
-    question:$('missionQuestion').value, answer:$('missionAnswer').value, wrong_message:$('missionWrongMessage').value, answer_explanation:$('missionAnswerExplanation').value, score:Number($('missionScore').value||0), hint:$('missionHint').value,
+    question:$('missionQuestion').value, answer:$('missionAnswer').value, wrong_message:$('missionWrongMessage').value, answer_explanation:$('missionAnswerExplanation').value, score:Number($('missionScore').value||0), wrong_penalty:Number($('missionWrongPenalty').value||-5), hint_penalty:Number($('missionHintPenalty').value||-10), hint:$('missionHint').value,
     location_name:$('missionLocation').value, latitude:$('missionLat').value ? Number($('missionLat').value) : null, longitude:$('missionLng').value ? Number($('missionLng').value) : null,
     radius_m:Number($('missionRadius').value||80), sort_order:Number($('missionOrder').value||0), is_required:true
   };
