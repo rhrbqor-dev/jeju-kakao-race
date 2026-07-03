@@ -834,8 +834,7 @@ function buildMissionWrongMessage(mission, values, defaultMessage) {
 
 function parseMissionImages(value = '') {
   return String(value || '')
-    .split(/[
-,]/)
+    .split(/\r?\n|,/)
     .map((item) => item.trim())
     .filter((item) => /^https?:\/\//i.test(item))
     .slice(0, MISSION_IMAGE_LIMIT);
