@@ -207,6 +207,20 @@ const DEFAULT_CERTIFICATE_SETTINGS = {
   layout: DEFAULT_CERTIFICATE_LAYOUT,
 };
 
+
+function normalizeCertificateRecipientTemplate(value = '') {
+  const text = String(value || '').trim();
+  if (!text) return DEFAULT_CERTIFICATE_SETTINGS.recipient_template;
+
+  // 이전 버전에서 이름/닉네임만 쓰던 설정은 팀명도 함께 표시되도록 자동 보정
+  if (!text.includes('{team_name}')) {
+    return `{team_name}
+${text}`;
+  }
+
+  return text;
+}
+
 const CERTIFICATE_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 const CERTIFICATE_IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
@@ -279,7 +293,7 @@ function normalizeCertificateSettings(value = {}, current = DEFAULT_CERTIFICATE_
     enabled: Boolean(incoming.enabled),
     title: String(incoming.title ?? base.title ?? DEFAULT_CERTIFICATE_SETTINGS.title).trim() || DEFAULT_CERTIFICATE_SETTINGS.title,
     program_name: String(incoming.program_name ?? base.program_name ?? DEFAULT_CERTIFICATE_SETTINGS.program_name).trim() || DEFAULT_CERTIFICATE_SETTINGS.program_name,
-    recipient_template: String(incoming.recipient_template ?? base.recipient_template ?? DEFAULT_CERTIFICATE_SETTINGS.recipient_template).trim() || DEFAULT_CERTIFICATE_SETTINGS.recipient_template,
+    recipient_template: normalizeCertificateRecipientTemplate(incoming.recipient_template ?? base.recipient_template ?? DEFAULT_CERTIFICATE_SETTINGS.recipient_template),
     body: String(incoming.body ?? base.body ?? DEFAULT_CERTIFICATE_SETTINGS.body).trim() || DEFAULT_CERTIFICATE_SETTINGS.body,
     issuer: String(incoming.issuer ?? base.issuer ?? DEFAULT_CERTIFICATE_SETTINGS.issuer).trim(),
     seal_text: String(incoming.seal_text ?? base.seal_text ?? '').trim(),
