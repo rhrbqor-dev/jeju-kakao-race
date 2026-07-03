@@ -2646,6 +2646,136 @@ app.get('/api/public/settings/certificate/background', async (_req, res) => {
   res.send(Buffer.from(settings.background_image_data, 'base64'));
 });
 
+
+function buildCertificatePreviewHtml(req, settings, vars, isPreview = false) {
+  const title = renderTemplate(settings.title, vars);
+  const recipient = renderTemplate(settings.recipient_template, vars);
+  const body = renderTemplate(settings.body, vars);
+  const issuer = renderTemplate(settings.issuer, vars);
+  const sealText = renderTemplate(settings.seal_text, vars);
+  const dateLabel = renderTemplate(settings.date_label, vars);
+  const backgroundUrl = settings.background_image_data ? '/api/public/settings/certificate/background' : '';
+  const layout = normalizeCertificateLayout(settings.layout, DEFAULT_CERTIFICATE_LAYOUT);
+  const bodyText = escapeHtml(body);
+  const recipientText = escapeHtml(recipient);
+  const sealTextHtml = escapeHtml(sealText);
+  const previewBadge = isPreview ? '<div class="preview-badge">미리보기</div>' : '';
+
+  function boxHtml(key, text, extraClass = '') {
+    return `<div class="fit-box ${extraClass}" style="${certificateBoxStyle(layout, key)}" ${certificateBoxAttrs(layout, key)}><div class="fit-inner">${text}</div></div>`;
+  }
+
+  return `<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(title)}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;500;700;900&display=swap" rel="stylesheet">
+  <style>
+    @font-face{
+      font-family:'GyeonggiBatangLocal';
+      src:url('/fonts/GyeonggiBatang_Regular.ttf') format('truetype'),
+          url('/fonts/GyeonggiBatang-Regular.ttf') format('truetype'),
+          url('/fonts/경기천년바탕_Regular.ttf') format('truetype');
+      font-weight:400;font-style:normal;font-display:swap;
+    }
+    @font-face{
+      font-family:'GyeonggiBatangLocal';
+      src:url('/fonts/GyeonggiBatang_Bold.ttf') format('truetype'),
+          url('/fonts/GyeonggiBatang-Bold.ttf') format('truetype'),
+          url('/fonts/경기천년바탕_Bold.ttf') format('truetype');
+      font-weight:700 900;font-style:normal;font-display:swap;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:#e9edf4;font-family:'GyeonggiBatangLocal','Noto Serif KR','Batang','Malgun Gothic',serif;color:#111;}
+    .wrap{min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:14px;padding:18px;}
+    .viewport{width:min(100%,720px);position:relative;}
+    .cert{position:absolute;left:0;top:0;width:720px;height:1040px;background:#fff;box-shadow:0 12px 32px rgba(0,0,0,.18);overflow:hidden;transform-origin:top left;}
+    .bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;}
+    .fit-box{position:absolute;display:flex;align-items:center;justify-content:center;overflow:hidden;padding:0 4px;z-index:2;}
+    .fit-inner{width:100%;white-space:pre-line;word-break:keep-all;overflow-wrap:break-word;}
+    .title .fit-inner{letter-spacing:.18em;text-indent:.18em;}
+    .seal{border:4px solid #e11;color:#e11;background:rgba(255,255,255,.72);padding:8px;}
+    .seal .fit-inner{letter-spacing:.06em;word-break:keep-all;}
+    .preview-badge{position:absolute;left:18px;top:18px;z-index:5;background:rgba(37,99,235,.92);color:white;border-radius:999px;padding:8px 14px;font-size:14px;font-weight:900;letter-spacing:.04em;}
+    .toolbar{width:min(100%,720px);display:flex;gap:8px;justify-content:center;flex-wrap:wrap;}
+    button,a.btn{border:0;border-radius:10px;background:#2458d8;color:#fff;font-weight:800;padding:10px 14px;text-decoration:none;cursor:pointer;font-family:inherit;}
+    .hint{font-size:13px;color:#596579;text-align:center;line-height:1.6;}
+    @media print{body{background:#fff}.wrap{padding:0}.toolbar,.hint,.preview-badge{display:none}.viewport{width:720px}.cert{box-shadow:none}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div id="viewport" class="viewport">
+      <div id="certificate" class="cert">
+        ${backgroundUrl ? `<img class="bg" src="${backgroundUrl}" alt="수료증 배경" />` : ''}
+        ${previewBadge}
+        ${boxHtml('title', escapeHtml(title), 'title')}
+        ${boxHtml('recipient', recipientText, 'recipient')}
+        ${boxHtml('body', bodyText, 'body')}
+        ${boxHtml('date', escapeHtml(dateLabel), 'date')}
+        ${boxHtml('issuer', escapeHtml(issuer), 'issuer')}
+        ${sealText ? boxHtml('seal', sealTextHtml, 'seal') : ''}
+      </div>
+    </div>
+    <div class="toolbar"><button onclick="window.print()">인쇄 / PDF 저장</button><a class="btn" href="/ranking" target="_blank">랭킹 보기</a></div>
+  </div>
+  <script>
+    const BASE_W = 720;
+    const BASE_H = 1040;
+    const viewport = document.getElementById('viewport');
+    const certificate = document.getElementById('certificate');
+    function fitOne(box){
+      const inner = box.querySelector('.fit-inner');
+      if(!inner) return;
+      const max = Number(box.dataset.maxFont || 24);
+      const min = Number(box.dataset.minFont || 12);
+      inner.style.fontSize = max + 'px';
+      for(let size=max; size>=min; size-=1){
+        inner.style.fontSize = size + 'px';
+        if(inner.scrollHeight <= box.clientHeight + 1 && inner.scrollWidth <= box.clientWidth + 1) return;
+      }
+      inner.style.fontSize = min + 'px';
+    }
+    function resizeCert(){
+      const scale = viewport.clientWidth / BASE_W;
+      viewport.style.height = (BASE_H * scale) + 'px';
+      certificate.style.transform = 'scale(' + scale + ')';
+      document.querySelectorAll('.fit-box').forEach(fitOne);
+    }
+    window.addEventListener('resize', resizeCert);
+    window.addEventListener('load', () => { resizeCert(); setTimeout(resizeCert, 200); });
+    if(document.fonts && document.fonts.ready) document.fonts.ready.then(resizeCert);
+  </script>
+</body>
+</html>`;
+}
+
+app.get('/certificate/preview', requireAdmin, async (req, res) => {
+  try {
+    const event = await getActiveEvent();
+    const settings = await getCertificateSettings(event.id);
+    const sampleDate = formatKoreanDate(new Date());
+    const vars = {
+      team_name: String(req.query.team_name || '꿀탐험대'),
+      team_code: String(req.query.team_code || 'T001'),
+      member_name: String(req.query.member_name || '홍길동'),
+      program_name: settings.program_name || DEFAULT_CERTIFICATE_SETTINGS.program_name,
+      finish_date: sampleDate,
+      total: Number(req.query.total || 350),
+      score: Number(req.query.total || 350),
+      rank: Number(req.query.rank || 1),
+    };
+    return res.status(200).send(buildCertificatePreviewHtml(req, settings, vars, true));
+  } catch (error) {
+    console.error('[certificate preview error]', error);
+    return res.status(500).send('<!doctype html><meta charset="utf-8"><title>수료증 미리보기 오류</title><p>수료증 미리보기 생성 중 오류가 발생했습니다.</p>');
+  }
+});
+
 app.get('/certificate', async (req, res) => {
   try {
     const event = await getActiveEvent();
@@ -2745,7 +2875,6 @@ app.get('/certificate', async (req, res) => {
       </div>
     </div>
     <div class="toolbar"><button onclick="window.print()">인쇄 / PDF 저장</button><a class="btn" href="/ranking" target="_blank">랭킹 보기</a></div>
-    <div class="hint">문구는 지정된 영역 안에서 자동으로 줄어듭니다. 경기천년바탕 폰트 파일이 /fonts 폴더에 있으면 우선 적용됩니다.</div>
   </div>
   <script>
     const BASE_W = 720;

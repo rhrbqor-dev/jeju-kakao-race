@@ -242,7 +242,7 @@
             </div>
             <div id="certificateStatus" style="margin-top:12px; white-space:pre-wrap;">설정을 불러오는 중입니다.</div>
             <div style="margin-top:12px;">
-              <a class="btn secondary" href="/certificate" target="_blank">수료증 화면 테스트</a>
+              <a class="btn secondary" href="#" onclick="openCertificatePreview(event)">수료증 화면 테스트</a>
             </div>
           </div>
         </div>
@@ -331,6 +331,16 @@ let notificationEnabled = false;
 function authHeaders() {
   const pw = adminPassword || localStorage.getItem('adminPassword') || localStorage.getItem('admin_password') || '';
   return { 'Content-Type': 'application/json', 'x-admin-password': pw };
+}
+
+function openCertificatePreview(event) {
+  if (event) event.preventDefault();
+  const pw = adminPassword || localStorage.getItem('adminPassword') || localStorage.getItem('admin_password') || '';
+  if (!pw) {
+    alert('먼저 관리자 로그인을 해주세요.');
+    return;
+  }
+  window.open('/certificate/preview?admin_password=' + encodeURIComponent(pw), '_blank');
 }
 async function api(path, options = {}) {
   const res = await fetch(path, { ...options, headers: { ...authHeaders(), ...(options.headers || {}) } });
