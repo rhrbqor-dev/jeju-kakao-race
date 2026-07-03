@@ -184,21 +184,80 @@ async function getRankingDisplaySettings(eventId) {
 }
 
 
+const DEFAULT_CERTIFICATE_LAYOUT = {
+  title: { x: 235, y: 150, w: 250, h: 80, max: 48, min: 26, align: 'center', weight: 700, line: 1.15 },
+  recipient: { x: 480, y: 285, w: 140, h: 95, max: 27, min: 14, align: 'center', weight: 400, line: 1.45 },
+  body: { x: 120, y: 500, w: 480, h: 220, max: 28, min: 17, align: 'center', weight: 400, line: 1.75 },
+  date: { x: 250, y: 765, w: 220, h: 45, max: 25, min: 16, align: 'center', weight: 400, line: 1.2 },
+  issuer: { x: 85, y: 840, w: 420, h: 55, max: 25, min: 14, align: 'center', weight: 400, line: 1.2 },
+  seal: { x: 505, y: 795, w: 120, h: 125, max: 21, min: 12, align: 'center', weight: 700, line: 1.15 },
+};
+
 const DEFAULT_CERTIFICATE_SETTINGS = {
   enabled: false,
   title: '수료증',
   program_name: '제주 AI 탐험대',
-  recipient_template: '{member_name} 님',
-  body: '귀하는 “{program_name}”을 성실히 완주하였기에 이 증서를 드립니다.',
+  recipient_template: '{team_name}\n{member_name}',
+  body: '귀하는 평소 우리 민속과 자연사에\n깊은 관심을 갖고\n“{program_name}”을\n체험하였기에 이 증서를 드립니다.',
   issuer: '이벤트인제주',
   seal_text: '',
   date_label: '{finish_date}',
   background_image_data: '',
   background_image_mime: '',
+  layout: DEFAULT_CERTIFICATE_LAYOUT,
 };
 
 const CERTIFICATE_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 const CERTIFICATE_IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
+function clampNumber(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function normalizeCertificateLayoutBox(value = {}, fallback = {}) {
+  const box = value && typeof value === 'object' ? value : {};
+  const base = fallback && typeof fallback === 'object' ? fallback : {};
+  const alignRaw = String(box.align ?? base.align ?? 'center').trim().toLowerCase();
+  const align = ['left', 'center', 'right'].includes(alignRaw) ? alignRaw : 'center';
+  const maxFont = clampNumber(box.max ?? base.max, 8, 90, base.max ?? 24);
+  const minFont = clampNumber(box.min ?? base.min, 6, maxFont, Math.min(base.min ?? 14, maxFont));
+  return {
+    x: clampNumber(box.x ?? base.x, 0, 720, base.x ?? 0),
+    y: clampNumber(box.y ?? base.y, 0, 1040, base.y ?? 0),
+    w: clampNumber(box.w ?? base.w, 20, 720, base.w ?? 200),
+    h: clampNumber(box.h ?? base.h, 20, 1040, base.h ?? 60),
+    max: maxFont,
+    min: minFont,
+    align,
+    weight: clampNumber(box.weight ?? base.weight, 100, 900, base.weight ?? 400),
+    line: clampNumber(box.line ?? base.line, 0.8, 3, base.line ?? 1.3),
+  };
+}
+
+function normalizeCertificateLayout(value = {}, current = {}) {
+  const incoming = value && typeof value === 'object' ? value : {};
+  const base = current && typeof current === 'object' ? current : {};
+  const result = {};
+  for (const key of Object.keys(DEFAULT_CERTIFICATE_LAYOUT)) {
+    result[key] = normalizeCertificateLayoutBox(
+      incoming[key],
+      base[key] || DEFAULT_CERTIFICATE_LAYOUT[key]
+    );
+  }
+  return result;
+}
+
+function certificateBoxStyle(layout = {}, key = 'body') {
+  const box = normalizeCertificateLayout(layout)[key] || DEFAULT_CERTIFICATE_LAYOUT[key];
+  return `left:${box.x}px;top:${box.y}px;width:${box.w}px;height:${box.h}px;text-align:${box.align};font-weight:${box.weight};line-height:${box.line};`;
+}
+
+function certificateBoxAttrs(layout = {}, key = 'body') {
+  const box = normalizeCertificateLayout(layout)[key] || DEFAULT_CERTIFICATE_LAYOUT[key];
+  return `data-max-font="${box.max}" data-min-font="${box.min}"`;
+}
 
 function normalizeCertificateSettings(value = {}, current = DEFAULT_CERTIFICATE_SETTINGS) {
   const incoming = value && typeof value === 'object' ? value : {};
@@ -227,6 +286,7 @@ function normalizeCertificateSettings(value = {}, current = DEFAULT_CERTIFICATE_
     date_label: String(incoming.date_label ?? base.date_label ?? DEFAULT_CERTIFICATE_SETTINGS.date_label).trim() || DEFAULT_CERTIFICATE_SETTINGS.date_label,
     background_image_data: backgroundImageData,
     background_image_mime: backgroundImageMime,
+    layout: normalizeCertificateLayout(incoming.layout, base.layout || DEFAULT_CERTIFICATE_LAYOUT),
   };
 }
 
@@ -247,6 +307,7 @@ function publicCertificateSettings(settings = {}, req = null) {
     issuer: normalized.issuer,
     seal_text: normalized.seal_text,
     date_label: normalized.date_label,
+    layout: normalizeCertificateLayout(normalized.layout, DEFAULT_CERTIFICATE_LAYOUT),
     has_background_image: hasBackground,
     background_image_mime: hasBackground ? normalized.background_image_mime || 'image/jpeg' : '',
     background_image_url: hasBackground && req ? `${baseUrl(req)}/api/public/settings/certificate/background` : '',
@@ -2620,8 +2681,14 @@ app.get('/certificate', async (req, res) => {
     const sealText = renderTemplate(settings.seal_text, vars);
     const dateLabel = renderTemplate(settings.date_label, vars);
     const backgroundUrl = settings.background_image_data ? '/api/public/settings/certificate/background' : '';
-    const bodyHtml = escapeHtml(body).split(/\r?\n/).filter(Boolean).map((line) => `<div>${line}</div>`).join('');
-    const sealHtml = sealText ? `<div class="seal">${escapeHtml(sealText).split('').map((ch, idx) => `${escapeHtml(ch)}${(idx + 1) % 4 === 0 ? '<br>' : ''}`).join('')}</div>` : '';
+    const layout = normalizeCertificateLayout(settings.layout, DEFAULT_CERTIFICATE_LAYOUT);
+    const bodyText = escapeHtml(body);
+    const recipientText = escapeHtml(recipient);
+    const sealTextHtml = escapeHtml(sealText);
+
+    function boxHtml(key, text, extraClass = '') {
+      return `<div class="fit-box ${extraClass}" style="${certificateBoxStyle(layout, key)}" ${certificateBoxAttrs(layout, key)}><div class="fit-inner">${text}</div></div>`;
+    }
 
     return res.status(200).send(`<!doctype html>
 <html lang="ko">
@@ -2631,42 +2698,82 @@ app.get('/certificate', async (req, res) => {
   <title>${escapeHtml(title)}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;500;700;900&display=swap" rel="stylesheet">
   <style>
-    :root { --paper-w:720px; --paper-h:1024px; }
-    *{box-sizing:border-box} body{margin:0;background:#e9edf4;font-family:'Noto Sans KR','Malgun Gothic',sans-serif;color:#111;}
+    @font-face{
+      font-family:'GyeonggiBatangLocal';
+      src:url('/fonts/GyeonggiBatang_Regular.ttf') format('truetype'),
+          url('/fonts/GyeonggiBatang-Regular.ttf') format('truetype'),
+          url('/fonts/경기천년바탕_Regular.ttf') format('truetype');
+      font-weight:400;font-style:normal;font-display:swap;
+    }
+    @font-face{
+      font-family:'GyeonggiBatangLocal';
+      src:url('/fonts/GyeonggiBatang_Bold.ttf') format('truetype'),
+          url('/fonts/GyeonggiBatang-Bold.ttf') format('truetype'),
+          url('/fonts/경기천년바탕_Bold.ttf') format('truetype');
+      font-weight:700 900;font-style:normal;font-display:swap;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:#e9edf4;font-family:'GyeonggiBatangLocal','Noto Serif KR','Batang','Malgun Gothic',serif;color:#111;}
     .wrap{min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:14px;padding:18px;}
-    .cert{position:relative;width:min(100%,var(--paper-w));aspect-ratio:720/1024;background:#fff;box-shadow:0 12px 32px rgba(0,0,0,.18);overflow:hidden;}
+    .viewport{width:min(100%,720px);position:relative;}
+    .cert{position:absolute;left:0;top:0;width:720px;height:1040px;background:#fff;box-shadow:0 12px 32px rgba(0,0,0,.18);overflow:hidden;transform-origin:top left;}
     .bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;}
-    .layer{position:absolute;inset:0;padding:0 72px;text-align:center;display:flex;flex-direction:column;align-items:center;}
-    .title{margin-top:155px;font-size:48px;font-weight:800;letter-spacing:.22em;text-indent:.22em;}
-    .recipient{margin-top:70px;font-size:28px;font-weight:700;}
-    .body{margin-top:250px;font-size:25px;font-weight:500;line-height:1.85;white-space:normal;word-break:keep-all;}
-    .date{position:absolute;bottom:220px;left:0;right:0;font-size:24px;font-weight:500;}
-    .issuer{position:absolute;bottom:140px;left:72px;right:72px;font-size:25px;font-weight:500;}
-    .seal{position:absolute;right:95px;bottom:80px;border:4px solid #e11;color:#e11;font-weight:800;font-size:22px;line-height:1.18;letter-spacing:.08em;padding:10px 12px;background:rgba(255,255,255,.75);}
-    .toolbar{width:min(100%,var(--paper-w));display:flex;gap:8px;justify-content:center;flex-wrap:wrap;}
-    button,a.btn{border:0;border-radius:10px;background:#2458d8;color:#fff;font-weight:800;padding:10px 14px;text-decoration:none;cursor:pointer;}
+    .fit-box{position:absolute;display:flex;align-items:center;justify-content:center;overflow:hidden;padding:0 4px;z-index:2;}
+    .fit-inner{width:100%;white-space:pre-line;word-break:keep-all;overflow-wrap:break-word;}
+    .title .fit-inner{letter-spacing:.18em;text-indent:.18em;}
+    .seal{border:4px solid #e11;color:#e11;background:rgba(255,255,255,.72);padding:8px;}
+    .seal .fit-inner{letter-spacing:.06em;word-break:keep-all;}
+    .toolbar{width:min(100%,720px);display:flex;gap:8px;justify-content:center;flex-wrap:wrap;}
+    button,a.btn{border:0;border-radius:10px;background:#2458d8;color:#fff;font-weight:800;padding:10px 14px;text-decoration:none;cursor:pointer;font-family:inherit;}
     .hint{font-size:13px;color:#596579;text-align:center;}
-    @media print{body{background:#fff}.wrap{padding:0}.toolbar,.hint{display:none}.cert{width:720px;box-shadow:none}}
+    @media print{body{background:#fff}.wrap{padding:0}.toolbar,.hint{display:none}.viewport{width:720px}.cert{box-shadow:none}}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div id="certificate" class="cert">
-      ${backgroundUrl ? `<img class="bg" src="${backgroundUrl}" alt="수료증 배경" />` : ''}
-      <div class="layer">
-        <div class="title">${escapeHtml(title)}</div>
-        <div class="recipient">${escapeHtml(recipient)}</div>
-        <div class="body">${bodyHtml}</div>
-        <div class="date">${escapeHtml(dateLabel)}</div>
-        <div class="issuer">${escapeHtml(issuer)}</div>
-        ${sealHtml}
+    <div id="viewport" class="viewport">
+      <div id="certificate" class="cert">
+        ${backgroundUrl ? `<img class="bg" src="${backgroundUrl}" alt="수료증 배경" />` : ''}
+        ${boxHtml('title', escapeHtml(title), 'title')}
+        ${boxHtml('recipient', recipientText, 'recipient')}
+        ${boxHtml('body', bodyText, 'body')}
+        ${boxHtml('date', escapeHtml(dateLabel), 'date')}
+        ${boxHtml('issuer', escapeHtml(issuer), 'issuer')}
+        ${sealText ? boxHtml('seal', sealTextHtml, 'seal') : ''}
       </div>
     </div>
     <div class="toolbar"><button onclick="window.print()">인쇄 / PDF 저장</button><a class="btn" href="/ranking" target="_blank">랭킹 보기</a></div>
-    <div class="hint">화면 캡처 또는 인쇄 기능을 이용해 이미지/PDF로 저장할 수 있습니다.</div>
+    <div class="hint">문구는 지정된 영역 안에서 자동으로 줄어듭니다. 경기천년바탕 폰트 파일이 /fonts 폴더에 있으면 우선 적용됩니다.</div>
   </div>
+  <script>
+    const BASE_W = 720;
+    const BASE_H = 1040;
+    const viewport = document.getElementById('viewport');
+    const certificate = document.getElementById('certificate');
+    function fitOne(box){
+      const inner = box.querySelector('.fit-inner');
+      if(!inner) return;
+      const max = Number(box.dataset.maxFont || 24);
+      const min = Number(box.dataset.minFont || 12);
+      inner.style.fontSize = max + 'px';
+      for(let size=max; size>=min; size-=1){
+        inner.style.fontSize = size + 'px';
+        if(inner.scrollHeight <= box.clientHeight + 1 && inner.scrollWidth <= box.clientWidth + 1) return;
+      }
+      inner.style.fontSize = min + 'px';
+    }
+    function resizeCert(){
+      const scale = viewport.clientWidth / BASE_W;
+      viewport.style.height = (BASE_H * scale) + 'px';
+      certificate.style.transform = 'scale(' + scale + ')';
+      document.querySelectorAll('.fit-box').forEach(fitOne);
+    }
+    window.addEventListener('resize', resizeCert);
+    window.addEventListener('load', () => { resizeCert(); setTimeout(resizeCert, 200); });
+    if(document.fonts && document.fonts.ready) document.fonts.ready.then(resizeCert);
+  </script>
 </body>
 </html>`);
   } catch (error) {

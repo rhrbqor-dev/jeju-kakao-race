@@ -16,6 +16,7 @@
     .grid { display:grid; gap:14px; }
     .stats { grid-template-columns:repeat(5,minmax(0,1fr)); }
     .two { grid-template-columns:1fr 1fr; }
+    .four { grid-template-columns:repeat(4,minmax(0,1fr)); }
     .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:18px; box-shadow:0 8px 22px rgba(20,30,60,.05); }
     .stat strong { display:block; font-size:28px; margin-top:6px; }
     .stat span, .muted { color:var(--muted); font-size:14px; }
@@ -217,6 +218,12 @@
             <input id="certificateIssuer" placeholder="예: 이벤트인제주" />
             <label>도장 문구</label>
             <input id="certificateSealText" placeholder="예: 제주특별자치도민속자연사박물관인" />
+
+            <details open style="margin-top:16px;">
+              <summary style="cursor:pointer;font-weight:800;">수료증 위치 / 폰트 크기 설정</summary>
+              <p class="small">좌표 기준은 720×1040입니다. 각 문구는 지정한 박스 안에서만 표시되며, 글자가 길면 최대 폰트에서 최소 폰트까지 자동으로 줄어듭니다.</p>
+              <div id="certificateLayoutFields"></div>
+            </details>
             <div style="height:12px"></div>
             <button onclick="saveCertificateSettings()">수료증 설정 저장</button>
             <button class="secondary" onclick="loadCertificateSettings()">설정 다시 불러오기</button>
@@ -430,6 +437,63 @@ async function saveRankingDisplaySettings() {
 
 
 
+const certificateLayoutDefs = [
+  ['title', '제목'],
+  ['recipient', '수령자/팀명'],
+  ['body', '본문'],
+  ['date', '날짜'],
+  ['issuer', '발급기관'],
+  ['seal', '도장 문구'],
+];
+const certificateLayoutProps = [
+  ['x', 'X'], ['y', 'Y'], ['w', '가로'], ['h', '세로'], ['max', '최대폰트'], ['min', '최소폰트'], ['weight', '굵기'], ['line', '줄간격']
+];
+const certificateDefaultLayoutFallback = {
+  title: { x:235, y:150, w:250, h:80, max:48, min:26, align:'center', weight:700, line:1.15 },
+  recipient: { x:480, y:285, w:140, h:95, max:27, min:14, align:'center', weight:400, line:1.45 },
+  body: { x:120, y:500, w:480, h:220, max:28, min:17, align:'center', weight:400, line:1.75 },
+  date: { x:250, y:765, w:220, h:45, max:25, min:16, align:'center', weight:400, line:1.2 },
+  issuer: { x:85, y:840, w:420, h:55, max:25, min:14, align:'center', weight:400, line:1.2 },
+  seal: { x:505, y:795, w:120, h:125, max:21, min:12, align:'center', weight:700, line:1.15 },
+};
+function renderCertificateLayoutFields(layout = {}) {
+  const wrap = $('certificateLayoutFields');
+  if (!wrap) return;
+  const current = layout && typeof layout === 'object' ? layout : {};
+  wrap.innerHTML = certificateLayoutDefs.map(([key, label]) => {
+    const box = { ...(certificateDefaultLayoutFallback[key] || {}), ...(current[key] || {}) };
+    const inputs = certificateLayoutProps.map(([prop, propLabel]) => `
+      <label style="font-size:12px;margin:6px 0 3px;">${propLabel}</label>
+      <input id="certLayout_${key}_${prop}" type="number" step="${prop === 'line' ? '0.05' : '1'}" value="${box[prop] ?? ''}" />
+    `).join('');
+    return `
+      <div style="border:1px solid #d8dee9;border-radius:12px;padding:10px;margin:10px 0;background:#f8fafc;">
+        <b>${label}</b>
+        <div class="grid four" style="margin-top:6px;">${inputs}</div>
+        <label style="font-size:12px;margin:6px 0 3px;">정렬</label>
+        <select id="certLayout_${key}_align">
+          <option value="left" ${box.align === 'left' ? 'selected' : ''}>왼쪽</option>
+          <option value="center" ${box.align === 'center' ? 'selected' : ''}>가운데</option>
+          <option value="right" ${box.align === 'right' ? 'selected' : ''}>오른쪽</option>
+        </select>
+      </div>
+    `;
+  }).join('');
+}
+function readCertificateLayoutFields() {
+  const layout = {};
+  for (const [key] of certificateLayoutDefs) {
+    layout[key] = {};
+    for (const [prop] of certificateLayoutProps) {
+      const el = $(`certLayout_${key}_${prop}`);
+      const n = Number(el?.value);
+      layout[key][prop] = Number.isFinite(n) ? n : (certificateDefaultLayoutFallback[key]?.[prop] ?? 0);
+    }
+    layout[key].align = $(`certLayout_${key}_align`)?.value || 'center';
+  }
+  return layout;
+}
+
 function certificateBgStatusHtml(s) {
   if (s && s.has_background_image) {
     const url = s.background_image_url || '/api/public/settings/certificate/background';
@@ -449,6 +513,7 @@ function fillCertificateForm(s = {}) {
   if ($('certificateBg')) $('certificateBg').value = '';
   if ($('certificateRemoveBg')) $('certificateRemoveBg').checked = false;
   if ($('certificateBgStatus')) $('certificateBgStatus').innerHTML = certificateBgStatusHtml(s);
+  renderCertificateLayoutFields(s.layout || certificateDefaults?.layout || certificateDefaultLayoutFallback);
   if ($('certificateStatus')) $('certificateStatus').textContent = `현재 상태: ${s.enabled ? '사용' : '사용 안 함'}\n제목: ${s.title || '-'}\n프로그램명: ${s.program_name || '-'}`;
 }
 async function loadCertificateSettings() {
@@ -481,6 +546,7 @@ async function saveCertificateSettings() {
     date_label: $('certificateDateLabel').value.trim(),
     issuer: $('certificateIssuer').value.trim(),
     seal_text: $('certificateSealText').value.trim(),
+    layout: readCertificateLayoutFields(),
     remove_background: $('certificateRemoveBg').checked,
   };
   if (image) Object.assign(body, image);
