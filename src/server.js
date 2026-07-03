@@ -1545,8 +1545,7 @@ async function handleKakaoSkill(req, res) {
       }
 
       if (!newMemberName || newMemberName.length < 2) {
-        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.
-예: 홍길동', ['취소']), event, team, kakaoUserId);
+        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동', ['취소']), event, team, kakaoUserId);
       }
 
       if (newMemberName.length > 20) {
@@ -1554,9 +1553,7 @@ async function handleKakaoSkill(req, res) {
       }
 
       if (isBlockedTeamName(newMemberName)) {
-        return respondKakao(res, kakaoText('사용할 수 없는 이름입니다.
-다른 이름 또는 닉네임을 입력해주세요.
-예: 홍길동', ['취소']), event, team, kakaoUserId);
+        return respondKakao(res, kakaoText('사용할 수 없는 이름입니다.\n다른 이름 또는 닉네임을 입력해주세요.\n예: 홍길동', ['취소']), event, team, kakaoUserId);
       }
 
       const oldMemberName = member.member_name || (member.role === 'leader' ? '팀장' : '팀원');
