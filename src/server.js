@@ -118,8 +118,22 @@ async function query(sql, params = []) {
   return pool.query(sql, params);
 }
 
+async function ensureAppSettingsTable() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS app_settings (
+      id SERIAL PRIMARY KEY,
+      event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+      setting_key TEXT NOT NULL,
+      setting_value JSONB NOT NULL DEFAULT '{}',
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(event_id, setting_key)
+    );
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS idx_app_settings_event_key ON app_settings(event_id, setting_key);`);
+}
 
 async function getSetting(eventId, settingKey, defaultValue = {}) {
+  await ensureAppSettingsTable();
   const result = await query(
     `SELECT setting_value FROM app_settings WHERE event_id=$1 AND setting_key=$2 LIMIT 1;`,
     [eventId, settingKey]
@@ -136,6 +150,7 @@ async function getSetting(eventId, settingKey, defaultValue = {}) {
 }
 
 async function setSetting(eventId, settingKey, settingValue = {}) {
+  await ensureAppSettingsTable();
   await query(
     `INSERT INTO app_settings(event_id, setting_key, setting_value, updated_at)
      VALUES ($1,$2,$3,NOW())
@@ -368,6 +383,35 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+
+  // 기존 버전에서 만들어진 mission_images 테이블에는 image_kind/file_name 컬럼이 없을 수 있습니다.
+  // CREATE TABLE IF NOT EXISTS는 기존 테이블에 새 컬럼을 추가하지 않으므로 ALTER TABLE로 안전하게 보강합니다.
+  await query(`ALTER TABLE mission_images ADD COLUMN IF NOT EXISTS image_kind TEXT NOT NULL DEFAULT 'mission';`);
+  await query(`ALTER TABLE mission_images ADD COLUMN IF NOT EXISTS image_mime TEXT NOT NULL DEFAULT 'image/jpeg';`);
+  await query(`ALTER TABLE mission_images ADD COLUMN IF NOT EXISTS file_name TEXT NOT NULL DEFAULT '';`);
+  await query(`ALTER TABLE mission_images ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0;`);
+  await query(`ALTER TABLE mission_images ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
+
+  await query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='mission_images' AND column_name='image_type'
+      ) THEN
+        EXECUTE 'UPDATE mission_images SET image_kind = CASE WHEN image_type IN (''mission'', ''answer'') THEN image_type ELSE ''mission'' END';
+      END IF;
+
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='mission_images' AND column_name='original_name'
+      ) THEN
+        EXECUTE 'UPDATE mission_images SET file_name = original_name WHERE COALESCE(file_name, '''') = '''' AND original_name IS NOT NULL';
+      END IF;
+    END $$;
+  `);
+
+  await query(`UPDATE mission_images SET image_kind='mission' WHERE image_kind IS NULL OR image_kind NOT IN ('mission', 'answer');`);
 
   await query(`CREATE INDEX IF NOT EXISTS idx_mission_images_mission_kind ON mission_images(mission_id, image_kind, sort_order, id);`);
 
@@ -1852,12 +1896,8 @@ function adminPageHtml() {
 </html>`;
 }
 
-app.get(['/admin', '/admin.html'], (_req, res) => {
+app.get(['/', '/admin', '/admin.html'], (_req, res) => {
   res.status(200).sendFile(path.join(publicDir, 'index.html'));
-});
-
-app.get('/', (_req, res) => {
-  res.status(200).send('Jeju Kakao Race Server Running');
 });
 
 app.get('/health', async (_req, res) => {
@@ -2208,6 +2248,36 @@ app.patch('/api/admin/settings/messages', requireAdmin, async (req, res) => {
     defaults: publicMessageSettings(DEFAULT_MESSAGE_SETTINGS, req),
     message_items: MESSAGE_SETTING_DEFINITIONS.map(({ key, textKey, label }) => ({ key, textKey, label })),
   });
+});
+
+
+// Compatibility aliases for older/newer admin pages.
+// These keep the settings buttons working even if the browser cached an older index.html.
+app.get('/api/admin/photo-auto-approval', requireAdmin, async (_req, res) => {
+  const event = await getActiveEvent();
+  const settings = await getPhotoAutoApprovalSettings(event.id);
+  res.json({ ok: true, settings, active: isPhotoAutoApprovalActive(settings), server_time: nowIso() });
+});
+
+app.patch('/api/admin/photo-auto-approval', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent();
+  const settings = normalizePhotoAutoApprovalSettings(req.body || {});
+  await setSetting(event.id, 'photo_auto_approval', settings);
+  res.json({ ok: true, settings, active: isPhotoAutoApprovalActive(settings), server_time: nowIso() });
+});
+
+app.get('/api/admin/chatbot-messages', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent();
+  const settings = await getMessageSettings(event.id);
+  res.json({ ok: true, settings: publicMessageSettings(settings, req), defaults: publicMessageSettings(DEFAULT_MESSAGE_SETTINGS, req), message_items: MESSAGE_SETTING_DEFINITIONS.map(({ key, textKey, label }) => ({ key, textKey, label })) });
+});
+
+app.patch('/api/admin/chatbot-messages', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent();
+  const current = await getMessageSettings(event.id);
+  const settings = normalizeMessageSettings(req.body || {}, current);
+  await setSetting(event.id, 'chatbot_messages', settings);
+  res.json({ ok: true, settings: publicMessageSettings(settings, req), defaults: publicMessageSettings(DEFAULT_MESSAGE_SETTINGS, req), message_items: MESSAGE_SETTING_DEFINITIONS.map(({ key, textKey, label }) => ({ key, textKey, label })) });
 });
 
 app.get('/api/admin/status', requireAdmin, async (_req, res) => {

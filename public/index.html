@@ -232,16 +232,24 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-let adminPassword = localStorage.getItem('adminPassword') || '';
+let adminPassword = localStorage.getItem('adminPassword') || localStorage.getItem('admin_password') || '';
 let missionsCache = [];
 let knownPendingPhotoIds = new Set();
 let notificationEnabled = false;
 
-function authHeaders() { return { 'Content-Type': 'application/json', 'x-admin-password': adminPassword }; }
+function authHeaders() {
+  const pw = adminPassword || localStorage.getItem('adminPassword') || localStorage.getItem('admin_password') || '';
+  return { 'Content-Type': 'application/json', 'x-admin-password': pw };
+}
 async function api(path, options = {}) {
   const res = await fetch(path, { ...options, headers: { ...authHeaders(), ...(options.headers || {}) } });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.ok === false) throw new Error(data.message || '요청 실패');
+  const text = await res.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch(e) { data = { ok:false, message:text }; }
+  if (!res.ok || data.ok === false) {
+    const detail = data.message || text || '응답 내용 없음';
+    throw new Error(`요청 실패: ${path} / HTTP ${res.status} / ${detail}`);
+  }
   return data;
 }
 function esc(v) { return String(v ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -410,6 +418,8 @@ async function login() {
   try {
     await api('/api/admin/login', { method:'POST', body: JSON.stringify({ password: adminPassword }) });
     localStorage.setItem('adminPassword', adminPassword);
+    localStorage.setItem('admin_password', adminPassword);
+    document.cookie = 'admin_password=' + encodeURIComponent(adminPassword) + '; path=/; max-age=86400; SameSite=Lax';
     $('loginBox').classList.add('hidden');
     $('appBox').classList.remove('hidden');
     await loadAll();
@@ -417,7 +427,12 @@ async function login() {
     await loadMessageSettings();
   } catch(e) { $('loginMsg').textContent = e.message; }
 }
-function logout() { localStorage.removeItem('adminPassword'); location.reload(); }
+function logout() {
+  localStorage.removeItem('adminPassword');
+  localStorage.removeItem('admin_password');
+  document.cookie = 'admin_password=; path=/; max-age=0; SameSite=Lax';
+  location.reload();
+}
 
 async function enableNotifications() {
   if (!('Notification' in window)) { alert('이 브라우저는 알림을 지원하지 않습니다.'); return; }
