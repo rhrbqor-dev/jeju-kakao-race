@@ -26,7 +26,6 @@
     button.ok { background:var(--ok); }
     button.warn { background:var(--wait); }
     input, select, textarea { width:100%; border:1px solid var(--line); border-radius:10px; padding:10px 12px; font:inherit; background:white; }
-    input[type="checkbox"] { width:auto; }
     label { display:block; font-size:13px; color:var(--muted); margin:8px 0 4px; }
     table { width:100%; border-collapse:collapse; font-size:14px; }
     th, td { padding:10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
@@ -39,11 +38,13 @@
     .hidden { display:none !important; }
     .section { margin-top:18px; }
     .notice { background:#fff9e8; border:1px solid #ffe0a3; padding:12px 14px; border-radius:12px; color:#664700; }
-    .alert { margin-top:14px; background:#fff3f3; border:1px solid #ffb2b2; color:#8a1f1f; padding:14px; border-radius:14px; display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
     .small { font-size:12px; color:var(--muted); }
-    .inline-check { display:flex; align-items:center; gap:8px; color:var(--text); font-size:14px; margin:10px 0; }
-    .thumb { max-width:160px; max-height:100px; border-radius:10px; border:1px solid var(--line); display:block; margin-top:8px; }
-    @media (max-width:900px) { .stats,.two { grid-template-columns:1fr; } table { min-width:960px; } }
+    .mission-images { display:flex; flex-wrap:wrap; gap:10px; margin-top:8px; }
+    .mission-image-item { width:120px; border:1px solid var(--line); border-radius:12px; overflow:hidden; background:#f8faff; }
+    .mission-image-item img { width:100%; height:80px; object-fit:cover; display:block; }
+    .mission-image-item div { padding:6px; }
+    .mission-image-item button { width:100%; padding:7px 8px; font-size:12px; border-radius:8px; }
+    @media (max-width:900px) { .stats,.two { grid-template-columns:1fr; } table { min-width:800px; } }
   </style>
 </head>
 <body>
@@ -63,16 +64,15 @@
     </section>
 
     <section id="appBox" class="hidden">
-      <div id="photoAlert" class="alert hidden"></div>
+      <div class="notice">
+        카카오 오픈빌더 스킬 URL은 <b><span id="skillUrl"></span></b> 입니다. KAKAO_SKILL_KEY를 설정했다면 뒤에 <b>?key=설정값</b>을 붙여 등록하세요.
+      </div>
 
       <nav>
         <button onclick="loadAll()">새로고침</button>
         <button class="secondary" onclick="showTab('ranking')">순위표</button>
         <button class="secondary" onclick="showTab('submissions')">제출내역</button>
         <button class="secondary" onclick="showTab('missions')">미션설정</button>
-        <button class="secondary" onclick="showTab('settings')">사진 자동 승인</button>
-        <button class="secondary" onclick="showTab('messages')">챗봇 문구 설정</button>
-        <button class="secondary" onclick="enableNotifications()">브라우저 알림 허용</button>
         <button class="secondary" onclick="downloadCsv()">CSV 저장</button>
         <button class="danger" onclick="resetEvent()">팀/제출 초기화</button>
         <button class="secondary" onclick="logout()">로그아웃</button>
@@ -93,14 +93,13 @@
 
       <section id="tab-submissions" class="section card hidden">
         <h2>미션 제출내역</h2>
-        <p class="small">사진 미션이 업로드되면 이 화면에 승인/반려 버튼이 바로 표시됩니다. 수행자 열에서 어떤 팀원이 업로드했는지 확인할 수 있습니다.</p>
-        <div class="table-wrap"><table><thead><tr><th>시간</th><th>팀</th><th>수행자</th><th>미션</th><th>유형</th><th>입력/인증</th><th>상태</th><th>점수</th><th>관리</th></tr></thead><tbody id="submissionBody"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>시간</th><th>팀</th><th>미션</th><th>유형</th><th>입력/인증</th><th>상태</th><th>점수</th><th>관리</th></tr></thead><tbody id="submissionBody"></tbody></table></div>
       </section>
 
       <section id="tab-missions" class="section grid two hidden">
         <div class="card">
           <h2>미션 목록</h2>
-          <div class="table-wrap"><table><thead><tr><th>코드</th><th>미션명</th><th>유형</th><th>점수</th><th>이미지</th><th>정답설명</th><th>관리</th></tr></thead><tbody id="missionBody"></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>코드</th><th>미션명</th><th>유형</th><th>점수</th><th>미션이미지</th><th>해설이미지</th><th>오답멘트</th><th>정답설명</th><th>관리</th></tr></thead><tbody id="missionBody"></tbody></table></div>
         </div>
         <div class="card">
           <h2 id="missionFormTitle">미션 추가/수정</h2>
@@ -109,11 +108,15 @@
           <label>미션명</label><input id="missionName" placeholder="해신사" />
           <label>유형</label><select id="missionType"><option value="quiz">퀴즈</option><option value="photo">사진</option><option value="gps">GPS</option><option value="visit">방문문구</option><option value="complete">완주</option></select>
           <label>질문/안내문</label><textarea id="missionQuestion" rows="3"></textarea>
-          <label>미션 이미지</label><input id="missionImage" type="file" accept="image/*" />
-          <div id="missionImageStatus" class="small">등록된 이미지 없음</div>
-          <label class="inline-check"><input id="clearMissionImage" type="checkbox" /> 기존 미션 이미지 삭제</label>
+          <label>미션 이미지 업로드</label><input id="missionImageFiles" type="file" accept="image/jpeg,image/png,image/webp" multiple />
+          <p class="small">제한: 미션당 최대 5장, 이미지 1장당 최대 2MB, JPG/PNG/WEBP만 업로드할 수 있습니다. 저장 후 카카오톡 미션 화면에 바로 표시됩니다.</p>
+          <div id="missionImagePreview" class="mission-images"></div>
           <label>정답(복수 정답은 | 로 구분)</label><input id="missionAnswer" placeholder="해신사|해 신 사" />
+          <label>오답 시 출력 멘트</label><textarea id="missionWrongMessage" rows="4" placeholder="예: 아쉽습니다. 주변 안내판을 다시 확인해보세요."></textarea>
           <label>정답 설명</label><textarea id="missionAnswerExplanation" rows="4" placeholder="예: 해신사는 바다의 안전과 풍어를 기원하던 장소입니다."></textarea>
+          <label>정답 설명 이미지 업로드</label><input id="answerImageFiles" type="file" accept="image/jpeg,image/png,image/webp" multiple />
+          <p class="small">제한: 정답 설명 이미지도 미션당 최대 5장, 이미지 1장당 최대 2MB, JPG/PNG/WEBP만 업로드할 수 있습니다. 정답을 맞힌 뒤 카카오톡 정답 설명 아래에 표시됩니다.</p>
+          <div id="answerImagePreview" class="mission-images"></div>
           <label>점수</label><input id="missionScore" type="number" value="10" />
           <label>힌트</label><input id="missionHint" />
           <label>장소명</label><input id="missionLocation" />
@@ -126,101 +129,6 @@
           <button class="secondary" onclick="clearMissionForm()">새 미션 입력</button>
         </div>
       </section>
-
-      <section id="tab-settings" class="section card hidden">
-        <h2>사진 자동 승인 설정</h2>
-        <p class="small">사진 미션을 운영자가 직접 승인하지 않고 자동으로 승인할지 설정합니다. 자동 승인 ON + 시간 설정 OFF이면 항상 자동 승인됩니다. 시간 설정 ON이면 입력한 시간 안에 업로드된 사진만 자동 승인됩니다.</p>
-        <div class="grid two">
-          <div>
-            <label class="inline-check"><input id="photoAutoEnabled" type="checkbox" onchange="togglePhotoAutoTimeFields()" /> 사진 자동 승인 ON</label>
-            <label class="inline-check"><input id="photoAutoUseTime" type="checkbox" onchange="togglePhotoAutoTimeFields()" /> 시간 설정 사용</label>
-            <div id="photoAutoTimeBox">
-              <label>자동 승인 시작 시간</label>
-              <input id="photoAutoStart" type="datetime-local" />
-              <label>자동 승인 종료 시간</label>
-              <input id="photoAutoEnd" type="datetime-local" />
-            </div>
-            <div style="height:12px"></div>
-            <button onclick="savePhotoAutoApproval()">설정 저장</button>
-            <button class="secondary" onclick="loadPhotoAutoApproval()">설정 다시 불러오기</button>
-          </div>
-          <div class="notice">
-            <b>현재 상태</b>
-            <div id="photoAutoStatus" style="margin-top:8px; white-space:pre-wrap;">설정을 불러오는 중입니다.</div>
-          </div>
-        </div>
-      </section>
-
-      <section id="tab-messages" class="section card hidden">
-        <h2>챗봇 문구 설정</h2>
-        <p class="small">게임 시작, 팀 생성, 완주 종료처럼 미션과 별도로 표시되는 카카오톡 안내 문구를 수정합니다. 아래 치환값을 문구 안에 넣을 수 있습니다: {team_name}, {team_code}, {member_name}, {actor_name}, {total}, {rank}</p>
-        <div class="grid two">
-          <div>
-            <label>게임 시작 멘트</label>
-            <textarea id="msgStart" rows="4"></textarea>
-            <div class="message-image-box">
-              <div id="imgStartStatus" class="small">등록된 이미지 없음</div>
-              <input id="imgStart" type="file" accept="image/*" />
-              <label class="inline-check"><input id="clearImgStart" type="checkbox" /> 이미지 삭제</label>
-            </div>
-
-            <label>이미 팀에 속한 참가자가 게임 시작/도움말을 눌렀을 때</label>
-            <textarea id="msgReturning" rows="4"></textarea>
-            <div class="message-image-box">
-              <div id="imgReturningStatus" class="small">등록된 이미지 없음</div>
-              <input id="imgReturning" type="file" accept="image/*" />
-              <label class="inline-check"><input id="clearImgReturning" type="checkbox" /> 이미지 삭제</label>
-            </div>
-
-            <label>팀 생성 버튼을 눌렀을 때 팀명 입력 안내</label>
-            <textarea id="msgCreatePrompt" rows="3"></textarea>
-            <div class="message-image-box">
-              <div id="imgCreatePromptStatus" class="small">등록된 이미지 없음</div>
-              <input id="imgCreatePrompt" type="file" accept="image/*" />
-              <label class="inline-check"><input id="clearImgCreatePrompt" type="checkbox" /> 이미지 삭제</label>
-            </div>
-
-            <label>팀 이름 입력 후 이름/닉네임 입력 안내</label>
-            <textarea id="msgTeamNameSaved" rows="4"></textarea>
-            <div class="message-image-box">
-              <div id="imgTeamNameSavedStatus" class="small">등록된 이미지 없음</div>
-              <input id="imgTeamNameSaved" type="file" accept="image/*" />
-              <label class="inline-check"><input id="clearImgTeamNameSaved" type="checkbox" /> 이미지 삭제</label>
-            </div>
-          </div>
-          <div>
-            <label>팀 생성 완료 멘트</label>
-            <textarea id="msgTeamCreated" rows="5"></textarea>
-            <div class="message-image-box">
-              <div id="imgTeamCreatedStatus" class="small">등록된 이미지 없음</div>
-              <input id="imgTeamCreated" type="file" accept="image/*" />
-              <label class="inline-check"><input id="clearImgTeamCreated" type="checkbox" /> 이미지 삭제</label>
-            </div>
-
-            <label>팀 없이 다른 말을 입력했을 때 안내</label>
-            <textarea id="msgNeedTeam" rows="3"></textarea>
-            <div class="message-image-box">
-              <div id="imgNeedTeamStatus" class="small">등록된 이미지 없음</div>
-              <input id="imgNeedTeam" type="file" accept="image/*" />
-              <label class="inline-check"><input id="clearImgNeedTeam" type="checkbox" /> 이미지 삭제</label>
-            </div>
-
-            <label>완주 시 종료 멘트</label>
-            <textarea id="msgFinish" rows="5"></textarea>
-            <div class="message-image-box">
-              <div id="imgFinishStatus" class="small">등록된 이미지 없음</div>
-              <input id="imgFinish" type="file" accept="image/*" />
-              <label class="inline-check"><input id="clearImgFinish" type="checkbox" /> 이미지 삭제</label>
-            </div>
-
-            <div style="height:12px"></div>
-            <button onclick="saveMessageSettings()">문구/이미지 저장</button>
-            <button class="secondary" onclick="loadMessageSettings()">다시 불러오기</button>
-            <button class="secondary" onclick="resetMessageSettings()">기본 문구로 채우기</button>
-            <p id="messageSettingsStatus" class="small"></p>
-          </div>
-        </div>
-      </section>
     </section>
   </main>
 
@@ -228,8 +136,6 @@
 const $ = (id) => document.getElementById(id);
 let adminPassword = localStorage.getItem('adminPassword') || '';
 let missionsCache = [];
-let knownPendingPhotoIds = new Set();
-let notificationEnabled = false;
 
 function authHeaders() { return { 'Content-Type': 'application/json', 'x-admin-password': adminPassword }; }
 async function api(path, options = {}) {
@@ -238,165 +144,11 @@ async function api(path, options = {}) {
   if (!res.ok || data.ok === false) throw new Error(data.message || '요청 실패');
   return data;
 }
-function esc(v) { return String(v ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function formatTime(v) { return v ? new Date(v).toLocaleString('ko-KR') : '-'; }
 function duration(sec) { if (!sec) return '-'; const m=Math.floor(sec/60), s=sec%60; return `${m}분 ${s}초`; }
-function badge(status) { return `<span class="badge ${esc(status)}">${esc(status)}</span>`; }
-function toDatetimeLocalValue(value) {
-  if (!value) return '';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-function datetimeLocalToIso(value) {
-  if (!value) return '';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  return date.toISOString();
-}
-function togglePhotoAutoTimeFields() {
-  const enabled = $('photoAutoEnabled')?.checked;
-  const useTime = $('photoAutoUseTime')?.checked;
-  if ($('photoAutoTimeBox')) $('photoAutoTimeBox').style.opacity = enabled && useTime ? '1' : '.45';
-  if ($('photoAutoStart')) $('photoAutoStart').disabled = !(enabled && useTime);
-  if ($('photoAutoEnd')) $('photoAutoEnd').disabled = !(enabled && useTime);
-}
-function renderPhotoAutoStatus(data) {
-  if (!data || !data.settings) {
-    $('photoAutoStatus').textContent = '설정을 불러오지 못했습니다.';
-    return;
-  }
-  const s = data.settings;
-  const lines = [];
-  lines.push(`자동 승인: ${s.enabled ? 'ON' : 'OFF'}`);
-  lines.push(`시간 설정: ${s.use_time_window ? 'ON' : 'OFF'}`);
-  if (s.use_time_window) {
-    lines.push(`시작: ${s.start_at ? formatTime(s.start_at) : '-'}`);
-    lines.push(`종료: ${s.end_at ? formatTime(s.end_at) : '-'}`);
-  }
-  lines.push(`현재 적용 상태: ${data.active ? '자동 승인 적용 중' : '자동 승인 미적용'}`);
-  lines.push(`서버 시간: ${formatTime(data.server_time)}`);
-  $('photoAutoStatus').textContent = lines.join('\n');
-}
-async function loadPhotoAutoApproval() {
-  const data = await api('/api/admin/settings/photo-auto-approval');
-  const s = data.settings || {};
-  $('photoAutoEnabled').checked = !!s.enabled;
-  $('photoAutoUseTime').checked = !!s.use_time_window;
-  $('photoAutoStart').value = toDatetimeLocalValue(s.start_at);
-  $('photoAutoEnd').value = toDatetimeLocalValue(s.end_at);
-  togglePhotoAutoTimeFields();
-  renderPhotoAutoStatus(data);
-}
-async function savePhotoAutoApproval() {
-  const enabled = $('photoAutoEnabled').checked;
-  const useTime = $('photoAutoUseTime').checked;
-  const body = {
-    enabled,
-    use_time_window: useTime,
-    start_at: useTime ? datetimeLocalToIso($('photoAutoStart').value) : '',
-    end_at: useTime ? datetimeLocalToIso($('photoAutoEnd').value) : '',
-  };
-  const data = await api('/api/admin/settings/photo-auto-approval', { method:'PATCH', body: JSON.stringify(body) });
-  renderPhotoAutoStatus(data);
-  alert('사진 자동 승인 설정이 저장되었습니다.');
-}
-
-
-let messageDefaults = null;
-const messageImageFields = [
-  { key:'start', input:'imgStart', clear:'clearImgStart', status:'imgStartStatus' },
-  { key:'returning', input:'imgReturning', clear:'clearImgReturning', status:'imgReturningStatus' },
-  { key:'create_prompt', input:'imgCreatePrompt', clear:'clearImgCreatePrompt', status:'imgCreatePromptStatus' },
-  { key:'team_name_saved', input:'imgTeamNameSaved', clear:'clearImgTeamNameSaved', status:'imgTeamNameSavedStatus' },
-  { key:'team_created', input:'imgTeamCreated', clear:'clearImgTeamCreated', status:'imgTeamCreatedStatus' },
-  { key:'need_team', input:'imgNeedTeam', clear:'clearImgNeedTeam', status:'imgNeedTeamStatus' },
-  { key:'finish', input:'imgFinish', clear:'clearImgFinish', status:'imgFinishStatus' },
-];
-
-function messageImageStatusHtml(s, key) {
-  if (s && s[key + '_has_image']) {
-    const url = s[key + '_image_url'] || ('/api/public/settings/messages/' + encodeURIComponent(key) + '/image');
-    return `현재 이미지: <a href="${url}" target="_blank">보기</a>`;
-  }
-  return '등록된 이미지 없음';
-}
-function fillMessageImages(s = {}) {
-  messageImageFields.forEach(f => {
-    if ($(f.input)) $(f.input).value = '';
-    if ($(f.clear)) $(f.clear).checked = false;
-    if ($(f.status)) $(f.status).innerHTML = messageImageStatusHtml(s, f.key);
-  });
-}
-function fillMessageForm(s = {}, updateImages = true) {
-  $('msgStart').value = s.start_message || '';
-  $('msgReturning').value = s.returning_team_message || '';
-  $('msgCreatePrompt').value = s.create_team_prompt || '';
-  $('msgTeamNameSaved').value = s.team_name_saved_message || '';
-  $('msgTeamCreated').value = s.team_created_message || '';
-  $('msgNeedTeam').value = s.need_team_message || '';
-  $('msgFinish').value = s.finish_message || '';
-  if (updateImages) fillMessageImages(s);
-}
-function readMessageImage(inputId) {
-  const file = $(inputId).files[0];
-  if (!file) return Promise.resolve(null);
-  if (file.size > 6 * 1024 * 1024) return Promise.reject(new Error('챗봇 문구 이미지는 6MB 이하로 업로드해주세요.'));
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve({ data: String(reader.result).split(',')[1], mime: file.type || 'image/jpeg' });
-    reader.onerror = () => reject(new Error('이미지를 읽지 못했습니다.'));
-    reader.readAsDataURL(file);
-  });
-}
-async function collectMessageForm() {
-  const body = {
-    start_message: $('msgStart').value,
-    returning_team_message: $('msgReturning').value,
-    create_team_prompt: $('msgCreatePrompt').value,
-    team_name_saved_message: $('msgTeamNameSaved').value,
-    team_created_message: $('msgTeamCreated').value,
-    need_team_message: $('msgNeedTeam').value,
-    finish_message: $('msgFinish').value,
-  };
-
-  for (const f of messageImageFields) {
-    if ($(f.clear).checked) {
-      body['clear_' + f.key + '_image'] = true;
-      continue;
-    }
-    const image = await readMessageImage(f.input);
-    if (image) {
-      body[f.key + '_image_data'] = image.data;
-      body[f.key + '_image_mime'] = image.mime;
-    }
-  }
-
-  return body;
-}
-async function loadMessageSettings() {
-  const data = await api('/api/admin/settings/messages');
-  messageDefaults = data.defaults || null;
-  fillMessageForm(data.settings || {});
-  $('messageSettingsStatus').textContent = '문구/이미지 설정을 불러왔습니다.';
-}
-async function saveMessageSettings() {
-  $('messageSettingsStatus').textContent = '문구/이미지를 저장하는 중입니다...';
-  const body = await collectMessageForm();
-  const data = await api('/api/admin/settings/messages', { method:'PATCH', body: JSON.stringify(body) });
-  messageDefaults = data.defaults || messageDefaults;
-  fillMessageForm(data.settings || {});
-  $('messageSettingsStatus').textContent = '문구/이미지 설정이 저장되었습니다.';
-  alert('챗봇 문구/이미지 설정이 저장되었습니다.');
-}
-async function resetMessageSettings() {
-  if (!messageDefaults) {
-    const data = await api('/api/admin/settings/messages');
-    messageDefaults = data.defaults || data.settings || {};
-  }
-  fillMessageForm(messageDefaults || {}, false);
-  $('messageSettingsStatus').textContent = '기본 문구로 채웠습니다. 저장 버튼을 눌러야 실제 반영됩니다. 이미지는 삭제 체크를 하지 않으면 유지됩니다.';
+function badge(status) { return `<span class="badge ${status}">${status}</span>`; }
+function imageCount(mission) {
+  return Number(mission?.image_count || 0);
 }
 
 async function login() {
@@ -406,40 +158,11 @@ async function login() {
     localStorage.setItem('adminPassword', adminPassword);
     $('loginBox').classList.add('hidden');
     $('appBox').classList.remove('hidden');
+    $('skillUrl').textContent = location.origin + '/kakao/skill';
     await loadAll();
-    await loadPhotoAutoApproval();
-    await loadMessageSettings();
   } catch(e) { $('loginMsg').textContent = e.message; }
 }
 function logout() { localStorage.removeItem('adminPassword'); location.reload(); }
-
-async function enableNotifications() {
-  if (!('Notification' in window)) { alert('이 브라우저는 알림을 지원하지 않습니다.'); return; }
-  const result = await Notification.requestPermission();
-  notificationEnabled = result === 'granted';
-  alert(notificationEnabled ? '사진 업로드 알림이 허용되었습니다.' : '브라우저 알림이 허용되지 않았습니다.');
-}
-function beep() {
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain); gain.connect(ctx.destination); gain.gain.value = 0.05; osc.frequency.value = 880; osc.start();
-    setTimeout(() => { osc.stop(); ctx.close(); }, 220);
-  } catch(e) {}
-}
-function showPhotoAlert(items) {
-  const first = items[0];
-  const msg = items.length === 1
-    ? `새 사진 업로드: ${first.team_name} / ${first.actor_name || '팀원'} / ${first.mission_code} ${first.mission_name}`
-    : `새 사진 업로드 ${items.length}건이 있습니다. 바로 승인해주세요.`;
-  $('photoAlert').classList.remove('hidden');
-  $('photoAlert').innerHTML = `<b>📸 ${esc(msg)}</b><span><button onclick="showTab('submissions')">승인하러 가기</button> <button class="secondary" onclick="$('photoAlert').classList.add('hidden')">닫기</button></span>`;
-  beep();
-  if (notificationEnabled && 'Notification' in window && Notification.permission === 'granted') {
-    new Notification('사진 인증 승인 대기', { body: msg });
-  }
-}
 
 async function loadAll() {
   const summary = await api('/api/admin/summary');
@@ -452,32 +175,23 @@ async function loadAll() {
 }
 async function loadRanking() {
   const data = await api('/api/admin/rankings');
-  $('rankingBody').innerHTML = data.rankings.map(r => `<tr><td>${r.rank}</td><td>${esc(r.team_code)}</td><td>${esc(r.team_name)}</td><td><b>${r.total_score}</b></td><td>${r.completed_count}</td><td>${esc(r.status)}</td><td>${duration(r.duration_seconds)}</td></tr>`).join('') || '<tr><td colspan="7">등록된 팀이 없습니다.</td></tr>';
+  $('rankingBody').innerHTML = data.rankings.map(r => `<tr><td>${r.rank}</td><td>${r.team_code}</td><td>${r.team_name}</td><td><b>${r.total_score}</b></td><td>${r.completed_count}</td><td>${r.status}</td><td>${duration(r.duration_seconds)}</td></tr>`).join('') || '<tr><td colspan="7">등록된 팀이 없습니다.</td></tr>';
 }
 async function loadSubmissions() {
   const data = await api('/api/admin/submissions');
-  const pendingPhotos = data.submissions.filter(s => s.mission_type === 'photo' && s.status === 'pending');
-  const newPending = pendingPhotos.filter(s => !knownPendingPhotoIds.has(String(s.id)));
-  pendingPhotos.forEach(s => knownPendingPhotoIds.add(String(s.id)));
-  if (newPending.length) showPhotoAlert(newPending);
-
   $('submissionBody').innerHTML = data.submissions.map(s => {
     const img = s.has_image ? `<a href="/api/admin/submissions/${s.id}/image?admin_password=${encodeURIComponent(adminPassword)}" target="_blank">사진보기</a>` : '';
     const gps = s.distance_m != null ? `GPS ${Math.round(s.distance_m)}m` : '';
-    const actor = s.actor_name || '-';
     const manage = s.status === 'pending'
       ? `<button class="ok" onclick="review(${s.id},'approved')">승인</button> <button class="danger" onclick="review(${s.id},'rejected')">반려</button>`
       : '';
-    return `<tr><td>${formatTime(s.submitted_at)}</td><td>${esc(s.team_name)}<br><span class="small">${esc(s.team_code)}</span></td><td><b>${esc(actor)}</b></td><td>${esc(s.mission_code)}<br>${esc(s.mission_name)}</td><td>${esc(s.mission_type)}</td><td>${esc(s.answer_text || '')}<br>${img} ${esc(gps)}</td><td>${badge(s.status)}</td><td>${s.score}</td><td>${manage}</td></tr>`;
-  }).join('') || '<tr><td colspan="9">제출 내역이 없습니다.</td></tr>';
+    return `<tr><td>${formatTime(s.submitted_at)}</td><td>${s.team_name}<br><span class="small">${s.team_code}</span></td><td>${s.mission_code}<br>${s.mission_name}</td><td>${s.mission_type}</td><td>${s.answer_text || ''}<br>${img} ${gps}</td><td>${badge(s.status)}</td><td>${s.score}</td><td>${manage}</td></tr>`;
+  }).join('') || '<tr><td colspan="8">제출 내역이 없습니다.</td></tr>';
 }
 async function loadMissions() {
   const data = await api('/api/admin/missions');
   missionsCache = data.missions;
-  $('missionBody').innerHTML = data.missions.map(m => {
-    const img = m.has_mission_image ? `<a href="/api/public/missions/${m.id}/image" target="_blank">보기</a>` : '-';
-    return `<tr><td>${esc(m.mission_code)}</td><td>${esc(m.mission_name)}</td><td>${esc(m.mission_type)}</td><td>${m.score}</td><td>${img}</td><td>${m.answer_explanation ? '있음' : '-'}</td><td><button class="secondary" onclick="editMission(${m.id})">수정</button> <button class="danger" onclick="deleteMission(${m.id})">삭제</button></td></tr>`;
-  }).join('');
+  $('missionBody').innerHTML = data.missions.map(m => `<tr><td>${m.mission_code}</td><td>${m.mission_name}</td><td>${m.mission_type}</td><td>${m.score}</td><td>${imageCount(m)}장</td><td>${Number(m.answer_image_count || 0)}장</td><td>${m.wrong_message ? '있음' : '-'}</td><td>${m.answer_explanation ? '있음' : '-'}</td><td><button class="secondary" onclick="editMission(${m.id})">수정</button> <button class="danger" onclick="deleteMission(${m.id})">삭제</button></td></tr>`).join('');
 }
 async function review(id, decision) {
   const note = prompt(decision === 'approved' ? '승인 메모(선택)' : '반려 사유(선택)', '') || '';
@@ -485,56 +199,111 @@ async function review(id, decision) {
   await loadAll();
 }
 function showTab(name) {
-  ['ranking','submissions','missions','settings','messages'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
-  if (name === 'settings') loadPhotoAutoApproval().catch(e => alert(e.message));
-  if (name === 'messages') loadMessageSettings().catch(e => alert(e.message));
+  ['ranking','submissions','missions'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
 }
 function editMission(id) {
   const m = missionsCache.find(x => x.id === id); if (!m) return;
-  $('missionFormTitle').textContent = '미션 수정';
   $('missionId').value = m.id; $('missionCode').value = m.mission_code; $('missionName').value = m.mission_name; $('missionType').value = m.mission_type;
-  $('missionQuestion').value = m.question; $('missionAnswer').value = m.answer; $('missionAnswerExplanation').value = m.answer_explanation || ''; $('missionScore').value = m.score; $('missionHint').value = m.hint;
+  $('missionQuestion').value = m.question; $('missionAnswer').value = m.answer; $('missionWrongMessage').value = m.wrong_message || ''; $('missionAnswerExplanation').value = m.answer_explanation || ''; $('missionScore').value = m.score; $('missionHint').value = m.hint;
   $('missionLocation').value = m.location_name; $('missionLat').value = m.latitude || ''; $('missionLng').value = m.longitude || ''; $('missionRadius').value = m.radius_m; $('missionOrder').value = m.sort_order;
-  $('missionImage').value = ''; $('clearMissionImage').checked = false;
-  $('missionImageStatus').innerHTML = m.has_mission_image ? `현재 이미지: <a href="/api/public/missions/${m.id}/image" target="_blank">보기</a>` : '등록된 이미지 없음';
+  $('missionImageFiles').value = '';
+  $('answerImageFiles').value = '';
+  loadMissionImages(m.id, 'mission', 'missionImagePreview').catch(e => alert(e.message));
+  loadMissionImages(m.id, 'answer', 'answerImagePreview').catch(e => alert(e.message));
 }
 function clearMissionForm() {
-  ['missionId','missionCode','missionName','missionQuestion','missionAnswer','missionAnswerExplanation','missionHint','missionLocation','missionLat','missionLng'].forEach(id => $(id).value='');
-  $('missionFormTitle').textContent = '미션 추가/수정';
+  ['missionId','missionCode','missionName','missionQuestion','missionAnswer','missionWrongMessage','missionAnswerExplanation','missionHint','missionLocation','missionLat','missionLng'].forEach(id => $(id).value='');
+  $('missionImageFiles').value = '';
+  $('answerImageFiles').value = '';
+  $('missionImagePreview').innerHTML = '<p class="small">미션을 저장한 뒤 이미지를 업로드할 수 있습니다.</p>';
+  $('answerImagePreview').innerHTML = '<p class="small">미션을 저장한 뒤 정답 설명 이미지를 업로드할 수 있습니다.</p>';
   $('missionType').value='quiz'; $('missionScore').value=10; $('missionRadius').value=80; $('missionOrder').value=1;
-  $('missionImage').value=''; $('clearMissionImage').checked=false; $('missionImageStatus').textContent='등록된 이미지 없음';
 }
-function readMissionImage() {
-  const file = $('missionImage').files[0];
-  if (!file) return Promise.resolve(null);
-  if (file.size > 6 * 1024 * 1024) return Promise.reject(new Error('미션 이미지는 6MB 이하로 업로드해주세요.'));
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve({ data: String(reader.result).split(',')[1], mime: file.type || 'image/jpeg' });
-    reader.onerror = () => reject(new Error('이미지를 읽지 못했습니다.'));
-    reader.readAsDataURL(file);
+async function loadMissionImages(missionId, imageType = 'mission', previewId = 'missionImagePreview') {
+  const preview = $(previewId);
+  const emptyText = imageType === 'answer' ? '등록된 정답 설명 이미지가 없습니다.' : '등록된 미션 이미지가 없습니다.';
+  const waitText = imageType === 'answer' ? '미션을 저장한 뒤 정답 설명 이미지를 업로드할 수 있습니다.' : '미션을 저장한 뒤 이미지를 업로드할 수 있습니다.';
+  const label = imageType === 'answer' ? '정답 설명 이미지' : '미션 이미지';
+
+  if (!missionId) {
+    preview.innerHTML = `<p class="small">${waitText}</p>`;
+    return;
+  }
+
+  const data = await api(`/api/admin/missions/${missionId}/images?type=${encodeURIComponent(imageType)}`);
+  if (!data.images.length) {
+    preview.innerHTML = `<p class="small">${emptyText}</p>`;
+    return;
+  }
+
+  preview.innerHTML = data.images.map((img, index) => `
+    <div class="mission-image-item">
+      <img src="/api/public/mission-images/${img.id}" alt="${label} ${index + 1}" />
+      <div>
+        <div class="small">${index + 1}번 ${label}</div>
+        <button class="danger" onclick="deleteMissionImage(${img.id}, ${missionId}, '${imageType}', '${previewId}')">삭제</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function deleteMissionImage(imageId, missionId, imageType = 'mission', previewId = 'missionImagePreview') {
+  if (!confirm('이 이미지를 삭제할까요?')) return;
+  await api(`/api/admin/mission-images/${imageId}`, { method:'DELETE' });
+  await loadMissionImages(missionId, imageType, previewId);
+  await loadMissions();
+}
+
+async function uploadMissionImages(missionId, imageType = 'mission', inputId = 'missionImageFiles') {
+  const files = Array.from($(inputId).files || []);
+  if (!files.length) return;
+
+  const label = imageType === 'answer' ? '정답 설명 이미지' : '미션 이미지';
+  if (files.length > 5) throw new Error(`${label}는 한 번에 최대 5장까지만 선택할 수 있습니다.`);
+
+  for (const file of files) {
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      throw new Error(`${label}는 JPG, PNG, WEBP 파일만 업로드할 수 있습니다.`);
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      throw new Error(`${file.name} 파일이 2MB를 초과합니다.`);
+    }
+  }
+
+  const form = new FormData();
+  files.forEach(file => form.append('images', file));
+
+  const res = await fetch(`/api/admin/missions/${missionId}/images?type=${encodeURIComponent(imageType)}`, {
+    method: 'POST',
+    headers: { 'x-admin-password': adminPassword },
+    body: form,
   });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) throw new Error(data.message || '이미지 업로드 실패');
+  $(inputId).value = '';
 }
+
 async function saveMission() {
   const body = {
     mission_code:$('missionCode').value.trim(), mission_name:$('missionName').value.trim(), mission_type:$('missionType').value,
-    question:$('missionQuestion').value, answer:$('missionAnswer').value, answer_explanation:$('missionAnswerExplanation').value, score:Number($('missionScore').value||0), hint:$('missionHint').value,
+    question:$('missionQuestion').value, answer:$('missionAnswer').value, wrong_message:$('missionWrongMessage').value, answer_explanation:$('missionAnswerExplanation').value, score:Number($('missionScore').value||0), hint:$('missionHint').value,
     location_name:$('missionLocation').value, latitude:$('missionLat').value ? Number($('missionLat').value) : null, longitude:$('missionLng').value ? Number($('missionLng').value) : null,
-    radius_m:Number($('missionRadius').value||80), sort_order:Number($('missionOrder').value||0), is_required:true,
-    clear_mission_image:$('clearMissionImage').checked
+    radius_m:Number($('missionRadius').value||80), sort_order:Number($('missionOrder').value||0), is_required:true
   };
-  const image = await readMissionImage();
-  if (image) { body.mission_image_data = image.data; body.mission_image_mime = image.mime; }
   const id = $('missionId').value;
-  await api(id ? `/api/admin/missions/${id}` : '/api/admin/missions', { method:id?'PATCH':'POST', body: JSON.stringify(body) });
+  const saved = await api(id ? `/api/admin/missions/${id}` : '/api/admin/missions', { method:id?'PATCH':'POST', body: JSON.stringify(body) });
+  const missionId = saved.mission?.id || id;
+  await uploadMissionImages(missionId, 'mission', 'missionImageFiles');
+  await uploadMissionImages(missionId, 'answer', 'answerImageFiles');
   clearMissionForm(); await loadAll();
 }
 async function deleteMission(id) { if(confirm('정말 삭제할까요? 제출 기록도 함께 삭제될 수 있습니다.')) { await api(`/api/admin/missions/${id}`, { method:'DELETE' }); await loadAll(); } }
 function downloadCsv() { location.href = `/api/admin/export/rankings.csv?admin_password=${encodeURIComponent(adminPassword)}`; }
-async function resetEvent() { if(confirm('정말 모든 팀과 제출 기록을 초기화할까요?')) { knownPendingPhotoIds = new Set(); await api('/api/admin/reset-event', { method:'POST', body:'{}' }); await loadAll(); } }
+async function resetEvent() { if(confirm('정말 모든 팀과 제출 기록을 초기화할까요?')) { await api('/api/admin/reset-event', { method:'POST', body:'{}' }); await loadAll(); } }
 
+clearMissionForm();
 if (adminPassword) { $('adminPassword').value = adminPassword; login(); }
-setInterval(() => { if (!$('appBox').classList.contains('hidden')) loadAll().catch(()=>{}); }, 5000);
+setInterval(() => { if (!$('appBox').classList.contains('hidden')) loadAll().catch(()=>{}); }, 10000);
 </script>
 </body>
 </html>
