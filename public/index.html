@@ -11,7 +11,7 @@
     header { background:linear-gradient(135deg,#123772,#2764d9); color:white; padding:26px 20px; }
     header h1 { margin:0 0 8px; font-size:26px; }
     header p { margin:0; opacity:.9; }
-    main { max-width:1180px; margin:0 auto; padding:20px; }
+    main { max-width:1520px; margin:0 auto; padding:20px; }
     .login { max-width:420px; margin:50px auto; background:var(--card); border:1px solid var(--line); border-radius:18px; padding:24px; box-shadow:0 12px 32px rgba(20,30,60,.08); }
     .grid { display:grid; gap:14px; }
     .stats { grid-template-columns:repeat(5,minmax(0,1fr)); }
@@ -33,6 +33,15 @@
     th, td { padding:10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
     th { background:#f8faff; color:#44516a; position:sticky; top:0; }
     .table-wrap { overflow:auto; max-height:540px; border:1px solid var(--line); border-radius:12px; }
+    /* 미션설정 화면은 목록 표를 넓게 사용하도록 분리합니다.
+       표 내부 스크롤 대신 페이지 자체가 자연스럽게 길어지도록 처리합니다. */
+    #tab-missions { display:block; }
+    #tab-missions .card { margin-bottom:16px; }
+    #tab-missions .mission-list-wrap { max-height:none; overflow:visible; }
+    #tab-missions .mission-list-wrap table { font-size:13px; }
+    #tab-missions .mission-list-wrap th,
+    #tab-missions .mission-list-wrap td { padding:8px 7px; }
+    #tab-missions .mission-form-card { max-width:100%; }
     .badge { display:inline-block; padding:3px 8px; border-radius:20px; font-size:12px; font-weight:800; }
     .badge.correct,.badge.approved { background:#e7f7ef; color:#0f7b50; }
     .badge.pending { background:#fff4df; color:#986000; }
@@ -101,12 +110,12 @@
         <div class="table-wrap"><table><thead><tr><th>시간</th><th>팀</th><th>수행자</th><th>미션</th><th>유형</th><th>입력/인증</th><th>상태</th><th>점수</th><th>관리</th></tr></thead><tbody id="submissionBody"></tbody></table></div>
       </section>
 
-      <section id="tab-missions" class="section grid two hidden">
-        <div class="card">
+      <section id="tab-missions" class="section hidden">
+        <div class="card mission-list-card">
           <h2>미션 목록</h2>
-          <div class="table-wrap"><table><thead><tr><th>코드</th><th>미션명</th><th>유형</th><th>점수</th><th>오답감점</th><th>힌트감점</th><th>미션 이미지</th><th>정답 설명 이미지</th><th>오답멘트</th><th>정답설명</th><th>관리</th></tr></thead><tbody id="missionBody"></tbody></table></div>
+          <div class="table-wrap mission-list-wrap"><table><thead><tr><th>코드</th><th>미션명</th><th>유형</th><th>점수</th><th>오답감점</th><th>힌트감점</th><th>미션 이미지</th><th>정답 설명 이미지</th><th>오답멘트</th><th>정답설명</th><th>관리</th></tr></thead><tbody id="missionBody"></tbody></table></div>
         </div>
-        <div class="card">
+        <div class="card mission-form-card">
           <h2 id="missionFormTitle">미션 추가/수정</h2>
           <input id="missionId" type="hidden" />
           <label>미션코드</label><input id="missionCode" placeholder="M1" />
