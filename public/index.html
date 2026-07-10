@@ -33,15 +33,14 @@
     th, td { padding:10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
     th { background:#f8faff; color:#44516a; position:sticky; top:0; }
     .table-wrap { overflow:auto; max-height:540px; border:1px solid var(--line); border-radius:12px; }
-    /* 미션설정 화면은 목록 표를 넓게 사용하도록 분리합니다.
-       표 내부 스크롤 대신 페이지 자체가 자연스럽게 길어지도록 처리합니다. */
-    #tab-missions { display:block; }
-    #tab-missions .card { margin-bottom:16px; }
-    #tab-missions .mission-list-wrap { max-height:none; overflow:visible; }
-    #tab-missions .mission-list-wrap table { font-size:13px; }
+    /* 미션설정 화면: 기존처럼 목록은 왼쪽, 추가/수정 폼은 오른쪽에 배치합니다.
+       미션 목록은 높이 제한을 없애 표 내부 세로 스크롤이 생기지 않도록 합니다. */
+    #tab-missions.two { grid-template-columns:minmax(0,1.45fr) minmax(360px,.85fr); align-items:start; }
+    #tab-missions .mission-list-wrap { max-height:none; overflow-x:auto; overflow-y:visible; }
+    #tab-missions .mission-list-wrap table { font-size:12.5px; }
     #tab-missions .mission-list-wrap th,
-    #tab-missions .mission-list-wrap td { padding:8px 7px; }
-    #tab-missions .mission-form-card { max-width:100%; }
+    #tab-missions .mission-list-wrap td { padding:7px 6px; }
+    #tab-missions .mission-form-card { position:sticky; top:14px; }
     .badge { display:inline-block; padding:3px 8px; border-radius:20px; font-size:12px; font-weight:800; }
     .badge.correct,.badge.approved { background:#e7f7ef; color:#0f7b50; }
     .badge.pending { background:#fff4df; color:#986000; }
@@ -110,7 +109,7 @@
         <div class="table-wrap"><table><thead><tr><th>시간</th><th>팀</th><th>수행자</th><th>미션</th><th>유형</th><th>입력/인증</th><th>상태</th><th>점수</th><th>관리</th></tr></thead><tbody id="submissionBody"></tbody></table></div>
       </section>
 
-      <section id="tab-missions" class="section hidden">
+      <section id="tab-missions" class="section grid two hidden">
         <div class="card mission-list-card">
           <h2>미션 목록</h2>
           <div class="table-wrap mission-list-wrap"><table><thead><tr><th>코드</th><th>미션명</th><th>유형</th><th>점수</th><th>오답감점</th><th>힌트감점</th><th>미션 이미지</th><th>정답 설명 이미지</th><th>오답멘트</th><th>정답설명</th><th>관리</th></tr></thead><tbody id="missionBody"></tbody></table></div>
