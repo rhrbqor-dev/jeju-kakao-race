@@ -103,6 +103,7 @@
 
 <script>
   const REFRESH_MS = 3000;
+  const queryString = window.location.search || ''; 
   const $ = (id) => document.getElementById(id);
   let prevSnapshot = '';
 
@@ -169,7 +170,7 @@
 
   async function loadRanking() {
     try {
-      const res = await fetch('/api/public/rankings', { cache: 'no-store' });
+      const res = await fetch('/api/public/rankings' + queryString, { cache: 'no-store' });
       const data = await res.json();
       if (!res.ok || !data.ok) throw new Error(data.message || '랭킹 조회 실패');
       const rankings = data.rankings || [];

@@ -118,6 +118,209 @@ async function query(sql, params = []) {
   return pool.query(sql, params);
 }
 
+
+function normalizeEventCode(value = '') {
+  const raw = String(value || '').trim().toLowerCase();
+  const slug = raw
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60);
+  return slug || `race-${Date.now().toString(36)}`;
+}
+
+function eventQueryValue(event = null) {
+  if (!event) return '';
+  return String(event.event_code || event.id || '').trim();
+}
+
+function urlWithEvent(pathValue = '', event = null) {
+  const ev = eventQueryValue(event);
+  if (!ev) return pathValue;
+  const joiner = String(pathValue).includes('?') ? '&' : '?';
+  return `${pathValue}${joiner}event=${encodeURIComponent(ev)}`;
+}
+
+function extractKakaoRawQr(body) {
+  const params = body?.action?.params || {};
+  const detailParams = body?.action?.detailParams || {};
+  const raw =
+    params.barcode ||
+    params.mission_qr ||
+    params.qr ||
+    detailParams.barcode?.value ||
+    detailParams.mission_qr?.value ||
+    '';
+  if (!raw) return '';
+  try {
+    const parsed = JSON.parse(raw);
+    return String(parsed.barcodeData || parsed.value || parsed.text || raw).trim();
+  } catch {
+    return String(raw).trim();
+  }
+}
+
+function extractEventIdentifierFromText(value = '') {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  try {
+    const url = new URL(text);
+    return url.searchParams.get('event_id') || url.searchParams.get('event') || url.searchParams.get('event_code') || url.searchParams.get('race') || '';
+  } catch {
+    // URL이 아니면 아래 패턴을 확인합니다.
+  }
+  const match = text.match(/(?:event_id|event_code|event|race)\s*[:=]\s*([a-zA-Z0-9_-]+)/i);
+  return match ? match[1] : '';
+}
+
+function getEventIdentifierFromRequest(req) {
+  const body = req?.body || {};
+  const params = body?.action?.params || {};
+  const detailParams = body?.action?.detailParams || {};
+  const direct =
+    req?.query?.event_id || req?.query?.event || req?.query?.event_code || req?.query?.race ||
+    body.event_id || body.event || body.event_code || body.race ||
+    params.event_id || params.event || params.event_code || params.race ||
+    detailParams.event_id?.value || detailParams.event?.value || detailParams.event_code?.value || detailParams.race?.value ||
+    '';
+  if (direct) return String(direct).trim();
+
+  const qrText = extractKakaoRawQr(body);
+  return extractEventIdentifierFromText(qrText);
+}
+
+async function getEventByIdentifier(identifier = '') {
+  const key = String(identifier || '').trim();
+  if (!key) return null;
+  if (/^\d+$/.test(key)) {
+    const byId = await query(`SELECT * FROM events WHERE id=$1 LIMIT 1;`, [Number(key)]);
+    if (byId.rows[0]) return byId.rows[0];
+  }
+  const byCode = await query(`SELECT * FROM events WHERE LOWER(event_code)=LOWER($1) LIMIT 1;`, [key]);
+  return byCode.rows[0] || null;
+}
+
+async function getDefaultEvent() {
+  const result = await query(`
+    SELECT * FROM events
+    ORDER BY
+      CASE WHEN COALESCE(is_default, false) THEN 0 ELSE 1 END,
+      CASE WHEN status='active' THEN 0 WHEN status='paused' THEN 1 ELSE 2 END,
+      id DESC
+    LIMIT 1;
+  `);
+  if (!result.rows.length) throw new Error('등록된 미션레이스가 없습니다. 관리자 페이지에서 미션레이스를 먼저 만들어주세요.');
+  return result.rows[0];
+}
+
+async function getActiveEvent(req = null) {
+  const identifier = getEventIdentifierFromRequest(req);
+  if (identifier) {
+    const event = await getEventByIdentifier(identifier);
+    if (!event) throw new Error(`미션레이스를 찾을 수 없습니다: ${identifier}`);
+    if (req) req.selectedEvent = event;
+    return event;
+  }
+  const event = await getDefaultEvent();
+  if (req) req.selectedEvent = event;
+  return event;
+}
+
+async function getKakaoUserEventSession(kakaoUserId = '') {
+  if (!kakaoUserId) return null;
+  const result = await query(
+    `SELECT e.*
+     FROM user_event_sessions s
+     JOIN events e ON e.id=s.event_id
+     WHERE s.kakao_user_id=$1
+     LIMIT 1;`,
+    [kakaoUserId]
+  );
+  return result.rows[0] || null;
+}
+
+async function setKakaoUserEventSession(kakaoUserId = '', eventId = null) {
+  if (!kakaoUserId || !eventId) return;
+  await query(
+    `INSERT INTO user_event_sessions(kakao_user_id, event_id, updated_at)
+     VALUES ($1,$2,NOW())
+     ON CONFLICT(kakao_user_id)
+     DO UPDATE SET event_id=$2, updated_at=NOW();`,
+    [kakaoUserId, eventId]
+  );
+}
+
+async function resolveKakaoEvent(req, kakaoUserId = '') {
+  const identifier = getEventIdentifierFromRequest(req);
+  if (identifier) {
+    const event = await getEventByIdentifier(identifier);
+    if (!event) throw new Error(`미션레이스를 찾을 수 없습니다: ${identifier}`);
+    await setKakaoUserEventSession(kakaoUserId, event.id);
+    req.selectedEvent = event;
+    return event;
+  }
+
+  const sessionEvent = await getKakaoUserEventSession(kakaoUserId);
+  if (sessionEvent) {
+    req.selectedEvent = sessionEvent;
+    return sessionEvent;
+  }
+
+  const event = await getDefaultEvent();
+  req.selectedEvent = event;
+  return event;
+}
+
+async function getTeamByCodeAndTokenAnyEvent(teamCode, token) {
+  const result = await query(
+    `SELECT t.*, e.event_code, e.event_name, e.status AS event_status
+     FROM teams t
+     JOIN events e ON e.id=t.event_id
+     WHERE UPPER(t.team_code)=UPPER($1) AND t.public_token=$2
+     LIMIT 1;`,
+    [teamCode, token]
+  );
+  return result.rows[0] || null;
+}
+
+async function copyEventContent(sourceEventId, targetEventId) {
+  if (!sourceEventId || !targetEventId || Number(sourceEventId) === Number(targetEventId)) return;
+  const missionMap = new Map();
+  const missions = await query(
+    `SELECT * FROM missions WHERE event_id=$1 ORDER BY sort_order ASC, id ASC;`,
+    [sourceEventId]
+  );
+  for (const m of missions.rows) {
+    const inserted = await query(
+      `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, question, answer, answer_explanation, wrong_message, wrong_penalty, hint_penalty, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+       RETURNING id;`,
+      [targetEventId, m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty ?? -5), Number(m.hint_penalty ?? -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude, m.longitude, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false]
+    );
+    missionMap.set(Number(m.id), Number(inserted.rows[0].id));
+  }
+
+  for (const [oldMissionId, newMissionId] of missionMap.entries()) {
+    await query(
+      `INSERT INTO mission_images(event_id, mission_id, image_kind, image_data, image_mime, file_name, sort_order)
+       SELECT $1, $2, image_kind, image_data, image_mime, file_name, sort_order
+       FROM mission_images
+       WHERE event_id=$3 AND mission_id=$4
+       ORDER BY sort_order ASC, id ASC;`,
+      [targetEventId, newMissionId, sourceEventId, oldMissionId]
+    );
+  }
+
+  await query(
+    `INSERT INTO app_settings(event_id, setting_key, setting_value, updated_at)
+     SELECT $1, setting_key, setting_value, NOW()
+     FROM app_settings
+     WHERE event_id=$2
+     ON CONFLICT(event_id, setting_key)
+     DO UPDATE SET setting_value=EXCLUDED.setting_value, updated_at=NOW();`,
+    [targetEventId, sourceEventId]
+  );
+}
+
 async function ensureAppSettingsTable() {
   await query(`
     CREATE TABLE IF NOT EXISTS app_settings (
@@ -324,7 +527,7 @@ function publicCertificateSettings(settings = {}, req = null) {
     layout: normalizeCertificateLayout(normalized.layout, DEFAULT_CERTIFICATE_LAYOUT),
     has_background_image: hasBackground,
     background_image_mime: hasBackground ? normalized.background_image_mime || 'image/jpeg' : '',
-    background_image_url: hasBackground && req ? `${baseUrl(req)}/api/public/settings/certificate/background` : '',
+    background_image_url: hasBackground && req ? `${baseUrl(req)}${urlWithEvent('/api/public/settings/certificate/background', req.selectedEvent)}` : '',
   };
 }
 
@@ -351,10 +554,12 @@ function escapeHtml(value = '') {
     .replace(/'/g, '&#39;');
 }
 
-function certificateUrl(req, team, actorName = '') {
+function certificateUrl(req, event, team, actorName = '') {
   const params = new URLSearchParams();
   params.set('team', team.team_code);
   params.set('token', team.public_token || '');
+  const ev = eventQueryValue(event);
+  if (ev) params.set('event', ev);
   if (actorName) params.set('member', actorName);
   return `${baseUrl(req)}/certificate?${params.toString()}`;
 }
@@ -476,7 +681,7 @@ function publicMessageSettings(settings = {}, req = null) {
     const hasImage = Boolean(settings[`${item.key}_image_data`]);
     out[`${item.key}_has_image`] = hasImage;
     out[`${item.key}_image_mime`] = hasImage ? settings[`${item.key}_image_mime`] || 'image/jpeg' : '';
-    out[`${item.key}_image_url`] = hasImage && req ? `${baseUrl(req)}/api/public/settings/messages/${item.key}/image` : '';
+    out[`${item.key}_image_url`] = hasImage && req ? `${baseUrl(req)}${urlWithEvent(`/api/public/settings/messages/${item.key}/image`, req.selectedEvent)}` : '';
   }
   return out;
 }
@@ -492,7 +697,7 @@ function hasMessageImage(settings = {}, key = '') {
 
 function messageImageUrl(req, settings = {}, key = '') {
   if (!hasMessageImage(settings, key)) return '';
-  return `${baseUrl(req)}/api/public/settings/messages/${encodeURIComponent(key)}/image`;
+  return `${baseUrl(req)}${urlWithEvent(`/api/public/settings/messages/${encodeURIComponent(key)}/image`, req?.selectedEvent)}`;
 }
 
 function kakaoConfiguredMessage(req, settings, key, text, quickReplies = [], title = '제주 AI 탐험대') {
@@ -542,6 +747,14 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+
+
+  await query(`ALTER TABLE events ADD COLUMN IF NOT EXISTS event_code TEXT;`);
+  await query(`ALTER TABLE events ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';`);
+  await query(`ALTER TABLE events ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT FALSE;`);
+  await query(`ALTER TABLE events ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
+  await query(`UPDATE events SET event_code = CONCAT('race-', id) WHERE event_code IS NULL OR event_code = '';`);
+  await query(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_events_event_code_lower ON events(LOWER(event_code));`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS missions (
@@ -650,6 +863,10 @@ async function initDb() {
   await query(`ALTER TABLE teams ADD COLUMN IF NOT EXISTS current_mission_id INTEGER;`);
   await query(`ALTER TABLE teams ADD COLUMN IF NOT EXISTS finish_time TIMESTAMPTZ;`);
   await query(`ALTER TABLE teams ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'playing';`);
+  await query(`ALTER TABLE teams DROP CONSTRAINT IF EXISTS teams_team_code_key;`);
+  await query(`ALTER TABLE teams DROP CONSTRAINT IF EXISTS teams_kakao_user_id_key;`);
+  await query(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_teams_event_team_code_upper ON teams(event_id, UPPER(team_code));`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_teams_event ON teams(event_id);`);
 
   await query(`
     UPDATE teams
@@ -704,6 +921,16 @@ async function initDb() {
       UNIQUE(notice_id, kakao_user_id)
     );
   `);
+
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS user_event_sessions (
+      kakao_user_id TEXT PRIMARY KEY,
+      event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS idx_user_event_sessions_event ON user_event_sessions(event_id);`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS app_settings (
@@ -786,8 +1013,14 @@ async function initDb() {
 
   const eventCount = await query(`SELECT COUNT(*)::int AS count FROM events;`);
   if (eventCount.rows[0].count === 0) {
-    await query(`INSERT INTO events(event_name, status) VALUES ($1, 'active');`, ['제주 AI 탐험대']);
+    await query(`INSERT INTO events(event_name, event_code, status, is_default) VALUES ($1, $2, 'active', TRUE);`, ['제주 AI 탐험대', 'jeju-ai-race']);
   }
+  await query(`
+    UPDATE events
+    SET is_default = TRUE
+    WHERE id = (SELECT id FROM events ORDER BY COALESCE(is_default,false) DESC, id ASC LIMIT 1)
+      AND NOT EXISTS (SELECT 1 FROM events WHERE is_default = TRUE);
+  `);
 
   const event = await getActiveEvent();
   const missionCount = await query(`SELECT COUNT(*)::int AS count FROM missions WHERE event_id=$1;`, [event.id]);
@@ -811,11 +1044,6 @@ async function initDb() {
   }
 }
 
-async function getActiveEvent() {
-  const result = await query(`SELECT * FROM events WHERE status='active' ORDER BY id DESC LIMIT 1;`);
-  if (!result.rows.length) throw new Error('active event not found');
-  return result.rows[0];
-}
 
 async function getMissions(eventId) {
   const result = await query(
@@ -964,13 +1192,24 @@ async function getTeamByCodeAndToken(eventId, teamCode, token) {
   return result.rows[0] || null;
 }
 
-async function generateTeamCode() {
-  const result = await query(`SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM teams;`);
-  return `T${String(result.rows[0].next_id).padStart(3, '0')}`;
+async function generateTeamCode(eventId) {
+  const result = await query(
+    `SELECT COALESCE(MAX(CASE WHEN team_code ~ '^T[0-9]+$' THEN SUBSTRING(team_code FROM 2)::INTEGER ELSE 0 END), 0) + 1 AS next_num
+     FROM teams
+     WHERE event_id=$1;`,
+    [eventId]
+  );
+  let next = Number(result.rows[0]?.next_num || 1);
+  for (let i = 0; i < 500; i += 1) {
+    const code = `T${String(next + i).padStart(3, '0')}`;
+    const exists = await query(`SELECT 1 FROM teams WHERE event_id=$1 AND UPPER(team_code)=UPPER($2) LIMIT 1;`, [eventId, code]);
+    if (!exists.rows.length) return code;
+  }
+  return `T${Date.now().toString(36).toUpperCase()}`;
 }
 
 async function createTeam(eventId, kakaoUserId, teamName, memberName = '팀장') {
-  const code = await generateTeamCode();
+  const code = await generateTeamCode(eventId);
   const token = teamToken();
   const result = await query(
     `INSERT INTO teams(event_id, team_code, team_name, leader_name, kakao_user_id, public_token)
@@ -1524,7 +1763,7 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
   if (!imageUrls.length && mission.mission_image_data) imageUrls.push(missionImageUrl(req, mission));
 
   if (mission.mission_type === 'photo') {
-    const url = `${baseUrl(req)}/upload?team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}&actor=${encodeURIComponent(kakaoUserId)}`;
+    const url = `${baseUrl(req)}/upload?event=${encodeURIComponent(eventQueryValue(event))}&team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}&actor=${encodeURIComponent(kakaoUserId)}`;
     const title = `${mission.mission_code} ${mission.mission_name}`;
     const desc = `${mission.question}\n\n아래 버튼을 눌러 사진을 업로드하면 운영자 승인 후 점수가 반영됩니다.`;
     const buttons = [{ action: 'webLink', label: '사진 업로드', webLinkUrl: url }];
@@ -1532,7 +1771,7 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
     return kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || '');
   }
   if (mission.mission_type === 'gps') {
-    const url = `${baseUrl(req)}/gps?team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}&actor=${encodeURIComponent(kakaoUserId)}`;
+    const url = `${baseUrl(req)}/gps?event=${encodeURIComponent(eventQueryValue(event))}&team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}&actor=${encodeURIComponent(kakaoUserId)}`;
     const title = `${mission.mission_code} ${mission.mission_name}`;
     const desc = `${mission.question}\n\n아래 버튼을 눌러 위치 권한을 허용해주세요.`;
     const buttons = [{ action: 'webLink', label: 'GPS 인증하기', webLinkUrl: url }];
@@ -1764,7 +2003,7 @@ ${explanation}` : ''}
     });
     const certificateSettings = await getCertificateSettings(event.id);
     const certificateButton = certificateSettings.enabled
-      ? [{ action: 'webLink', label: '수료증 보기', webLinkUrl: certificateUrl(req, team, actorName) }]
+      ? [{ action: 'webLink', label: '수료증 보기', webLinkUrl: certificateUrl(req, event, team, actorName) }]
       : [];
     const finishImageUrl = messageImageUrl(req, messages, 'finish');
     if (certificateButton.length || finishImageUrl) {
@@ -1781,28 +2020,8 @@ ${explanation}` : ''}
 }
 
 function extractMissionCodeFromQr(body) {
-  const params = body?.action?.params || {};
-  const detailParams = body?.action?.detailParams || {};
-
-  const raw =
-    params.barcode ||
-    params.mission_qr ||
-    params.qr ||
-    detailParams.barcode?.value ||
-    detailParams.mission_qr?.value ||
-    '';
-
-  if (!raw) return '';
-
-  let qrText = raw;
-  try {
-    const parsed = JSON.parse(raw);
-    qrText = parsed.barcodeData || parsed.value || raw;
-  } catch {
-    qrText = raw;
-  }
-
-  qrText = String(qrText).trim();
+  const qrText = extractKakaoRawQr(body);
+  if (!qrText) return '';
 
   if (/^M\d+$/i.test(qrText)) return qrText.toUpperCase();
 
@@ -1845,11 +2064,6 @@ async function handleKakaoSkill(req, res) {
       );
     }
 
-    const event = await getActiveEvent();
-    const messages = await getMessageSettings(event.id);
-    const normalUtterance = String(req.body?.userRequest?.utterance || '').trim();
-    const qrMissionCode = extractMissionCodeFromQr(req.body);
-    const utterance = String(qrMissionCode || normalUtterance).trim();
     const kakaoUserId = String(
       req.body?.userRequest?.user?.id || req.body?.userRequest?.user?.properties?.plusfriendUserKey || ''
     ).trim();
@@ -1857,6 +2071,13 @@ async function handleKakaoSkill(req, res) {
     if (!kakaoUserId) {
       return respondKakao(res, kakaoText('사용자 식별 정보를 확인할 수 없습니다. 카카오 챗봇 설정을 확인해주세요.'));
     }
+
+    const event = await resolveKakaoEvent(req, kakaoUserId);
+    const messages = await getMessageSettings(event.id);
+    const normalUtterance = String(req.body?.userRequest?.utterance || '').trim();
+    const qrMissionCode = extractMissionCodeFromQr(req.body);
+    const explicitEventOnly = Boolean(getEventIdentifierFromRequest(req)) && !qrMissionCode && extractEventIdentifierFromText(normalUtterance);
+    const utterance = String(qrMissionCode || (explicitEventOnly ? '게임 시작' : normalUtterance)).trim();
 
     let team = await getTeamByKakaoUser(event.id, kakaoUserId);
     const userState = await getUserState(event.id, kakaoUserId);
@@ -2259,11 +2480,11 @@ function adminPageHtml() {
 </html>`;
 }
 
-app.get(['/', '/admin', '/admin.html'], (_req, res) => {
+app.get(['/', '/admin', '/admin.html'], (req, res) => {
   res.status(200).sendFile(path.join(publicDir, 'index.html'));
 });
 
-app.get('/health', async (_req, res) => {
+app.get('/health', async (req, res) => {
   if (!DATABASE_URL) {
     return res.status(200).json({ ok: true, server: 'running', db_ready: false, db_error: 'DATABASE_URL is not set', time: nowIso() });
   }
@@ -2279,16 +2500,16 @@ app.get('/health', async (_req, res) => {
 app.post('/kakao/skill', handleKakaoSkill);
 app.post('/webhook', handleKakaoSkill);
 
-app.get('/kakao/skill', (_req, res) => {
+app.get('/kakao/skill', (req, res) => {
   res.send('Kakao skill endpoint is alive. Kakao uses POST.');
 });
 
-app.get('/webhook', (_req, res) => {
+app.get('/webhook', (req, res) => {
   res.send('Kakao webhook endpoint is alive. Kakao uses POST.');
 });
 
 
-app.get('/api/public/rankings', async (_req, res) => {
+app.get('/api/public/rankings', async (req, res) => {
   try {
     if (!dbReady) {
       return res.status(503).json({
@@ -2298,7 +2519,7 @@ app.get('/api/public/rankings', async (_req, res) => {
       });
     }
 
-    const event = await getActiveEvent();
+    const event = await getActiveEvent(req);
     const rankings = await buildRanking(event.id);
     const display = await getRankingDisplaySettings(event.id);
 
@@ -2329,15 +2550,15 @@ app.get('/api/public/rankings', async (_req, res) => {
   }
 });
 
-app.get(['/ranking', '/rankings', '/live-ranking', '/ranking.html'], (_req, res) => {
+app.get(['/ranking', '/rankings', '/live-ranking', '/ranking.html'], (req, res) => {
   res.status(200).sendFile(path.join(publicDir, 'ranking.html'));
 });
 
-app.get('/upload', (_req, res) => {
+app.get('/upload', (req, res) => {
   res.sendFile(path.join(publicDir, 'upload.html'));
 });
 
-app.get('/gps', (_req, res) => {
+app.get('/gps', (req, res) => {
   // GPS 페이지는 public/gps.html 한 곳만 사용합니다.
   // 이전처럼 server.js 안에 HTML을 직접 넣으면 수정 과정에서 버튼 스크립트가 끊길 수 있어 분리했습니다.
   res.sendFile(path.join(publicDir, 'gps.html'));
@@ -2349,7 +2570,7 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
       return res.status(503).json({ ok: false, message: `서버 DB 준비가 아직 끝나지 않았습니다. 잠시 후 다시 시도해주세요.${dbInitError ? '\n' + dbInitError : ''}` });
     }
 
-    const event = await getActiveEvent();
+    let event = await getActiveEvent(req);
     const body = req.body || {};
     const team_code = body.team_code || '';
     const mission_code = body.mission_code || '';
@@ -2359,7 +2580,15 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
     const submissionKey = String(body.submission_key || body.upload_id || '').trim().slice(0, 120);
     const image_data = body.image_data || (req.file ? req.file.buffer.toString('base64') : '');
     const image_mime = body.image_mime || (req.file ? req.file.mimetype : 'image/jpeg');
-    const team = await getTeamByCodeAndToken(event.id, team_code, token);
+    let team = await getTeamByCodeAndToken(event.id, team_code, token);
+    if (!team && team_code && token) {
+      const anyTeam = await getTeamByCodeAndTokenAnyEvent(team_code, token);
+      if (anyTeam) {
+        event = await getEventByIdentifier(anyTeam.event_id);
+        req.selectedEvent = event;
+        team = anyTeam;
+      }
+    }
     const mission = await getMissionByCode(event.id, mission_code);
 
     if (!team || !mission || mission.mission_type !== 'photo') {
@@ -2469,7 +2698,7 @@ app.post('/api/public/verify/location', async (req, res) => {
       });
     }
 
-    const event = await getActiveEvent();
+    let event = await getActiveEvent(req);
     const { team_code = '', mission_code = '', token = '', actor = '', actor_kakao_user_id = '', lat, lng } = req.body || {};
     const userLat = Number(lat);
     const userLng = Number(lng);
@@ -2481,7 +2710,15 @@ app.post('/api/public/verify/location', async (req, res) => {
       return res.status(400).json({ ok: false, message: '휴대폰 위치값을 읽지 못했습니다. 위치 권한을 허용한 뒤 다시 시도해주세요.' });
     }
 
-    const team = await getTeamByCodeAndToken(event.id, team_code, token);
+    let team = await getTeamByCodeAndToken(event.id, team_code, token);
+    if (!team && team_code && token) {
+      const anyTeam = await getTeamByCodeAndTokenAnyEvent(team_code, token);
+      if (anyTeam) {
+        event = await getEventByIdentifier(anyTeam.event_id);
+        req.selectedEvent = event;
+        team = anyTeam;
+      }
+    }
     const mission = await getMissionByCode(event.id, mission_code);
 
     if (!team || !mission || mission.mission_type !== 'gps') {
@@ -2554,7 +2791,7 @@ app.get('/api/public/mission-images/:id', async (req, res) => {
 app.get('/api/public/settings/messages/:key/image', async (req, res) => {
   try {
     if (!MESSAGE_IMAGE_KEYS.has(req.params.key)) return res.status(404).send('message image not found');
-    const event = await getActiveEvent();
+    const event = await getActiveEvent(req);
     const settings = await getMessageSettings(event.id);
     const data = settings[`${req.params.key}_image_data`];
     const mime = settings[`${req.params.key}_image_mime`] || 'image/jpeg';
@@ -2575,8 +2812,69 @@ app.post('/api/admin/login', (req, res) => {
   res.json({ ok: true, message: '로그인 성공' });
 });
 
-app.get('/api/admin/summary', requireAdmin, async (_req, res) => {
-  const event = await getActiveEvent();
+
+app.get('/api/admin/events', requireAdmin, async (req, res) => {
+  const result = await query(`
+    SELECT
+      e.id, e.event_name, e.event_code, e.description, e.status, e.is_default, e.created_at, e.updated_at,
+      COUNT(DISTINCT m.id)::int AS mission_count,
+      COUNT(DISTINCT t.id)::int AS team_count,
+      COUNT(DISTINCT CASE WHEN t.status='finished' THEN t.id END)::int AS finished_count
+    FROM events e
+    LEFT JOIN missions m ON m.event_id=e.id
+    LEFT JOIN teams t ON t.event_id=e.id
+    GROUP BY e.id
+    ORDER BY COALESCE(e.is_default,false) DESC, e.id DESC;
+  `);
+  const selectedIdentifier = getEventIdentifierFromRequest(req);
+  const selected = selectedIdentifier ? await getEventByIdentifier(selectedIdentifier) : await getDefaultEvent();
+  res.json({ ok: true, events: result.rows, selected_event_id: selected?.id || null });
+});
+
+app.post('/api/admin/events', requireAdmin, async (req, res) => {
+  const body = req.body || {};
+  const eventName = String(body.event_name || '').trim();
+  if (!eventName) return res.status(400).json({ ok: false, message: '미션레이스명을 입력해주세요.' });
+  const eventCode = normalizeEventCode(body.event_code || eventName);
+  const status = ['active', 'paused', 'archived'].includes(String(body.status || 'active')) ? String(body.status || 'active') : 'active';
+  const isDefault = Boolean(body.is_default);
+
+  if (isDefault) await query(`UPDATE events SET is_default=FALSE;`);
+  const inserted = await query(
+    `INSERT INTO events(event_name, event_code, description, status, is_default, updated_at)
+     VALUES ($1,$2,$3,$4,$5,NOW())
+     RETURNING *;`,
+    [eventName, eventCode, String(body.description || '').trim(), status, isDefault]
+  );
+  const created = inserted.rows[0];
+
+  const copyFromEventId = Number(body.copy_from_event_id || 0);
+  if (copyFromEventId > 0) await copyEventContent(copyFromEventId, created.id);
+
+  res.json({ ok: true, event: created });
+});
+
+app.patch('/api/admin/events/:id', requireAdmin, async (req, res) => {
+  const body = req.body || {};
+  const eventName = String(body.event_name || '').trim();
+  if (!eventName) return res.status(400).json({ ok: false, message: '미션레이스명을 입력해주세요.' });
+  const eventCode = normalizeEventCode(body.event_code || eventName);
+  const status = ['active', 'paused', 'archived'].includes(String(body.status || 'active')) ? String(body.status || 'active') : 'active';
+  const isDefault = Boolean(body.is_default);
+  if (isDefault) await query(`UPDATE events SET is_default=FALSE WHERE id<>$1;`, [req.params.id]);
+  const updated = await query(
+    `UPDATE events
+     SET event_name=$1, event_code=$2, description=$3, status=$4, is_default=$5, updated_at=NOW()
+     WHERE id=$6
+     RETURNING *;`,
+    [eventName, eventCode, String(body.description || '').trim(), status, isDefault, req.params.id]
+  );
+  if (!updated.rows[0]) return res.status(404).json({ ok: false, message: '미션레이스를 찾을 수 없습니다.' });
+  res.json({ ok: true, event: updated.rows[0] });
+});
+
+app.get('/api/admin/summary', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
   const [teamCount, finishedCount, missionCount, pendingCount, ranking] = await Promise.all([
     query(`SELECT COUNT(*)::int AS count FROM teams WHERE event_id=$1;`, [event.id]),
     query(`SELECT COUNT(*)::int AS count FROM teams WHERE event_id=$1 AND status='finished';`, [event.id]),
@@ -2596,8 +2894,8 @@ app.get('/api/admin/summary', requireAdmin, async (_req, res) => {
 });
 
 
-app.get('/api/admin/settings/photo-auto-approval', requireAdmin, async (_req, res) => {
-  const event = await getActiveEvent();
+app.get('/api/admin/settings/photo-auto-approval', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
   const settings = await getPhotoAutoApprovalSettings(event.id);
   res.json({
     ok: true,
@@ -2608,7 +2906,7 @@ app.get('/api/admin/settings/photo-auto-approval', requireAdmin, async (_req, re
 });
 
 app.patch('/api/admin/settings/photo-auto-approval', requireAdmin, async (req, res) => {
-  const event = await getActiveEvent();
+  const event = await getActiveEvent(req);
   const settings = normalizePhotoAutoApprovalSettings(req.body || {});
 
   if (settings.enabled && settings.use_time_window) {
@@ -2638,21 +2936,21 @@ app.patch('/api/admin/settings/photo-auto-approval', requireAdmin, async (req, r
 
 
 app.get('/api/admin/settings/certificate', requireAdmin, async (req, res) => {
-  const event = await getActiveEvent();
+  const event = await getActiveEvent(req);
   const settings = await getCertificateSettings(event.id);
   res.json({ ok: true, settings: publicCertificateSettings(settings, req), defaults: publicCertificateSettings(DEFAULT_CERTIFICATE_SETTINGS, req) });
 });
 
 app.patch('/api/admin/settings/certificate', requireAdmin, async (req, res) => {
-  const event = await getActiveEvent();
+  const event = await getActiveEvent(req);
   const current = await getCertificateSettings(event.id);
   const settings = normalizeCertificateSettings(req.body || {}, current);
   await setSetting(event.id, 'certificate_settings', settings);
   res.json({ ok: true, settings: publicCertificateSettings(settings, req), defaults: publicCertificateSettings(DEFAULT_CERTIFICATE_SETTINGS, req) });
 });
 
-app.get('/api/public/settings/certificate/background', async (_req, res) => {
-  const event = await getActiveEvent();
+app.get('/api/public/settings/certificate/background', async (req, res) => {
+  const event = await getActiveEvent(req);
   const settings = await getCertificateSettings(event.id);
   if (!settings.background_image_data) return res.status(404).send('background not found');
   res.set('Content-Type', settings.background_image_mime || 'image/jpeg');
@@ -2668,7 +2966,7 @@ function buildCertificatePreviewHtml(req, settings, vars, isPreview = false) {
   const issuer = renderTemplate(settings.issuer, vars);
   const sealText = renderTemplate(settings.seal_text, vars);
   const dateLabel = renderTemplate(settings.date_label, vars);
-  const backgroundUrl = settings.background_image_data ? '/api/public/settings/certificate/background' : '';
+  const backgroundUrl = settings.background_image_data ? urlWithEvent('/api/public/settings/certificate/background', req.selectedEvent) : '';
   const layout = normalizeCertificateLayout(settings.layout, DEFAULT_CERTIFICATE_LAYOUT);
   const bodyText = escapeHtml(body);
   const recipientText = escapeHtml(recipient);
@@ -2735,7 +3033,7 @@ function buildCertificatePreviewHtml(req, settings, vars, isPreview = false) {
         ${sealText ? boxHtml('seal', sealTextHtml, 'seal') : ''}
       </div>
     </div>
-    <div class="toolbar"><button onclick="window.print()">인쇄 / PDF 저장</button><a class="btn" href="/ranking" target="_blank">랭킹 보기</a></div>
+    <div class="toolbar"><button onclick="window.print()">인쇄 / PDF 저장</button><a class="btn" href="${urlWithEvent('/ranking', req.selectedEvent)}" target="_blank">랭킹 보기</a></div>
   </div>
   <script>
     const BASE_W = 720;
@@ -2770,7 +3068,7 @@ function buildCertificatePreviewHtml(req, settings, vars, isPreview = false) {
 
 app.get('/certificate/preview', requireAdmin, async (req, res) => {
   try {
-    const event = await getActiveEvent();
+    const event = await getActiveEvent(req);
     const settings = await getCertificateSettings(event.id);
     const sampleDate = formatKoreanDate(new Date());
     const vars = {
@@ -2792,14 +3090,22 @@ app.get('/certificate/preview', requireAdmin, async (req, res) => {
 
 app.get('/certificate', async (req, res) => {
   try {
-    const event = await getActiveEvent();
+    let event = await getActiveEvent(req);
+    const teamCode = String(req.query.team || '').trim();
+    const token = String(req.query.token || '').trim();
+    let team = await getTeamByCodeAndToken(event.id, teamCode, token);
+    if (!team && teamCode && token) {
+      const anyTeam = await getTeamByCodeAndTokenAnyEvent(teamCode, token);
+      if (anyTeam) {
+        event = await getEventByIdentifier(anyTeam.event_id);
+        req.selectedEvent = event;
+        team = anyTeam;
+      }
+    }
     const settings = await getCertificateSettings(event.id);
     if (!settings.enabled) {
       return res.status(404).send('<!doctype html><meta charset="utf-8"><title>수료증</title><p>수료증 기능이 꺼져 있습니다.</p>');
     }
-    const teamCode = String(req.query.team || '').trim();
-    const token = String(req.query.token || '').trim();
-    const team = await getTeamByCodeAndToken(event.id, teamCode, token);
     if (!team) return res.status(403).send('<!doctype html><meta charset="utf-8"><title>수료증</title><p>수료증 접근 정보가 올바르지 않습니다.</p>');
     if (!team.finish_time) return res.status(403).send('<!doctype html><meta charset="utf-8"><title>수료증</title><p>완주한 팀만 수료증을 확인할 수 있습니다.</p>');
 
@@ -2824,7 +3130,7 @@ app.get('/certificate', async (req, res) => {
     const issuer = renderTemplate(settings.issuer, vars);
     const sealText = renderTemplate(settings.seal_text, vars);
     const dateLabel = renderTemplate(settings.date_label, vars);
-    const backgroundUrl = settings.background_image_data ? '/api/public/settings/certificate/background' : '';
+    const backgroundUrl = settings.background_image_data ? urlWithEvent('/api/public/settings/certificate/background', req.selectedEvent) : '';
     const layout = normalizeCertificateLayout(settings.layout, DEFAULT_CERTIFICATE_LAYOUT);
     const bodyText = escapeHtml(body);
     const recipientText = escapeHtml(recipient);
@@ -2888,7 +3194,7 @@ app.get('/certificate', async (req, res) => {
         ${sealText ? boxHtml('seal', sealTextHtml, 'seal') : ''}
       </div>
     </div>
-    <div class="toolbar"><button onclick="window.print()">인쇄 / PDF 저장</button><a class="btn" href="/ranking" target="_blank">랭킹 보기</a></div>
+    <div class="toolbar"><button onclick="window.print()">인쇄 / PDF 저장</button><a class="btn" href="${urlWithEvent('/ranking', req.selectedEvent)}" target="_blank">랭킹 보기</a></div>
   </div>
   <script>
     const BASE_W = 720;
@@ -2925,21 +3231,21 @@ app.get('/certificate', async (req, res) => {
   }
 });
 
-app.get('/api/admin/settings/ranking-display', requireAdmin, async (_req, res) => {
-  const event = await getActiveEvent();
+app.get('/api/admin/settings/ranking-display', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
   const settings = await getRankingDisplaySettings(event.id);
   res.json({ ok: true, settings });
 });
 
 app.patch('/api/admin/settings/ranking-display', requireAdmin, async (req, res) => {
-  const event = await getActiveEvent();
+  const event = await getActiveEvent(req);
   const settings = normalizeRankingDisplaySettings(req.body || {});
   await setSetting(event.id, 'ranking_display', settings);
   res.json({ ok: true, settings });
 });
 
 app.get('/api/admin/settings/messages', requireAdmin, async (req, res) => {
-  const event = await getActiveEvent();
+  const event = await getActiveEvent(req);
   const settings = await getMessageSettings(event.id);
   res.json({
     ok: true,
@@ -2950,7 +3256,7 @@ app.get('/api/admin/settings/messages', requireAdmin, async (req, res) => {
 });
 
 app.patch('/api/admin/settings/messages', requireAdmin, async (req, res) => {
-  const event = await getActiveEvent();
+  const event = await getActiveEvent(req);
   const current = await getMessageSettings(event.id);
   const settings = normalizeMessageSettings(req.body || {}, current);
   await setSetting(event.id, 'chatbot_messages', settings);
@@ -2964,14 +3270,14 @@ app.patch('/api/admin/settings/messages', requireAdmin, async (req, res) => {
 
 
 
-app.get('/api/admin/ranking-display', requireAdmin, async (_req, res) => {
-  const event = await getActiveEvent();
+app.get('/api/admin/ranking-display', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
   const settings = await getRankingDisplaySettings(event.id);
   res.json({ ok: true, settings });
 });
 
 app.patch('/api/admin/ranking-display', requireAdmin, async (req, res) => {
-  const event = await getActiveEvent();
+  const event = await getActiveEvent(req);
   const settings = normalizeRankingDisplaySettings(req.body || {});
   await setSetting(event.id, 'ranking_display', settings);
   res.json({ ok: true, settings });
@@ -2979,44 +3285,44 @@ app.patch('/api/admin/ranking-display', requireAdmin, async (req, res) => {
 
 // Compatibility aliases for older/newer admin pages.
 // These keep the settings buttons working even if the browser cached an older index.html.
-app.get('/api/admin/photo-auto-approval', requireAdmin, async (_req, res) => {
-  const event = await getActiveEvent();
+app.get('/api/admin/photo-auto-approval', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
   const settings = await getPhotoAutoApprovalSettings(event.id);
   res.json({ ok: true, settings, active: isPhotoAutoApprovalActive(settings), server_time: nowIso() });
 });
 
 app.patch('/api/admin/photo-auto-approval', requireAdmin, async (req, res) => {
-  const event = await getActiveEvent();
+  const event = await getActiveEvent(req);
   const settings = normalizePhotoAutoApprovalSettings(req.body || {});
   await setSetting(event.id, 'photo_auto_approval', settings);
   res.json({ ok: true, settings, active: isPhotoAutoApprovalActive(settings), server_time: nowIso() });
 });
 
 app.get('/api/admin/chatbot-messages', requireAdmin, async (req, res) => {
-  const event = await getActiveEvent();
+  const event = await getActiveEvent(req);
   const settings = await getMessageSettings(event.id);
   res.json({ ok: true, settings: publicMessageSettings(settings, req), defaults: publicMessageSettings(DEFAULT_MESSAGE_SETTINGS, req), message_items: MESSAGE_SETTING_DEFINITIONS.map(({ key, textKey, label }) => ({ key, textKey, label })) });
 });
 
 app.patch('/api/admin/chatbot-messages', requireAdmin, async (req, res) => {
-  const event = await getActiveEvent();
+  const event = await getActiveEvent(req);
   const current = await getMessageSettings(event.id);
   const settings = normalizeMessageSettings(req.body || {}, current);
   await setSetting(event.id, 'chatbot_messages', settings);
   res.json({ ok: true, settings: publicMessageSettings(settings, req), defaults: publicMessageSettings(DEFAULT_MESSAGE_SETTINGS, req), message_items: MESSAGE_SETTING_DEFINITIONS.map(({ key, textKey, label }) => ({ key, textKey, label })) });
 });
 
-app.get('/api/admin/status', requireAdmin, async (_req, res) => {
+app.get('/api/admin/status', requireAdmin, async (req, res) => {
   res.json({ ok: true, db_ready: dbReady, db_error: dbInitError, time: nowIso() });
 });
 
-app.get('/api/admin/rankings', requireAdmin, async (_req, res) => {
-  const event = await getActiveEvent();
+app.get('/api/admin/rankings', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
   res.json({ ok: true, rankings: await buildRanking(event.id) });
 });
 
-app.get('/api/admin/teams', requireAdmin, async (_req, res) => {
-  const event = await getActiveEvent();
+app.get('/api/admin/teams', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
   const result = await query(
     `SELECT t.*, COUNT(tm.id)::int AS member_count
      FROM teams t
@@ -3034,13 +3340,13 @@ app.get('/api/admin/teams/:id/members', requireAdmin, async (req, res) => {
   res.json({ ok: true, members });
 });
 
-app.get('/api/admin/missions', requireAdmin, async (_req, res) => {
-  const event = await getActiveEvent();
+app.get('/api/admin/missions', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
   res.json({ ok: true, missions: await getMissions(event.id) });
 });
 
 app.post('/api/admin/missions', requireAdmin, async (req, res) => {
-  const event = await getActiveEvent();
+  const event = await getActiveEvent(req);
   const m = req.body;
   const result = await query(
     `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, question, answer, answer_explanation, wrong_message, wrong_penalty, hint_penalty, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required)
@@ -3052,11 +3358,13 @@ app.post('/api/admin/missions', requireAdmin, async (req, res) => {
 });
 
 app.patch('/api/admin/missions/:id', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
   const m = req.body;
   const result = await query(
-    `UPDATE missions SET mission_code=$1, mission_name=$2, mission_type=$3, question=$4, answer=$5, answer_explanation=$6, wrong_message=$7, wrong_penalty=$8, hint_penalty=$9, score=$10, hint=$11, location_name=$12, latitude=$13, longitude=$14, radius_m=$15, sort_order=$16, is_required=$17 WHERE id=$18 RETURNING id, mission_code, mission_name;`,
-    [m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty || -5), Number(m.hint_penalty || -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, req.params.id]
+    `UPDATE missions SET mission_code=$1, mission_name=$2, mission_type=$3, question=$4, answer=$5, answer_explanation=$6, wrong_message=$7, wrong_penalty=$8, hint_penalty=$9, score=$10, hint=$11, location_name=$12, latitude=$13, longitude=$14, radius_m=$15, sort_order=$16, is_required=$17 WHERE id=$18 AND event_id=$19 RETURNING id, mission_code, mission_name;`,
+    [m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty || -5), Number(m.hint_penalty || -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, req.params.id, event.id]
   );
+  if (!result.rows[0]) return res.status(404).json({ ok: false, message: '미션을 찾을 수 없습니다.' });
   res.json({ ok: true, mission: result.rows[0] });
 });
 
@@ -3067,7 +3375,7 @@ app.get('/api/admin/missions/:id/images', requireAdmin, async (req, res) => {
 });
 
 app.post('/api/admin/missions/:id/images', requireAdmin, async (req, res) => {
-  const event = await getActiveEvent();
+  const event = await getActiveEvent(req);
   const mission = (await query(`SELECT * FROM missions WHERE event_id=$1 AND id=$2 LIMIT 1;`, [event.id, req.params.id])).rows[0];
   if (!mission) return res.status(404).json({ ok: false, message: '미션을 찾을 수 없습니다.' });
   const kind = normalizeMissionImageKind(req.body?.kind || 'mission');
@@ -3081,12 +3389,13 @@ app.delete('/api/admin/mission-images/:id', requireAdmin, async (req, res) => {
 });
 
 app.delete('/api/admin/missions/:id', requireAdmin, async (req, res) => {
-  await query(`DELETE FROM missions WHERE id=$1;`, [req.params.id]);
+  const event = await getActiveEvent(req);
+  await query(`DELETE FROM missions WHERE id=$1 AND event_id=$2;`, [req.params.id, event.id]);
   res.json({ ok: true });
 });
 
 app.get('/api/admin/submissions', requireAdmin, async (req, res) => {
-  const event = await getActiveEvent();
+  const event = await getActiveEvent(req);
   const status = req.query.status;
   const params = [event.id];
   let where = 's.event_id=$1';
@@ -3152,8 +3461,8 @@ app.post('/api/admin/submissions/:id/review', requireAdmin, async (req, res) => 
   res.json({ ok: true, submission: result.rows[0] });
 });
 
-app.get('/api/admin/export/rankings.csv', requireAdmin, async (_req, res) => {
-  const event = await getActiveEvent();
+app.get('/api/admin/export/rankings.csv', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
   const ranking = await buildRanking(event.id);
   const header = ['순위', '팀코드', '팀명', '총점', '완료미션수', '상태', '시작시간', '완료시간', '소요초'];
   const rows = ranking.map((r) => [r.rank, r.team_code, r.team_name, r.total_score, r.completed_count, r.status, r.start_time, r.finish_time || '', r.duration_seconds || '']);
@@ -3163,8 +3472,8 @@ app.get('/api/admin/export/rankings.csv', requireAdmin, async (_req, res) => {
   res.send('\uFEFF' + csv);
 });
 
-app.post('/api/admin/reset-event', requireAdmin, async (_req, res) => {
-  const event = await getActiveEvent();
+app.post('/api/admin/reset-event', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
   await query(`DELETE FROM team_notice_reads WHERE notice_id IN (SELECT id FROM team_notices WHERE event_id=$1);`, [event.id]);
   await query(`DELETE FROM team_notices WHERE event_id=$1;`, [event.id]);
   await query(`DELETE FROM user_states WHERE event_id=$1;`, [event.id]);

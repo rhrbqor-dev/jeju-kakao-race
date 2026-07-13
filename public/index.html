@@ -21,6 +21,9 @@
     .stat strong { display:block; font-size:28px; margin-top:6px; }
     .stat span, .muted { color:var(--muted); font-size:14px; }
     nav { display:flex; gap:8px; flex-wrap:wrap; margin:18px 0; }
+    .event-bar { display:grid; grid-template-columns:minmax(250px,.9fr) minmax(0,1.1fr); gap:14px; align-items:start; }
+    .event-links { line-height:1.7; word-break:break-all; }
+    .event-mini { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
     button, .btn { border:0; background:var(--primary); color:white; padding:10px 14px; border-radius:10px; cursor:pointer; font-weight:700; text-decoration:none; display:inline-block; }
     button.secondary { background:#edf2ff; color:#1c459d; }
     button.danger { background:var(--danger); }
@@ -74,10 +77,37 @@
     <section id="appBox" class="hidden">
       <div id="photoAlert" class="alert hidden"></div>
 
+      <section class="card event-bar">
+        <div>
+          <h2 style="margin-top:0;">미션레이스 선택</h2>
+          <label>현재 관리할 미션레이스</label>
+          <select id="eventSelect" onchange="changeSelectedEvent()"></select>
+          <div class="event-mini" style="margin-top:8px;">
+            <button class="secondary" onclick="loadEvents()">레이스 새로고침</button>
+            <button class="secondary" onclick="fillEventFormFromSelected()">선택 레이스 수정</button>
+          </div>
+          <p id="eventStatus" class="small"></p>
+        </div>
+        <div>
+          <h2 style="margin-top:0;">미션레이스 만들기 / 수정</h2>
+          <input id="eventId" type="hidden" />
+          <label>미션레이스명</label><input id="eventName" placeholder="예: 화북포구 AI 미션레이스" />
+          <label>레이스 코드</label><input id="eventCode" placeholder="예: hwabuk" />
+          <p class="small">영문/숫자/하이픈/밑줄만 사용하세요. 카카오/랭킹/QR 주소 구분에 사용됩니다.</p>
+          <label>운영 상태</label><select id="eventStatusSelect"><option value="active">운영중</option><option value="paused">일시중지</option><option value="archived">보관</option></select>
+          <label class="inline-check"><input id="eventDefault" type="checkbox" /> 기본 레이스로 사용</label>
+          <label class="inline-check"><input id="eventCopyCurrent" type="checkbox" /> 새로 만들 때 현재 레이스의 미션/설정 복사</label>
+          <div style="height:10px"></div>
+          <button onclick="saveEvent()">레이스 저장</button>
+          <button class="secondary" onclick="clearEventForm()">새 레이스 입력</button>
+          <div id="eventLinks" class="small event-links" style="margin-top:10px;"></div>
+        </div>
+      </section>
+
       <nav>
         <button onclick="loadAll()">새로고침</button>
         <button class="secondary" onclick="showTab('ranking')">순위표</button>
-        <a class="btn secondary" href="/ranking" target="_blank">실시간 랭킹 화면</a>
+        <a id="rankingNavLink" class="btn secondary" href="/ranking" target="_blank">실시간 랭킹 화면</a>
         <button class="secondary" onclick="showTab('rankingSettings')">랭킹 화면 설정</button>
         <button class="secondary" onclick="showTab('certificate')">수료증 설정</button>
         <button class="secondary" onclick="showTab('submissions')">제출내역</button>
@@ -186,12 +216,12 @@
             <div style="height:12px"></div>
             <button onclick="saveRankingDisplaySettings()">랭킹 화면 설정 저장</button>
             <button class="secondary" onclick="loadRankingDisplaySettings()">설정 다시 불러오기</button>
-            <a class="btn secondary" href="/ranking" target="_blank">실시간 랭킹 화면 열기</a>
+            <a id="rankingSettingsLink" class="btn secondary" href="/ranking" target="_blank">실시간 랭킹 화면 열기</a>
           </div>
           <div class="notice">
             <b>화면 주소</b>
             <div class="small" style="margin-top:8px; line-height:1.7;">
-              <a href="/ranking" target="_blank">/ranking</a><br />
+              <a id="rankingTextLink" href="/ranking" target="_blank">/ranking</a><br />
               제목과 설명 문구는 프로그램마다 다르게 설정할 수 있습니다.
             </div>
             <div id="rankingDisplayStatus" style="margin-top:8px; white-space:pre-wrap;">설정을 불러오는 중입니다.</div>
@@ -336,6 +366,8 @@
 const $ = (id) => document.getElementById(id);
 let adminPassword = localStorage.getItem('adminPassword') || localStorage.getItem('admin_password') || '';
 let missionsCache = [];
+let eventsCache = [];
+let currentEventId = localStorage.getItem('currentEventId') || '';
 let knownPendingPhotoIds = new Set();
 let notificationEnabled = false;
 
@@ -351,18 +383,55 @@ function openCertificatePreview(event) {
     alert('먼저 관리자 로그인을 해주세요.');
     return;
   }
-  window.open('/certificate/preview?admin_password=' + encodeURIComponent(pw), '_blank');
+  window.open(eventUrl('/certificate/preview?admin_password=' + encodeURIComponent(pw)), '_blank');
+}
+function withEvent(path, options = {}) {
+  if (options.noEvent || !currentEventId) return path;
+  if (!path.startsWith('/api/admin/') && !path.startsWith('/certificate/preview')) return path;
+  if (path.startsWith('/api/admin/events')) return path;
+  const joiner = path.includes('?') ? '&' : '?';
+  return path + joiner + 'event_id=' + encodeURIComponent(currentEventId);
 }
 async function api(path, options = {}) {
-  const res = await fetch(path, { ...options, headers: { ...authHeaders(), ...(options.headers || {}) } });
+  const finalPath = withEvent(path, options);
+  const { noEvent, ...fetchOptions } = options;
+  const res = await fetch(finalPath, { ...fetchOptions, headers: { ...authHeaders(), ...(fetchOptions.headers || {}) } });
   const text = await res.text();
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch(e) { data = { ok:false, message:text }; }
   if (!res.ok || data.ok === false) {
     const detail = data.message || text || '응답 내용 없음';
-    throw new Error(`요청 실패: ${path} / HTTP ${res.status} / ${detail}`);
+    throw new Error(`요청 실패: ${finalPath} / HTTP ${res.status} / ${detail}`);
   }
   return data;
+}
+function currentEvent() {
+  return eventsCache.find(e => String(e.id) === String(currentEventId)) || eventsCache[0] || null;
+}
+function eventParam() {
+  const ev = currentEvent();
+  return ev ? encodeURIComponent(ev.event_code || ev.id) : '';
+}
+function eventUrl(path) {
+  const ev = eventParam();
+  if (!ev) return path;
+  return path + (path.includes('?') ? '&' : '?') + 'event=' + ev;
+}
+function refreshEventLinks() {
+  const ev = currentEvent();
+  const rankingUrl = eventUrl('/ranking');
+  ['rankingNavLink','rankingSettingsLink','rankingTextLink'].forEach(id => { if ($(id)) { $(id).href = rankingUrl; $(id).textContent = id === 'rankingTextLink' ? rankingUrl : $(id).textContent; } });
+  if ($('eventLinks') && ev) {
+    const base = location.origin;
+    const skillKey = '';
+    $('eventLinks').innerHTML = `
+      <b>선택 레이스 주소</b><br>
+      실시간 랭킹: <a href="${rankingUrl}" target="_blank">${rankingUrl}</a><br>
+      카카오 스킬 URL 예시: <code>${base}/kakao/skill?event=${esc(ev.event_code || ev.id)}</code><br>
+      QR 시작 데이터 예시: <code>${base}/qr?event=${esc(ev.event_code || ev.id)}</code><br>
+      QR 미션 데이터 예시: <code>${base}/qr?event=${esc(ev.event_code || ev.id)}&mission=M1</code>
+    `;
+  }
 }
 function esc(v) { return String(v ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function formatTime(v) { return v ? new Date(v).toLocaleString('ko-KR') : '-'; }
@@ -690,6 +759,77 @@ async function resetMessageSettings() {
   $('messageSettingsStatus').textContent = '기본 문구로 채웠습니다. 저장 버튼을 눌러야 실제 반영됩니다. 이미지는 삭제 체크를 하지 않으면 유지됩니다.';
 }
 
+
+async function loadEvents() {
+  const data = await api('/api/admin/events', { noEvent:true });
+  eventsCache = data.events || [];
+  if (!eventsCache.length) throw new Error('등록된 미션레이스가 없습니다.');
+  const exists = eventsCache.some(e => String(e.id) === String(currentEventId));
+  if (!currentEventId || !exists) {
+    currentEventId = String(data.selected_event_id || eventsCache[0].id);
+    localStorage.setItem('currentEventId', currentEventId);
+  }
+  renderEventSelect();
+  refreshEventLinks();
+}
+function renderEventSelect() {
+  if (!$('eventSelect')) return;
+  $('eventSelect').innerHTML = eventsCache.map(e => `<option value="${e.id}" ${String(e.id) === String(currentEventId) ? 'selected' : ''}>${esc(e.event_name)} [${esc(e.event_code || e.id)}] · ${esc(e.status)} · 미션 ${e.mission_count || 0}개 · 팀 ${e.team_count || 0}팀${e.is_default ? ' · 기본' : ''}</option>`).join('');
+  const ev = currentEvent();
+  if ($('eventStatus') && ev) $('eventStatus').textContent = `현재 선택: ${ev.event_name} / 코드: ${ev.event_code || ev.id}`;
+}
+async function changeSelectedEvent() {
+  currentEventId = $('eventSelect').value;
+  localStorage.setItem('currentEventId', currentEventId);
+  knownPendingPhotoIds = new Set();
+  refreshEventLinks();
+  await loadAll(false);
+  await loadPhotoAutoApproval();
+  await loadRankingDisplaySettings();
+  await loadCertificateSettings();
+  await loadMessageSettings();
+}
+function fillEventFormFromSelected() {
+  const ev = currentEvent();
+  if (!ev) return;
+  $('eventId').value = ev.id;
+  $('eventName').value = ev.event_name || '';
+  $('eventCode').value = ev.event_code || '';
+  $('eventStatusSelect').value = ev.status || 'active';
+  $('eventDefault').checked = !!ev.is_default;
+  $('eventCopyCurrent').checked = false;
+}
+function clearEventForm() {
+  $('eventId').value = '';
+  $('eventName').value = '';
+  $('eventCode').value = '';
+  $('eventStatusSelect').value = 'active';
+  $('eventDefault').checked = false;
+  $('eventCopyCurrent').checked = true;
+}
+function normalizeEventCodeClient(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+}
+async function saveEvent() {
+  const id = $('eventId').value;
+  const name = $('eventName').value.trim();
+  if (!name) { alert('미션레이스명을 입력해주세요.'); return; }
+  const body = {
+    event_name: name,
+    event_code: normalizeEventCodeClient($('eventCode').value || name),
+    status: $('eventStatusSelect').value,
+    is_default: $('eventDefault').checked,
+  };
+  if (!id && $('eventCopyCurrent').checked && currentEventId) body.copy_from_event_id = currentEventId;
+  const data = await api(id ? `/api/admin/events/${id}` : '/api/admin/events', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(body), noEvent:true });
+  currentEventId = String(data.event.id);
+  localStorage.setItem('currentEventId', currentEventId);
+  clearEventForm();
+  await loadEvents();
+  await loadAll(false);
+  alert('미션레이스가 저장되었습니다.');
+}
+
 async function login() {
   adminPassword = $('adminPassword').value.trim();
   try {
@@ -699,7 +839,8 @@ async function login() {
     document.cookie = 'admin_password=' + encodeURIComponent(adminPassword) + '; path=/; max-age=86400; SameSite=Lax';
     $('loginBox').classList.add('hidden');
     $('appBox').classList.remove('hidden');
-    await loadAll();
+    await loadEvents();
+    await loadAll(false);
     await loadPhotoAutoApproval();
     await loadMessageSettings();
     await loadCertificateSettings();
@@ -740,7 +881,8 @@ function showPhotoAlert(items) {
   }
 }
 
-async function loadAll() {
+async function loadAll(refreshEvents = true) {
+  if (refreshEvents) await loadEvents();
   const summary = await api('/api/admin/summary');
   $('teamCount').textContent = summary.teamCount;
   $('finishedCount').textContent = summary.finishedCount;
@@ -761,7 +903,7 @@ async function loadSubmissions() {
   if (newPending.length) showPhotoAlert(newPending);
 
   $('submissionBody').innerHTML = data.submissions.map(s => {
-    const img = s.has_image ? `<a href="/api/admin/submissions/${s.id}/image?admin_password=${encodeURIComponent(adminPassword)}" target="_blank">사진보기</a>` : '';
+    const img = s.has_image ? `<a href="${eventUrl('/api/admin/submissions/' + s.id + '/image?admin_password=' + encodeURIComponent(adminPassword))}" target="_blank">사진보기</a>` : '';
     const gps = s.distance_m != null ? `GPS ${Math.round(s.distance_m)}m` : '';
     const actor = s.actor_name || '-';
     const manage = s.status === 'pending'
@@ -870,11 +1012,11 @@ async function saveMission() {
   clearMissionForm(); await loadAll();
 }
 async function deleteMission(id) { if(confirm('정말 삭제할까요? 제출 기록도 함께 삭제될 수 있습니다.')) { await api(`/api/admin/missions/${id}`, { method:'DELETE' }); await loadAll(); } }
-function downloadCsv() { location.href = `/api/admin/export/rankings.csv?admin_password=${encodeURIComponent(adminPassword)}`; }
+function downloadCsv() { location.href = eventUrl(`/api/admin/export/rankings.csv?admin_password=${encodeURIComponent(adminPassword)}`); }
 async function resetEvent() { if(confirm('정말 모든 팀과 제출 기록을 초기화할까요?')) { knownPendingPhotoIds = new Set(); await api('/api/admin/reset-event', { method:'POST', body:'{}' }); await loadAll(); } }
 
 if (adminPassword) { $('adminPassword').value = adminPassword; login(); }
-setInterval(() => { if (!$('appBox').classList.contains('hidden')) loadAll().catch(()=>{}); }, 5000);
+setInterval(() => { if (!$('appBox').classList.contains('hidden')) loadAll(false).catch(()=>{}); }, 5000);
 </script>
 </body>
 </html>
