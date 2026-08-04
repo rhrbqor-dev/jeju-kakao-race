@@ -291,10 +291,10 @@ async function copyEventContent(sourceEventId, targetEventId) {
   );
   for (const m of missions.rows) {
     const inserted = await query(
-      `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, question, answer, answer_explanation, wrong_message, wrong_penalty, hint_penalty, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required, next_mission_button_label, next_mission_message_template)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+      `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, quiz_type, choices, sequence_answer, question, answer, answer_explanation, wrong_message, wrong_penalty, hint_penalty, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required, next_mission_button_label, next_mission_message_template)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
        RETURNING id;`,
-      [targetEventId, m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty ?? -5), Number(m.hint_penalty ?? -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude, m.longitude, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, String(m.next_mission_button_label || ''), String(m.next_mission_message_template || '')]
+      [targetEventId, m.mission_code, m.mission_name, m.mission_type, normalizeQuizType(m.quiz_type || 'short'), String(m.choices || ''), String(m.sequence_answer || ''), m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty ?? -5), Number(m.hint_penalty ?? -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude, m.longitude, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, String(m.next_mission_button_label || ''), String(m.next_mission_message_template || '')]
     );
     missionMap.set(Number(m.id), Number(inserted.rows[0].id));
   }
@@ -850,6 +850,10 @@ async function initDb() {
   await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS next_mission_id INTEGER;`);
   await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS next_mission_button_label TEXT NOT NULL DEFAULT '';`);
   await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS next_mission_message_template TEXT NOT NULL DEFAULT '';`);
+  await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS quiz_type TEXT NOT NULL DEFAULT 'short';`);
+  await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS choices TEXT NOT NULL DEFAULT '';`);
+  await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS sequence_answer TEXT NOT NULL DEFAULT '';`);
+  await query(`UPDATE missions SET quiz_type='short' WHERE quiz_type IS NULL OR quiz_type NOT IN ('short','choice','sequence');`);
   await query(`CREATE INDEX IF NOT EXISTS idx_missions_next_mission_id ON missions(next_mission_id);`);
 
   await query(`
@@ -1116,6 +1120,7 @@ async function getMissions(eventId) {
   const result = await query(
     `SELECT
        m.id, m.event_id, m.mission_code, m.mission_name, m.mission_type, m.question, m.answer,
+       m.quiz_type, m.choices, m.sequence_answer,
        m.answer_explanation, m.wrong_message, m.wrong_penalty, m.hint_penalty, m.score, m.hint, m.location_name, m.latitude, m.longitude,
        m.radius_m, m.sort_order, m.is_required, m.created_at,
        m.next_mission_id, m.next_mission_button_label, m.next_mission_message_template,
@@ -1972,6 +1977,94 @@ async function handleJoinTeamList(event, kakaoUserId) {
   );
 }
 
+
+function normalizeQuizType(value) {
+  const v = String(value || '').trim().toLowerCase();
+  if (['choice', 'multiple', 'multiple_choice', '객관식'].includes(v)) return 'choice';
+  if (['sequence', 'order', '순서', '순서형', '순서 선택형'].includes(v)) return 'sequence';
+  return 'short';
+}
+
+function parseMissionChoices(value) {
+  return String(value || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 10);
+}
+
+function choiceLabel(index, text) {
+  return `${index + 1}. ${text}`.slice(0, 40);
+}
+
+function choiceQuickReplies(mission, extra = []) {
+  const choices = parseMissionChoices(mission?.choices || '');
+  const buttons = choices.map((choice, index) => choiceLabel(index, choice));
+  return [...buttons, ...extra].slice(0, 10);
+}
+
+function parseNumberList(value) {
+  return String(value || '')
+    .split(/[|,>\s]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const found = part.match(/\d+/);
+      return found ? Number(found[0]) : NaN;
+    })
+    .filter((n) => Number.isInteger(n) && n > 0);
+}
+
+function extractChoiceNumber(text, choices = []) {
+  const raw = String(text || '').trim();
+  const direct = raw.match(/^\s*(\d+)\s*[.)번：:]?/);
+  if (direct) return Number(direct[1]);
+  const normalizedRaw = normalizeAnswer(raw.replace(/^\d+\s*[.)번：:]?\s*/, ''));
+  const foundIndex = choices.findIndex((choice) => normalizeAnswer(choice) === normalizedRaw || normalizeAnswer(choiceLabel(choices.indexOf(choice), choice)) === normalizedRaw);
+  return foundIndex >= 0 ? foundIndex + 1 : NaN;
+}
+
+function isChoiceCorrect(utterance, mission) {
+  const choices = parseMissionChoices(mission.choices || '');
+  const selected = extractChoiceNumber(utterance, choices);
+  const answerNumbers = parseNumberList(mission.answer || mission.sequence_answer || '');
+  if (Number.isInteger(selected) && answerNumbers.length) return answerNumbers.includes(selected);
+
+  const acceptable = splitAnswers(mission.answer);
+  return acceptable.includes(normalizeAnswer(utterance));
+}
+
+function expectedSequenceNumbers(mission) {
+  const fromSequence = parseNumberList(mission.sequence_answer || '');
+  if (fromSequence.length) return fromSequence;
+  return parseNumberList(mission.answer || '');
+}
+
+function sequenceProgressText(mission, selectedNumbers = []) {
+  const choices = parseMissionChoices(mission.choices || '');
+  const selectedLabels = selectedNumbers.map((n) => {
+    const choice = choices[n - 1] || '';
+    return `${n}. ${choice}`.trim();
+  });
+  const expected = expectedSequenceNumbers(mission);
+  const total = expected.length || choices.length;
+  return `${mission.mission_code} ${mission.mission_name}\n\n${mission.question}\n\n${selectedLabels.length ? `현재 선택 순서:\n${selectedLabels.map((v, i) => `${i + 1}) ${v}`).join('\n')}\n\n` : ''}${selectedLabels.length + 1}번째로 올 내용을 선택하세요. (${selectedLabels.length}/${total})`;
+}
+
+function sequenceQuickReplies(mission, selectedNumbers = []) {
+  const choices = parseMissionChoices(mission.choices || '');
+  const used = new Set(selectedNumbers.map(Number));
+  const buttons = choices
+    .map((choice, index) => ({ choice, index }))
+    .filter(({ index }) => !used.has(index + 1))
+    .map(({ choice, index }) => choiceLabel(index, choice));
+  return [...buttons, '처음부터 다시', ...menuQuickReplies].slice(0, 10);
+}
+
+function normalizeSubmissionUtteranceForDisplay(utterance) {
+  return String(utterance || '').trim();
+}
+
 async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '') {
   const mission = await getMissionByCode(event.id, missionCode);
   if (!mission) return kakaoText(`'${missionCode}' 미션을 찾을 수 없습니다. 미션 목록을 확인해주세요.`, menuQuickReplies);
@@ -1993,7 +2086,11 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
     const url = `${baseUrl(req)}/gps?event=${encodeURIComponent(eventQueryValue(event))}&team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}&actor=${encodeURIComponent(kakaoUserId)}`;
     const title = `${mission.mission_code} ${mission.mission_name}`;
     const desc = `${mission.question}\n\n아래 버튼을 눌러 위치 권한을 허용해주세요.`;
-    const buttons = [{ action: 'webLink', label: 'GPS 인증하기', webLinkUrl: url }];
+    const fallbackUrl = `${baseUrl(req)}/upload?event=${encodeURIComponent(eventQueryValue(event))}&team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}&actor=${encodeURIComponent(kakaoUserId)}&fallback=gps`;
+    const buttons = [
+      { action: 'webLink', label: 'GPS 인증하기', webLinkUrl: url },
+      { action: 'webLink', label: 'GPS가 안 될 때 사진 인증', webLinkUrl: fallbackUrl },
+    ];
     if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls, buttons), menuQuickReplies);
     return kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || '');
   }
@@ -2005,6 +2102,27 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
     return kakaoText(desc, ['완주', ...menuQuickReplies]);
   }
   const title = `${mission.mission_code} ${mission.mission_name}`;
+  const quizType = normalizeQuizType(mission.quiz_type || 'short');
+
+  if (mission.mission_type === 'quiz' && quizType === 'choice') {
+    const choices = parseMissionChoices(mission.choices || '');
+    const choiceText = choices.length ? `\n\n${choices.map((choice, index) => `${index + 1}. ${choice}`).join('\n')}` : '';
+    const desc = `${mission.question}${choiceText}\n\n아래 보기 버튼을 눌러 정답을 선택해주세요.`;
+    const quickReplies = choiceQuickReplies(mission, menuQuickReplies);
+    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls), quickReplies);
+    if (imageUrls.length === 1) return kakaoCard(title, desc, [], quickReplies, imageUrls[0]);
+    return kakaoText(`${title}\n\n${desc}`, quickReplies);
+  }
+
+  if (mission.mission_type === 'quiz' && quizType === 'sequence') {
+    await setUserState(event.id, kakaoUserId, 'WAIT_SEQUENCE_ANSWER', { missionId: mission.id, selected: [] });
+    const desc = sequenceProgressText(mission, []);
+    const quickReplies = sequenceQuickReplies(mission, []);
+    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls), quickReplies);
+    if (imageUrls.length === 1) return kakaoCard(title, desc, [], quickReplies, imageUrls[0]);
+    return kakaoText(`${title}\n\n${desc}`, quickReplies);
+  }
+
   const desc = imageUrls.length ? `${mission.question}\n\n이미지와 현장 단서를 함께 확인한 뒤 정답을 입력해주세요.` : `${mission.question}\n\n정답을 입력해주세요.`;
   if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls), menuQuickReplies);
   if (imageUrls.length === 1) return kakaoCard(title, desc, [], menuQuickReplies, imageUrls[0]);
@@ -2180,8 +2298,55 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
   }
 
   if (mission.mission_type === 'quiz') {
-    const acceptable = splitAnswers(mission.answer);
-    const isCorrect = acceptable.includes(normalizeAnswer(utterance));
+    const quizType = normalizeQuizType(mission.quiz_type || 'short');
+    const choices = parseMissionChoices(mission.choices || '');
+    let normalizedUtterance = normalizeSubmissionUtteranceForDisplay(utterance);
+    let isCorrect = false;
+    let sequenceFinished = false;
+    let selectedSequence = [];
+
+    if (quizType === 'choice') {
+      isCorrect = isChoiceCorrect(utterance, mission);
+    } else if (quizType === 'sequence') {
+      const expected = expectedSequenceNumbers(mission);
+      if (!choices.length || !expected.length) {
+        return kakaoText('순서 선택형 미션의 보기 또는 정답 순서가 설정되지 않았습니다. 운영자에게 문의해주세요.', menuQuickReplies);
+      }
+      const state = await getUserState(event.id, kakaoUserId);
+      const data = stateData(state);
+      let selected = Array.isArray(data.selected) && Number(data.missionId) === Number(mission.id)
+        ? data.selected.map(Number).filter((n) => Number.isInteger(n) && n > 0)
+        : [];
+
+      if (/^(처음부터 다시|다시|초기화|리셋)$/i.test(String(utterance || '').trim())) {
+        await setUserState(event.id, kakaoUserId, 'WAIT_SEQUENCE_ANSWER', { missionId: mission.id, selected: [] });
+        return kakaoText(sequenceProgressText(mission, []), sequenceQuickReplies(mission, []));
+      }
+
+      const picked = extractChoiceNumber(utterance, choices);
+      if (!Number.isInteger(picked) || picked < 1 || picked > choices.length) {
+        return kakaoText(`보기 버튼에서 순서대로 선택해주세요.\n\n${sequenceProgressText(mission, selected)}`, sequenceQuickReplies(mission, selected));
+      }
+      if (selected.includes(picked)) {
+        return kakaoText('이미 선택한 보기입니다. 남은 보기 중에서 선택해주세요.\n\n' + sequenceProgressText(mission, selected), sequenceQuickReplies(mission, selected));
+      }
+
+      selected = [...selected, picked];
+      selectedSequence = selected;
+      normalizedUtterance = selected.join(',');
+      sequenceFinished = selected.length >= expected.length;
+
+      if (!sequenceFinished) {
+        await setUserState(event.id, kakaoUserId, 'WAIT_SEQUENCE_ANSWER', { missionId: mission.id, selected });
+        return kakaoText(sequenceProgressText(mission, selected), sequenceQuickReplies(mission, selected));
+      }
+
+      isCorrect = expected.length === selected.length && expected.every((value, index) => Number(value) === Number(selected[index]));
+      await clearUserState(event.id, kakaoUserId);
+    } else {
+      const acceptable = splitAnswers(mission.answer);
+      isCorrect = acceptable.includes(normalizeAnswer(utterance));
+    }
 
     const wrongCountResult = await query(
       `SELECT COUNT(*)::int AS count
@@ -2199,7 +2364,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
     await query(
       `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, actor_kakao_user_id, actor_name, status, score)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8);`,
-      [event.id, team.id, mission.id, utterance, kakaoUserId, actorName, isCorrect ? 'correct' : 'wrong', earnedScore]
+      [event.id, team.id, mission.id, normalizedUtterance, kakaoUserId, actorName, isCorrect ? 'correct' : 'wrong', earnedScore]
     );
 
     if (!isCorrect && wrongPenalty !== 0) {
@@ -2212,7 +2377,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
         eventType: 'wrong',
         eventKey: `wrong:${mission.id}:${wrongCount + 1}:${Date.now()}`,
         scoreDelta: wrongPenalty,
-        memo: `오답 ${wrongCount + 1}회`,
+        memo: quizType === 'sequence' ? `순서 오답 ${wrongCount + 1}회` : `오답 ${wrongCount + 1}회`,
       });
     }
 
@@ -2237,10 +2402,21 @@ ${explanation}` : ''}
       const answerImageUrls = missionImageLinks(req, answerImages);
       return missionCompletionResponse(req, event, mission, successText, menuQuickReplies, answerImageUrls, `${mission.mission_code} ${mission.mission_name} 정답 설명`, { team, actorName, total });
     }
+
     const totalAfterWrong = await teamTotalScore(team.id);
+    if (quizType === 'sequence') {
+      await setUserState(event.id, kakaoUserId, 'WAIT_SEQUENCE_ANSWER', { missionId: mission.id, selected: [] });
+    }
     const wrongTemplate = String(mission.wrong_message || '').trim();
-    const wrongText = wrongTemplate
-      ? renderTemplate(wrongTemplate, { mission_code: mission.mission_code, mission_name: mission.mission_name, wrong_count: wrongCount + 1, wrong_penalty: wrongPenalty, total_score: totalAfterWrong, hint: mission.hint || '현장 안내문을 다시 확인해보세요.', answer: utterance, team_name: team.team_name, actor_name: actorName })
+    const defaultWrongText = quizType === 'sequence'
+      ? `아쉽습니다. 순서가 맞지 않습니다.
+
+입력한 순서: ${selectedSequence.join(' → ')}
+현재 오답 횟수: ${wrongCount + 1}회
+오답 감점: ${wrongPenalty}점
+현재 팀 총점: ${totalAfterWrong}점
+
+다시 처음부터 순서대로 선택해주세요.`
       : `아쉽습니다. 정답이 아닙니다.
 
 현재 오답 횟수: ${wrongCount + 1}회
@@ -2249,7 +2425,10 @@ ${explanation}` : ''}
 
 힌트가 필요하면 "힌트"라고 입력해주세요.
 다시 정답을 입력해주세요.`;
-    return kakaoText(wrongText, ['다시 입력하기', ...menuQuickReplies]);
+    const wrongText = wrongTemplate
+      ? renderTemplate(wrongTemplate, { mission_code: mission.mission_code, mission_name: mission.mission_name, wrong_count: wrongCount + 1, wrong_penalty: wrongPenalty, total_score: totalAfterWrong, hint: mission.hint || '현장 안내문을 다시 확인해보세요.', answer: normalizedUtterance, team_name: team.team_name, actor_name: actorName })
+      : defaultWrongText;
+    return kakaoText(wrongText, quizType === 'sequence' ? sequenceQuickReplies(mission, []) : ['다시 입력하기', ...choiceQuickReplies(mission, menuQuickReplies)]);
   }
 
   if (mission.mission_type === 'visit') {
@@ -2892,6 +3071,7 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
     const token = body.token || '';
     const actorId = body.actor || body.actor_kakao_user_id || '';
     const comment = body.comment || '';
+    const gpsFallback = String(body.fallback || req.query?.fallback || '').toLowerCase() === 'gps';
     const submissionKey = String(body.submission_key || body.upload_id || '').trim().slice(0, 120);
     const image_data = body.image_data || (req.file ? req.file.buffer.toString('base64') : '');
     const image_mime = body.image_mime || (req.file ? req.file.mimetype : 'image/jpeg');
@@ -2906,7 +3086,7 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
     }
     const mission = await getMissionByCode(event.id, mission_code);
 
-    if (!team || !mission || mission.mission_type !== 'photo') {
+    if (!team || !mission || !(mission.mission_type === 'photo' || (gpsFallback && mission.mission_type === 'gps'))) {
       return res.status(400).json({ ok: false, message: '팀/미션 인증 정보가 올바르지 않습니다.' });
     }
     if (!image_data) return res.status(400).json({ ok: false, message: '사진 파일이 필요합니다.' });
@@ -2955,7 +3135,7 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
         event.id,
         team.id,
         mission.id,
-        comment,
+        gpsFallback ? `GPS 대체 사진 인증${comment ? ` - ${comment}` : ''}` : comment,
         String(image_data),
         String(image_mime || 'image/jpeg'),
         actor.actor_kakao_user_id,
@@ -2963,7 +3143,7 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
         submissionKey,
         finalStatus,
         finalScore,
-        autoApprove ? '사진 자동 승인' : '',
+        autoApprove ? (gpsFallback ? 'GPS 대체 사진 자동 승인' : '사진 자동 승인') : '',
       ]
     );
 
@@ -2983,20 +3163,20 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
       await addTeamNotice(
         event.id,
         team.id,
-        `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} 사진을 업로드했고 자동 승인되었습니다. 현재 팀 점수는 ${total}점입니다.${nextText}`,
+        `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} ${gpsFallback ? 'GPS 대체 사진' : '사진'}을 업로드했고 자동 승인되었습니다. 현재 팀 점수는 ${total}점입니다.${nextText}`,
         actor.actor_kakao_user_id
       );
       return res.json({
         ok: true,
         auto_approved: true,
-        message: `사진이 접수되어 자동 승인되었습니다.
+        message: `${gpsFallback ? 'GPS 대체 사진' : '사진'}이 접수되어 자동 승인되었습니다.
 업로드한 팀원: ${actor.actor_name}
 획득 점수: ${mission.score}점${nextText}`,
       });
     }
 
-    await addTeamNotice(event.id, team.id, `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} 사진을 업로드했습니다. 운영자 승인 후 점수가 반영됩니다.`, actor.actor_kakao_user_id);
-    res.json({ ok: true, message: `사진이 접수되었습니다.
+    await addTeamNotice(event.id, team.id, `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} ${gpsFallback ? 'GPS 대체 사진' : '사진'}을 업로드했습니다. 운영자 승인 후 점수가 반영됩니다.`, actor.actor_kakao_user_id);
+    res.json({ ok: true, message: `${gpsFallback ? 'GPS 대체 사진' : '사진'}이 접수되었습니다.
 업로드한 팀원: ${actor.actor_name}
 운영자 승인 후 점수가 반영됩니다.` });
   } catch (error) {
@@ -3669,11 +3849,12 @@ app.post('/api/admin/missions', requireAdmin, async (req, res) => {
   const nextMissionId = await resolveAdminNextMissionId(event.id, null, m.next_mission_id);
   const nextButtonLabel = normalizeNextMissionButtonLabel(m.next_mission_button_label || '');
   const nextMessageTemplate = String(m.next_mission_message_template || '').trim();
+  const quizType = normalizeQuizType(m.quiz_type || 'short');
   const result = await query(
-    `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, question, answer, answer_explanation, wrong_message, wrong_penalty, hint_penalty, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required, next_mission_id, next_mission_button_label, next_mission_message_template)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+    `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, quiz_type, choices, sequence_answer, question, answer, answer_explanation, wrong_message, wrong_penalty, hint_penalty, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required, next_mission_id, next_mission_button_label, next_mission_message_template)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
      RETURNING id, mission_code, mission_name;`,
-    [event.id, m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty || -5), Number(m.hint_penalty || -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, nextMissionId, nextButtonLabel, nextMessageTemplate]
+    [event.id, m.mission_code, m.mission_name, m.mission_type, quizType, m.choices || '', m.sequence_answer || '', m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty || -5), Number(m.hint_penalty || -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, nextMissionId, nextButtonLabel, nextMessageTemplate]
   );
   res.json({ ok: true, mission: result.rows[0] });
 });
@@ -3684,9 +3865,10 @@ app.patch('/api/admin/missions/:id', requireAdmin, async (req, res) => {
   const nextMissionId = await resolveAdminNextMissionId(event.id, req.params.id, m.next_mission_id);
   const nextButtonLabel = normalizeNextMissionButtonLabel(m.next_mission_button_label || '');
   const nextMessageTemplate = String(m.next_mission_message_template || '').trim();
+  const quizType = normalizeQuizType(m.quiz_type || 'short');
   const result = await query(
-    `UPDATE missions SET mission_code=$1, mission_name=$2, mission_type=$3, question=$4, answer=$5, answer_explanation=$6, wrong_message=$7, wrong_penalty=$8, hint_penalty=$9, score=$10, hint=$11, location_name=$12, latitude=$13, longitude=$14, radius_m=$15, sort_order=$16, is_required=$17, next_mission_id=$18, next_mission_button_label=$19, next_mission_message_template=$20 WHERE id=$21 AND event_id=$22 RETURNING id, mission_code, mission_name;`,
-    [m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty || -5), Number(m.hint_penalty || -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, nextMissionId, nextButtonLabel, nextMessageTemplate, req.params.id, event.id]
+    `UPDATE missions SET mission_code=$1, mission_name=$2, mission_type=$3, quiz_type=$4, choices=$5, sequence_answer=$6, question=$7, answer=$8, answer_explanation=$9, wrong_message=$10, wrong_penalty=$11, hint_penalty=$12, score=$13, hint=$14, location_name=$15, latitude=$16, longitude=$17, radius_m=$18, sort_order=$19, is_required=$20, next_mission_id=$21, next_mission_button_label=$22, next_mission_message_template=$23 WHERE id=$24 AND event_id=$25 RETURNING id, mission_code, mission_name;`,
+    [m.mission_code, m.mission_name, m.mission_type, quizType, m.choices || '', m.sequence_answer || '', m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty || -5), Number(m.hint_penalty || -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, nextMissionId, nextButtonLabel, nextMessageTemplate, req.params.id, event.id]
   );
   if (!result.rows[0]) return res.status(404).json({ ok: false, message: '미션을 찾을 수 없습니다.' });
   res.json({ ok: true, mission: result.rows[0] });
@@ -3781,7 +3963,7 @@ app.post('/api/admin/submissions/:id/review', requireAdmin, async (req, res) => 
     const total = await teamTotalScore(team.id);
     const actorLabel = sub.actor_name || '팀원';
     const nextText = await nextOrCompleteMissionPlainText(sub.event_id, team, sub, { team_name: team.team_name || '', team_code: team.team_code || '', actor_name: actorLabel, total_score: total, total });
-    await addTeamNotice(sub.event_id, team.id, `${actorLabel}님이 업로드한 ${sub.mission_code} ${sub.mission_name} 사진 미션이 승인되었습니다. 현재 팀 점수는 ${total}점입니다.${nextText}`, sub.actor_kakao_user_id || '');
+    await addTeamNotice(sub.event_id, team.id, `${actorLabel}님이 업로드한 ${sub.mission_code} ${sub.mission_name} 인증 사진이 승인되었습니다. 현재 팀 점수는 ${total}점입니다.${nextText}`, sub.actor_kakao_user_id || '');
   }
 
   res.json({ ok: true, submission: result.rows[0] });
