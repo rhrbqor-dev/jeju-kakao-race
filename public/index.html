@@ -142,7 +142,7 @@
       <section id="tab-missions" class="section grid two hidden">
         <div class="card mission-list-card">
           <h2>미션 목록</h2>
-          <div class="table-wrap mission-list-wrap"><table><thead><tr><th>코드</th><th>미션명</th><th>유형</th><th>점수</th><th>오답감점</th><th>힌트감점</th><th>연결 미션</th><th>연결 안내문</th><th>미션 이미지</th><th>정답 설명 이미지</th><th>오답멘트</th><th>정답설명</th><th>관리</th></tr></thead><tbody id="missionBody"></tbody></table></div>
+          <div class="table-wrap mission-list-wrap"><table><thead><tr><th>코드</th><th>미션명</th><th>유형</th><th>완주조건</th><th>점수</th><th>오답감점</th><th>힌트감점</th><th>연결 미션</th><th>연결 안내문</th><th>미션 이미지</th><th>정답 설명 이미지</th><th>오답멘트</th><th>정답설명</th><th>관리</th></tr></thead><tbody id="missionBody"></tbody></table></div>
         </div>
         <div class="card mission-form-card">
           <h2 id="missionFormTitle">미션 추가/수정</h2>
@@ -150,6 +150,8 @@
           <label>미션코드</label><input id="missionCode" placeholder="M1" />
           <label>미션명</label><input id="missionName" placeholder="해신사" />
           <label>유형</label><select id="missionType"><option value="quiz">퀴즈</option><option value="photo">사진</option><option value="gps">GPS</option><option value="visit">방문문구</option><option value="complete">완주</option></select>
+          <label style="display:flex;gap:8px;align-items:center;margin-top:10px;"><input id="missionRequired" type="checkbox" checked style="width:auto;" /> 완주 조건에 포함</label>
+          <p class="small">ON이면 이 미션을 완료해야 완주 미션이 자동으로 열립니다. 보너스/선택 미션은 OFF로 두세요. 완주 유형 미션은 이 값과 관계없이 마지막 완주 처리용으로 사용됩니다.</p>
           <label>질문/안내문</label><textarea id="missionQuestion" rows="3"></textarea>
           <label>미션 이미지 업로드</label>
           <input id="missionImages" type="file" accept="image/jpeg,image/png,image/webp" multiple />
@@ -937,7 +939,7 @@ async function loadMissions() {
     const missionImg = Number(m.mission_image_count || 0) > 0 ? `${m.mission_image_count}장` : (m.has_mission_image ? '1장' : '-');
     const answerImg = Number(m.answer_image_count || 0) > 0 ? `${m.answer_image_count}장` : '-';
     const nextMission = m.next_mission_code ? `${esc(m.next_mission_code)}<br><span class="small">${esc(m.next_mission_name || '')}</span>` : '-';
-    return `<tr><td>${esc(m.mission_code)}</td><td>${esc(m.mission_name)}</td><td>${esc(m.mission_type)}</td><td>${m.score}</td><td>${m.wrong_penalty ?? -5}</td><td>${m.hint_penalty ?? -10}</td><td>${nextMission}</td><td>${m.next_mission_message_template ? '사용자 문구' : '-'}</td><td>${missionImg}</td><td>${answerImg}</td><td>${m.wrong_message ? '있음' : '-'}</td><td>${m.answer_explanation ? '있음' : '-'}</td><td><button class="secondary" onclick="editMission(${m.id})">수정</button> <button class="danger" onclick="deleteMission(${m.id})">삭제</button></td></tr>`;
+    return `<tr><td>${esc(m.mission_code)}</td><td>${esc(m.mission_name)}</td><td>${esc(m.mission_type)}</td><td>${m.mission_type === 'complete' ? '완주' : (m.is_required === false ? '제외' : '포함')}</td><td>${m.score}</td><td>${m.wrong_penalty ?? -5}</td><td>${m.hint_penalty ?? -10}</td><td>${nextMission}</td><td>${m.next_mission_message_template ? '사용자 문구' : '-'}</td><td>${missionImg}</td><td>${answerImg}</td><td>${m.wrong_message ? '있음' : '-'}</td><td>${m.answer_explanation ? '있음' : '-'}</td><td><button class="secondary" onclick="editMission(${m.id})">수정</button> <button class="danger" onclick="deleteMission(${m.id})">삭제</button></td></tr>`;
   }).join('');
   fillNextMissionOptions($('missionNextId')?.value || '', $('missionId')?.value || '');
 }
@@ -976,7 +978,7 @@ function editMission(id) {
   const m = missionsCache.find(x => x.id === id); if (!m) return;
   $('missionFormTitle').textContent = '미션 수정';
   $('missionId').value = m.id; $('missionCode').value = m.mission_code; $('missionName').value = m.mission_name; $('missionType').value = m.mission_type;
-  $('missionQuestion').value = m.question; $('missionAnswer').value = m.answer; $('missionWrongMessage').value = m.wrong_message || ''; $('missionAnswerExplanation').value = m.answer_explanation || ''; $('missionScore').value = m.score; $('missionWrongPenalty').value = m.wrong_penalty ?? -5; $('missionHintPenalty').value = m.hint_penalty ?? -10; $('missionHint').value = m.hint;
+  $('missionQuestion').value = m.question; $('missionAnswer').value = m.answer; $('missionWrongMessage').value = m.wrong_message || ''; $('missionAnswerExplanation').value = m.answer_explanation || ''; $('missionScore').value = m.score; $('missionWrongPenalty').value = m.wrong_penalty ?? -5; $('missionHintPenalty').value = m.hint_penalty ?? -10; $('missionHint').value = m.hint; $('missionRequired').checked = m.is_required !== false;
   fillNextMissionOptions(m.next_mission_id || '', m.id);
   $('missionNextButtonLabel').value = m.next_mission_button_label || '다음 미션 시작';
   $('missionNextMessageTemplate').value = m.next_mission_message_template || '다음 미션: {next_mission_code} {next_mission_name}\n아래 버튼을 누르면 QR을 다시 찍지 않아도 다음 미션을 바로 시작할 수 있습니다.';
@@ -988,7 +990,7 @@ function editMission(id) {
 function clearMissionForm() {
   ['missionId','missionCode','missionName','missionQuestion','missionAnswer','missionWrongMessage','missionAnswerExplanation','missionHint','missionLocation','missionLat','missionLng'].forEach(id => $(id).value='');
   $('missionFormTitle').textContent = '미션 추가/수정';
-  $('missionType').value='quiz'; $('missionScore').value=100; $('missionWrongPenalty').value=-5; $('missionHintPenalty').value=-10; $('missionRadius').value=80; $('missionOrder').value=1;
+  $('missionType').value='quiz'; $('missionScore').value=100; $('missionWrongPenalty').value=-5; $('missionHintPenalty').value=-10; $('missionRadius').value=80; $('missionOrder').value=1; $('missionRequired').checked = true;
   fillNextMissionOptions('', '');
   $('missionNextButtonLabel').value='다음 미션 시작';
   $('missionNextMessageTemplate').value='다음 미션: {next_mission_code} {next_mission_name}\n아래 버튼을 누르면 QR을 다시 찍지 않아도 다음 미션을 바로 시작할 수 있습니다.';
@@ -1115,7 +1117,7 @@ async function saveMission() {
       next_mission_button_label:($('missionNextButtonLabel')?.value || '다음 미션 시작').trim(),
       next_mission_message_template:($('missionNextMessageTemplate')?.value || '').trim(),
       location_name:$('missionLocation').value, latitude:$('missionLat').value ? Number($('missionLat').value) : null, longitude:$('missionLng').value ? Number($('missionLng').value) : null,
-      radius_m:Number($('missionRadius').value||80), sort_order:Number($('missionOrder').value||0), is_required:true
+      radius_m:Number($('missionRadius').value||80), sort_order:Number($('missionOrder').value||0), is_required:$('missionRequired').checked
     };
     const id = $('missionId').value;
     const data = await api(id ? `/api/admin/missions/${id}` : '/api/admin/missions', { method:id?'PATCH':'POST', body: JSON.stringify(body) });

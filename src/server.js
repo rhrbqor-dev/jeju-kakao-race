@@ -1443,9 +1443,86 @@ async function addUnreadNoticesToResponse(eventId, team, kakaoUserId, response) 
   return response;
 }
 
+function kakaoResponseTextSnapshot(response) {
+  const firstOutput = response?.template?.outputs?.[0];
+  if (firstOutput?.simpleText?.text) return String(firstOutput.simpleText.text || '');
+  if (firstOutput?.basicCard?.description) return String(firstOutput.basicCard.description || '');
+  if (firstOutput?.carousel?.items?.[0]?.description) return String(firstOutput.carousel.items[0].description || '');
+  return '';
+}
+
+function addButtonsToBasicCard(firstOutput, buttons = []) {
+  if (!buttons.length) return;
+  firstOutput.basicCard.buttons = [
+    ...(firstOutput.basicCard.buttons || []),
+    ...buttons,
+  ].slice(0, 3);
+}
+
+function appendCompletePromptToResponse(response, promptText, buttons = []) {
+  if (!promptText) return response;
+  const firstOutput = response?.template?.outputs?.[0];
+  if (!firstOutput) return response;
+
+  const existing = kakaoResponseTextSnapshot(response);
+  if (existing.includes('완주 미션:') || existing.includes('완주 처리')) return response;
+
+  if (firstOutput.basicCard) {
+    firstOutput.basicCard.description = `${String(firstOutput.basicCard.description || '').trim()}
+
+${promptText}`.trim();
+    addButtonsToBasicCard(firstOutput, buttons);
+    return response;
+  }
+
+  if (firstOutput.simpleText?.text) {
+    firstOutput.basicCard = {
+      title: '완주 미션 안내',
+      description: `${String(firstOutput.simpleText.text || '').trim()}
+
+${promptText}`.trim(),
+      buttons,
+    };
+    delete firstOutput.simpleText;
+    return response;
+  }
+
+  return response;
+}
+
+async function addReadyCompleteMissionToResponse(eventId, team, response) {
+  if (!eventId || !team?.id || team.status === 'finished') return response;
+
+  const freshTeam = (await query(`SELECT * FROM teams WHERE id=$1;`, [team.id])).rows[0];
+  if (!freshTeam || freshTeam.status === 'finished') return response;
+
+  const textSnapshot = kakaoResponseTextSnapshot(response);
+  if (textSnapshot.includes('완주 미션:') || textSnapshot.includes('완주 완료')) return response;
+
+  let completeMission = null;
+  if (freshTeam.current_mission_id) {
+    const current = (await query(
+      `SELECT * FROM missions WHERE id=$1 AND event_id=$2;`,
+      [freshTeam.current_mission_id, eventId]
+    )).rows[0];
+    if (current?.mission_type === 'complete') {
+      const alreadyCompleted = await isMissionAlreadyCompleted(freshTeam.id, current.id);
+      if (!alreadyCompleted) completeMission = current;
+    }
+  }
+
+  if (!completeMission) {
+    completeMission = await activateCompleteMissionIfReady(eventId, freshTeam, null);
+  }
+
+  if (!completeMission) return response;
+  return appendCompletePromptToResponse(response, completeMissionPromptText(completeMission), completeMissionButton(completeMission));
+}
+
 async function respondKakao(res, response, event = null, team = null, kakaoUserId = '') {
   if (event && team && kakaoUserId) {
     response = await addUnreadNoticesToResponse(event.id, team, kakaoUserId, response);
+    response = await addReadyCompleteMissionToResponse(event.id, team, response);
   }
   return res.status(200).json(response);
 }
@@ -1564,13 +1641,85 @@ async function isMissionAlreadyCompleted(teamId, missionId) {
 
 async function maybeMarkFinished(team, eventId) {
   const missions = await getMissions(eventId);
-  const requiredIds = missions.filter((m) => m.is_required).map((m) => m.id);
   const completed = await getCompletedMissionIds(team.id);
-  const allDone = requiredIds.every((id) => completed.has(id));
+
+  const completeMissionIds = missions
+    .filter((m) => m.mission_type === 'complete')
+    .map((m) => m.id);
+
+  // 완주 미션이 있는 레이스는 완주 미션 자체가 승인/완료된 뒤에만 최종 완주 처리한다.
+  // 일반 미션의 is_required 값은 "완주 미션을 띄우기 위한 조건"으로만 사용한다.
+  const finishedByCompleteMission = completeMissionIds.some((id) => completed.has(id));
+  if (completeMissionIds.length > 0) {
+    if (finishedByCompleteMission && !team.finish_time) {
+      await query(`UPDATE teams SET status='finished', finish_time=NOW() WHERE id=$1;`, [team.id]);
+    }
+    return;
+  }
+
+  // 완주 미션을 따로 만들지 않은 레이스는 완주 조건 포함 미션이 모두 끝나면 바로 완주 처리한다.
+  const requiredIds = missions
+    .filter((m) => m.is_required && m.mission_type !== 'complete')
+    .map((m) => m.id);
+  const allDone = requiredIds.length > 0 && requiredIds.every((id) => completed.has(id));
 
   if (allDone && !team.finish_time) {
     await query(`UPDATE teams SET status='finished', finish_time=NOW() WHERE id=$1;`, [team.id]);
   }
+}
+
+function firstRawAnswer(answer = '완주') {
+  return String(answer || '완주')
+    .split(/[|,，/]/)
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)[0] || '완주';
+}
+
+async function getReadyCompleteMission(eventId, teamId) {
+  if (!eventId || !teamId) return null;
+
+  const missions = await getMissions(eventId);
+  const completed = await getCompletedMissionIds(teamId);
+
+  const requiredNonComplete = missions
+    .filter((m) => m.is_required && m.mission_type !== 'complete')
+    .map((m) => m.id);
+
+  if (!requiredNonComplete.length) return null;
+  const allRequiredNonCompleteDone = requiredNonComplete.every((id) => completed.has(id));
+  if (!allRequiredNonCompleteDone) return null;
+
+  const completeMissions = missions
+    .filter((m) => m.mission_type === 'complete')
+    .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0));
+
+  return completeMissions.find((m) => !completed.has(m.id)) || null;
+}
+
+function completeMissionPromptText(mission) {
+  if (!mission) return '';
+  const question = String(mission.question || '').trim();
+  return `🎉 모든 필수 미션을 완료했습니다!
+
+완주 미션: ${mission.mission_code} ${mission.mission_name}${question ? `
+
+${question}` : ''}
+
+아래 버튼을 누르면 완주 처리를 진행할 수 있습니다.`;
+}
+
+function completeMissionButton(mission) {
+  if (!mission) return [];
+  const messageText = firstRawAnswer(mission.answer || '완주');
+  return [{ action: 'message', label: '완주하기', messageText }];
+}
+
+async function activateCompleteMissionIfReady(eventId, team, currentMission = null) {
+  if (!team?.id || currentMission?.mission_type === 'complete') return null;
+  const completeMission = await getReadyCompleteMission(eventId, team.id);
+  if (!completeMission) return null;
+  await query(`UPDATE teams SET current_mission_id=$1 WHERE id=$2;`, [completeMission.id, team.id]);
+  return completeMission;
 }
 
 async function buildRanking(eventId) {
@@ -1894,17 +2043,28 @@ function linkedNextMissionButton(mission, nextMission) {
 }
 
 async function missionCompletionResponse(req, event, mission, text, quickReplies = menuQuickReplies, imageUrls = [], title = '미션 완료', options = {}) {
-  const nextMission = await getLinkedNextMission(event.id, mission);
-  const buttons = linkedNextMissionButton(mission, nextMission);
-  const nextMessage = buildNextMissionMessage(mission, nextMission, nextMissionTemplateVariables({
-    event,
-    team: options.team || {},
-    mission,
-    nextMission,
-    actorName: options.actorName || '',
-    total: options.total ?? '',
-  }));
-  const finalText = nextMessage ? `${text}\n\n${nextMessage}` : text;
+  const team = options.team || {};
+  const autoCompleteMission = await activateCompleteMissionIfReady(event.id, team, mission);
+
+  let buttons = [];
+  let finalText = text;
+
+  if (autoCompleteMission) {
+    buttons = completeMissionButton(autoCompleteMission);
+    finalText = `${text}\n\n${completeMissionPromptText(autoCompleteMission)}`;
+  } else {
+    const nextMission = await getLinkedNextMission(event.id, mission);
+    buttons = linkedNextMissionButton(mission, nextMission);
+    const nextMessage = buildNextMissionMessage(mission, nextMission, nextMissionTemplateVariables({
+      event,
+      team,
+      mission,
+      nextMission,
+      actorName: options.actorName || '',
+      total: options.total ?? '',
+    }));
+    finalText = nextMessage ? `${text}\n\n${nextMessage}` : text;
+  }
 
   if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, finalText, imageUrls, buttons), quickReplies);
   if (imageUrls.length === 1) return kakaoCard(title, finalText, buttons, quickReplies, imageUrls[0]);
@@ -1921,6 +2081,14 @@ async function nextMissionPlainText(eventId, mission, variables = {}) {
     mission_name: mission?.mission_name || '',
   });
   return text ? `\n${text}` : '';
+}
+
+async function nextOrCompleteMissionPlainText(eventId, team, mission, variables = {}) {
+  const autoCompleteMission = await activateCompleteMissionIfReady(eventId, team, mission);
+  if (autoCompleteMission) {
+    return `\n\n${completeMissionPromptText(autoCompleteMission)}\n카카오톡 챗봇에서 "${firstRawAnswer(autoCompleteMission.answer || '완주')}"를 입력해도 완주 처리가 가능합니다.`;
+  }
+  return nextMissionPlainText(eventId, mission, variables);
 }
 
 async function afterMissionCompleted(event, team, mission, kakaoUserId, actorName) {
@@ -2811,7 +2979,7 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
     if (autoApprove) {
       await maybeMarkFinished(team, event.id);
       const total = await teamTotalScore(team.id);
-      const nextText = await nextMissionPlainText(event.id, mission, nextMissionTemplateVariables({ event, team, mission, actorName: actor.actor_name, total }));
+      const nextText = await nextOrCompleteMissionPlainText(event.id, team, mission, nextMissionTemplateVariables({ event, team, mission, actorName: actor.actor_name, total }));
       await addTeamNotice(
         event.id,
         team.id,
@@ -2894,7 +3062,7 @@ app.post('/api/public/verify/location', async (req, res) => {
     if (ok) {
       await maybeMarkFinished(team, event.id);
       const total = await teamTotalScore(team.id);
-      nextText = await nextMissionPlainText(event.id, mission, nextMissionTemplateVariables({ event, team, mission, actorName: actorInfo.actor_name, total }));
+      nextText = await nextOrCompleteMissionPlainText(event.id, team, mission, nextMissionTemplateVariables({ event, team, mission, actorName: actorInfo.actor_name, total }));
       await addTeamNotice(event.id, team.id, `${actorInfo.actor_name}님이 ${mission.mission_code} ${mission.mission_name} GPS 인증을 완료했습니다. 현재 팀 점수는 ${total}점입니다.${nextText}`, actorInfo.actor_kakao_user_id);
     }
 
@@ -3612,7 +3780,7 @@ app.post('/api/admin/submissions/:id/review', requireAdmin, async (req, res) => 
   if (decision === 'approved') {
     const total = await teamTotalScore(team.id);
     const actorLabel = sub.actor_name || '팀원';
-    const nextText = await nextMissionPlainText(sub.event_id, sub, { team_name: team.team_name || '', team_code: team.team_code || '', actor_name: actorLabel, total_score: total, total });
+    const nextText = await nextOrCompleteMissionPlainText(sub.event_id, team, sub, { team_name: team.team_name || '', team_code: team.team_code || '', actor_name: actorLabel, total_score: total, total });
     await addTeamNotice(sub.event_id, team.id, `${actorLabel}님이 업로드한 ${sub.mission_code} ${sub.mission_name} 사진 미션이 승인되었습니다. 현재 팀 점수는 ${total}점입니다.${nextText}`, sub.actor_kakao_user_id || '');
   }
 
