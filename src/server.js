@@ -291,10 +291,10 @@ async function copyEventContent(sourceEventId, targetEventId) {
   );
   for (const m of missions.rows) {
     const inserted = await query(
-      `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, question, answer, answer_explanation, wrong_message, wrong_penalty, hint_penalty, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+      `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, question, answer, answer_explanation, wrong_message, wrong_penalty, hint_penalty, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required, next_mission_button_label, next_mission_message_template)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
        RETURNING id;`,
-      [targetEventId, m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty ?? -5), Number(m.hint_penalty ?? -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude, m.longitude, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false]
+      [targetEventId, m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty ?? -5), Number(m.hint_penalty ?? -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude, m.longitude, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, String(m.next_mission_button_label || ''), String(m.next_mission_message_template || '')]
     );
     missionMap.set(Number(m.id), Number(inserted.rows[0].id));
   }
@@ -309,6 +309,16 @@ async function copyEventContent(sourceEventId, targetEventId) {
       [targetEventId, newMissionId, sourceEventId, oldMissionId]
     );
   }
+
+  for (const m of missions.rows) {
+    const oldNextId = Number(m.next_mission_id || 0);
+    const newMissionId = missionMap.get(Number(m.id));
+    const newNextMissionId = oldNextId ? missionMap.get(oldNextId) : null;
+    if (newMissionId && newNextMissionId) {
+      await query(`UPDATE missions SET next_mission_id=$1 WHERE id=$2 AND event_id=$3;`, [newNextMissionId, newMissionId, targetEventId]);
+    }
+  }
+
 
   await query(
     `INSERT INTO app_settings(event_id, setting_key, setting_value, updated_at)
@@ -607,6 +617,7 @@ const MESSAGE_SETTING_DEFINITIONS = [
   { key: 'create_prompt', textKey: 'create_team_prompt', label: '팀명 입력 안내', title: '팀 생성' },
   { key: 'team_name_saved', textKey: 'team_name_saved_message', label: '이름/닉네임 입력 안내', title: '팀 생성' },
   { key: 'team_created', textKey: 'team_created_message', label: '팀 생성 완료', title: '팀 생성 완료' },
+  { key: 'mission_guide', textKey: 'mission_guide_message', label: '미션 안내 문구', title: '미션 안내' },
   { key: 'need_team', textKey: 'need_team_message', label: '팀 필요 안내', title: '참가 안내' },
   { key: 'finish', textKey: 'finish_message', label: '완주 종료 멘트', title: '완주 완료' },
 ];
@@ -630,9 +641,14 @@ const DEFAULT_MESSAGE_SETTINGS = {
   team_created_message: `{team_name} 등록 완료!
 
 팀장: {member_name}
-팀코드: {team_code}
+팀코드: {team_code}`,
+  mission_guide_message: `미션 안내
 
-이제 현장 QR코드를 스캔하면 미션이 시작됩니다.`,
+이 미션레이스는 현장 구역을 이동하며 QR코드를 스캔하고, 챗봇이 안내하는 문제를 해결하는 방식으로 진행됩니다.
+
+미션 구역과 진행 순서는 현장 안내문 또는 운영진 안내를 확인해주세요.
+
+준비가 되면 현장 QR코드를 스캔해 첫 미션을 시작해주세요.`,
   need_team_message: `먼저 팀을 만들거나 기존 팀에 참가해주세요.`,
   finish_message: `축하합니다! 완주 처리되었습니다.
 
@@ -706,6 +722,18 @@ function kakaoConfiguredMessage(req, settings, key, text, quickReplies = [], tit
   return kakaoText(text, quickReplies);
 }
 
+function kakaoTeamReadyMessage(req, settings, baseKey, baseText, variables = {}, quickReplies = [], title = '팀 등록 완료') {
+  const guideText = renderTemplate(settings?.mission_guide_message || '', variables).trim();
+  const text = guideText ? `${String(baseText || '').trim()}
+
+${guideText}` : String(baseText || '').trim();
+  const guideImage = guideText ? messageImageUrl(req, settings, 'mission_guide') : '';
+  const baseImage = messageImageUrl(req, settings, baseKey);
+  const imageUrl = guideImage || baseImage;
+  if (imageUrl) return kakaoCard(title, text, [], quickReplies, imageUrl);
+  return kakaoText(text, quickReplies);
+}
+
 function renderTemplate(template = '', variables = {}) {
   return String(template || '').replace(/\{([a-zA-Z0-9_]+)\}/g, (match, key) => {
     const value = variables[key];
@@ -713,10 +741,45 @@ function renderTemplate(template = '', variables = {}) {
   });
 }
 
+const DEFAULT_NEXT_MISSION_MESSAGE_TEMPLATE = `다음 미션: {next_mission_code} {next_mission_name}
+아래 버튼을 누르면 QR을 다시 찍지 않아도 다음 미션을 바로 시작할 수 있습니다.`;
+
+function normalizeNextMissionButtonLabel(value = '') {
+  return (String(value || '').trim() || '다음 미션 시작').slice(0, 20);
+}
+
+function nextMissionTemplateVariables({ event = {}, team = {}, mission = {}, nextMission = {}, actorName = '', total = '' } = {}) {
+  return {
+    event_name: event.event_name || '',
+    event_code: event.event_code || '',
+    team_name: team.team_name || '',
+    team_code: team.team_code || '',
+    actor_name: actorName || '',
+    mission_code: mission.mission_code || '',
+    mission_name: mission.mission_name || '',
+    next_mission_code: nextMission.mission_code || '',
+    next_mission_name: nextMission.mission_name || '',
+    next_mission_type: nextMission.mission_type || '',
+    total_score: total,
+    total,
+  };
+}
+
+function buildNextMissionMessage(mission, nextMission, variables = {}) {
+  if (!nextMission) return '';
+  const template = String(mission?.next_mission_message_template || '').trim() || DEFAULT_NEXT_MISSION_MESSAGE_TEMPLATE;
+  return renderTemplate(template, {
+    ...variables,
+    next_mission_code: nextMission.mission_code || '',
+    next_mission_name: nextMission.mission_name || '',
+    next_mission_type: nextMission.mission_type || '',
+  }).trim();
+}
+
 
 const MISSION_IMAGE_KINDS = new Set(['mission', 'answer']);
 const MAX_MISSION_IMAGES_PER_KIND = 5;
-const MAX_MISSION_IMAGE_BYTES = 2 * 1024 * 1024;
+const MAX_MISSION_IMAGE_BYTES = 5 * 1024 * 1024;
 const ALLOWED_MISSION_IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 function normalizeMissionImageKind(kind = 'mission') {
@@ -734,7 +797,7 @@ function validateMissionImagePayload(image = {}) {
   const imageMime = String(image.image_mime || image.mime || 'image/jpeg').trim().toLowerCase();
   if (!imageData) throw new Error('이미지 데이터가 없습니다.');
   if (!ALLOWED_MISSION_IMAGE_MIMES.has(imageMime)) throw new Error('JPG, PNG, WEBP 이미지만 업로드할 수 있습니다.');
-  if (base64ByteLength(imageData) > MAX_MISSION_IMAGE_BYTES) throw new Error('이미지 1장당 최대 2MB까지만 업로드할 수 있습니다.');
+  if (base64ByteLength(imageData) > MAX_MISSION_IMAGE_BYTES) throw new Error('이미지 1장당 최대 5MB까지만 업로드할 수 있습니다. 관리자 페이지에서 자동 최적화 후 다시 저장해주세요.');
   return { image_data: imageData, image_mime: imageMime, file_name: String(image.file_name || image.filename || '').slice(0, 200) };
 }
 
@@ -784,6 +847,10 @@ async function initDb() {
   await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS wrong_message TEXT NOT NULL DEFAULT '';`);
   await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS wrong_penalty INTEGER NOT NULL DEFAULT -5;`);
   await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS hint_penalty INTEGER NOT NULL DEFAULT -10;`);
+  await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS next_mission_id INTEGER;`);
+  await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS next_mission_button_label TEXT NOT NULL DEFAULT '';`);
+  await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS next_mission_message_template TEXT NOT NULL DEFAULT '';`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_missions_next_mission_id ON missions(next_mission_id);`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS mission_images (
@@ -1051,11 +1118,14 @@ async function getMissions(eventId) {
        m.id, m.event_id, m.mission_code, m.mission_name, m.mission_type, m.question, m.answer,
        m.answer_explanation, m.wrong_message, m.wrong_penalty, m.hint_penalty, m.score, m.hint, m.location_name, m.latitude, m.longitude,
        m.radius_m, m.sort_order, m.is_required, m.created_at,
+       m.next_mission_id, m.next_mission_button_label, m.next_mission_message_template,
+       nm.mission_code AS next_mission_code, nm.mission_name AS next_mission_name,
        COALESCE(mi.mission_image_count, 0)::int AS mission_image_count,
        COALESCE(ai.answer_image_count, 0)::int AS answer_image_count,
        (COALESCE(mi.mission_image_count, 0) > 0 OR m.mission_image_data IS NOT NULL AND m.mission_image_data <> '') AS has_mission_image,
        (COALESCE(ai.answer_image_count, 0) > 0) AS has_answer_image
      FROM missions m
+     LEFT JOIN missions nm ON nm.id=m.next_mission_id AND nm.event_id=m.event_id
      LEFT JOIN (SELECT mission_id, COUNT(*)::int AS mission_image_count FROM mission_images WHERE image_kind='mission' GROUP BY mission_id) mi ON mi.mission_id=m.id
      LEFT JOIN (SELECT mission_id, COUNT(*)::int AS answer_image_count FROM mission_images WHERE image_kind='answer' GROUP BY mission_id) ai ON ai.mission_id=m.id
      WHERE m.event_id=$1
@@ -1792,6 +1862,67 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
   return kakaoText(`${title}\n\n${desc}`, menuQuickReplies);
 }
 
+
+async function resolveAdminNextMissionId(eventId, currentMissionId, nextMissionId) {
+  const id = Number(nextMissionId || 0);
+  if (!id) return null;
+  if (currentMissionId && Number(currentMissionId) === id) return null;
+  const result = await query(
+    `SELECT id FROM missions WHERE event_id=$1 AND id=$2 LIMIT 1;`,
+    [eventId, id]
+  );
+  return result.rows[0] ? Number(result.rows[0].id) : null;
+}
+
+async function getLinkedNextMission(eventId, mission) {
+  const nextMissionId = Number(mission?.next_mission_id || 0);
+  if (!nextMissionId) return null;
+  const result = await query(
+    `SELECT id, mission_code, mission_name, mission_type
+     FROM missions
+     WHERE event_id=$1 AND id=$2
+     LIMIT 1;`,
+    [eventId, nextMissionId]
+  );
+  return result.rows[0] || null;
+}
+
+function linkedNextMissionButton(mission, nextMission) {
+  if (!nextMission) return [];
+  const label = normalizeNextMissionButtonLabel(mission?.next_mission_button_label || '');
+  return [{ action: 'message', label, messageText: String(nextMission.mission_code || '') }];
+}
+
+async function missionCompletionResponse(req, event, mission, text, quickReplies = menuQuickReplies, imageUrls = [], title = '미션 완료', options = {}) {
+  const nextMission = await getLinkedNextMission(event.id, mission);
+  const buttons = linkedNextMissionButton(mission, nextMission);
+  const nextMessage = buildNextMissionMessage(mission, nextMission, nextMissionTemplateVariables({
+    event,
+    team: options.team || {},
+    mission,
+    nextMission,
+    actorName: options.actorName || '',
+    total: options.total ?? '',
+  }));
+  const finalText = nextMessage ? `${text}\n\n${nextMessage}` : text;
+
+  if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, finalText, imageUrls, buttons), quickReplies);
+  if (imageUrls.length === 1) return kakaoCard(title, finalText, buttons, quickReplies, imageUrls[0]);
+  if (buttons.length) return kakaoCard(title, finalText, buttons, quickReplies);
+  return kakaoText(finalText, quickReplies);
+}
+
+async function nextMissionPlainText(eventId, mission, variables = {}) {
+  const nextMission = await getLinkedNextMission(eventId, mission);
+  if (!nextMission) return '';
+  const text = buildNextMissionMessage(mission, nextMission, {
+    ...variables,
+    mission_code: mission?.mission_code || '',
+    mission_name: mission?.mission_name || '',
+  });
+  return text ? `\n${text}` : '';
+}
+
 async function afterMissionCompleted(event, team, mission, kakaoUserId, actorName) {
   await maybeMarkFinished(team, event.id);
   const total = await teamTotalScore(team.id);
@@ -1877,7 +2008,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
 
   const already = await isMissionAlreadyCompleted(team.id, mission.id);
   if (already) {
-    return kakaoText(`이미 완료한 미션입니다.\n\n${mission.mission_code} ${mission.mission_name}\n\n다음 미션으로 이동해주세요.`, menuQuickReplies);
+    return missionCompletionResponse(req, event, mission, `이미 완료한 미션입니다.\n\n${mission.mission_code} ${mission.mission_name}\n\n다음 미션으로 이동해주세요.`, menuQuickReplies, [], `${mission.mission_code} ${mission.mission_name}`, { team, actorName });
   }
 
   if (mission.mission_type === 'quiz') {
@@ -1936,9 +2067,7 @@ ${explanation}` : ''}
 다른 팀원에게도 미션 완료 알림이 표시됩니다.`;
       const answerImages = await getMissionImages(mission.id, 'answer');
       const answerImageUrls = missionImageLinks(req, answerImages);
-      if (answerImageUrls.length > 1) return kakaoCarousel(buildImageCards(`${mission.mission_code} ${mission.mission_name} 정답 설명`, successText, answerImageUrls), menuQuickReplies);
-      if (answerImageUrls.length === 1) return kakaoCard(`${mission.mission_code} ${mission.mission_name} 정답 설명`, successText, [], menuQuickReplies, answerImageUrls[0]);
-      return kakaoText(successText, menuQuickReplies);
+      return missionCompletionResponse(req, event, mission, successText, menuQuickReplies, answerImageUrls, `${mission.mission_code} ${mission.mission_name} 정답 설명`, { team, actorName, total });
     }
     const totalAfterWrong = await teamTotalScore(team.id);
     const wrongTemplate = String(mission.wrong_message || '').trim();
@@ -1967,7 +2096,7 @@ ${explanation}` : ''}
 
     if (ok) {
       const total = await afterMissionCompleted(event, team, mission, kakaoUserId, actorName);
-      return kakaoText(`방문 인증 완료!\n\n수행자: ${actorName}\n획득 점수: ${mission.score}점\n현재 팀 총점: ${total}점`, menuQuickReplies);
+      return missionCompletionResponse(req, event, mission, `방문 인증 완료!\n\n수행자: ${actorName}\n획득 점수: ${mission.score}점\n현재 팀 총점: ${total}점`, menuQuickReplies, [], `${mission.mission_code} ${mission.mission_name} 완료`, { team, actorName, total });
     }
 
     const wrongText = String(mission.wrong_message || '').trim()
@@ -2119,17 +2248,23 @@ async function handleKakaoSkill(req, res) {
       team = await createTeam(event.id, kakaoUserId, teamName, memberName);
       await clearUserState(event.id, kakaoUserId);
 
+      const teamReadyVars = {
+        event_name: event.event_name,
+        event_code: event.event_code,
+        team_name: team.team_name,
+        team_code: team.team_code,
+        member_name: memberName,
+        actor_name: memberName,
+      };
+
       return respondKakao(
         res,
-        kakaoConfiguredMessage(
+        kakaoTeamReadyMessage(
           req,
           messages,
           'team_created',
-          renderTemplate(messages.team_created_message, {
-            team_name: team.team_name,
-            member_name: memberName,
-            team_code: team.team_code,
-          }),
+          renderTemplate(messages.team_created_message, teamReadyVars),
+          teamReadyVars,
           ['미션 목록', '팀원 목록', '도움말'],
           '팀 생성 완료'
         ),
@@ -2165,9 +2300,21 @@ async function handleKakaoSkill(req, res) {
       }
       await clearUserState(event.id, kakaoUserId);
       await addTeamNotice(event.id, team.id, `${memberName}님이 팀에 참가했습니다.`, kakaoUserId);
+      const joinReadyVars = {
+        event_name: event.event_name,
+        event_code: event.event_code,
+        team_name: team.team_name,
+        team_code: team.team_code,
+        member_name: memberName,
+        actor_name: memberName,
+      };
+      const joinText = `${team.team_name} 팀 참가 완료!
+
+이름/닉네임: ${memberName}
+팀코드: ${team.team_code}`;
       return respondKakao(
         res,
-        kakaoText(`${team.team_name} 팀 참가 완료!\n\n이름/닉네임: ${memberName}\n팀코드: ${team.team_code}\n\n이제 같은 팀으로 미션을 진행합니다.`, menuQuickReplies),
+        kakaoTeamReadyMessage(req, messages, 'team_created', joinText, joinReadyVars, menuQuickReplies, '팀 참가 완료'),
         event,
         team,
         kakaoUserId
@@ -2664,10 +2811,11 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
     if (autoApprove) {
       await maybeMarkFinished(team, event.id);
       const total = await teamTotalScore(team.id);
+      const nextText = await nextMissionPlainText(event.id, mission, nextMissionTemplateVariables({ event, team, mission, actorName: actor.actor_name, total }));
       await addTeamNotice(
         event.id,
         team.id,
-        `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} 사진을 업로드했고 자동 승인되었습니다. 현재 팀 점수는 ${total}점입니다.`,
+        `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} 사진을 업로드했고 자동 승인되었습니다. 현재 팀 점수는 ${total}점입니다.${nextText}`,
         actor.actor_kakao_user_id
       );
       return res.json({
@@ -2675,7 +2823,7 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
         auto_approved: true,
         message: `사진이 접수되어 자동 승인되었습니다.
 업로드한 팀원: ${actor.actor_name}
-획득 점수: ${mission.score}점`,
+획득 점수: ${mission.score}점${nextText}`,
       });
     }
 
@@ -2742,17 +2890,19 @@ app.post('/api/public/verify/location', async (req, res) => {
       [event.id, team.id, mission.id, `GPS ${Math.round(distance)}m`, userLat, userLng, distance, actorInfo.actor_kakao_user_id, actorInfo.actor_name, ok ? 'approved' : 'rejected', ok ? mission.score : 0]
     );
 
+    let nextText = '';
     if (ok) {
       await maybeMarkFinished(team, event.id);
       const total = await teamTotalScore(team.id);
-      await addTeamNotice(event.id, team.id, `${actorInfo.actor_name}님이 ${mission.mission_code} ${mission.mission_name} GPS 인증을 완료했습니다. 현재 팀 점수는 ${total}점입니다.`, actorInfo.actor_kakao_user_id);
+      nextText = await nextMissionPlainText(event.id, mission, nextMissionTemplateVariables({ event, team, mission, actorName: actorInfo.actor_name, total }));
+      await addTeamNotice(event.id, team.id, `${actorInfo.actor_name}님이 ${mission.mission_code} ${mission.mission_name} GPS 인증을 완료했습니다. 현재 팀 점수는 ${total}점입니다.${nextText}`, actorInfo.actor_kakao_user_id);
     }
 
     res.json({
       ok,
       distance_m: Math.round(distance),
       message: ok
-        ? `GPS 인증 완료! ${mission.score}점이 반영되었습니다.`
+        ? `GPS 인증 완료! ${mission.score}점이 반영되었습니다.${nextText}`
         : `현재 위치가 미션 장소에서 ${Math.round(distance)}m 떨어져 있습니다. 현장에서 다시 시도해주세요.`,
     });
   } catch (error) {
@@ -3348,11 +3498,14 @@ app.get('/api/admin/missions', requireAdmin, async (req, res) => {
 app.post('/api/admin/missions', requireAdmin, async (req, res) => {
   const event = await getActiveEvent(req);
   const m = req.body;
+  const nextMissionId = await resolveAdminNextMissionId(event.id, null, m.next_mission_id);
+  const nextButtonLabel = normalizeNextMissionButtonLabel(m.next_mission_button_label || '');
+  const nextMessageTemplate = String(m.next_mission_message_template || '').trim();
   const result = await query(
-    `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, question, answer, answer_explanation, wrong_message, wrong_penalty, hint_penalty, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+    `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, question, answer, answer_explanation, wrong_message, wrong_penalty, hint_penalty, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required, next_mission_id, next_mission_button_label, next_mission_message_template)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
      RETURNING id, mission_code, mission_name;`,
-    [event.id, m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty || -5), Number(m.hint_penalty || -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false]
+    [event.id, m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty || -5), Number(m.hint_penalty || -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, nextMissionId, nextButtonLabel, nextMessageTemplate]
   );
   res.json({ ok: true, mission: result.rows[0] });
 });
@@ -3360,9 +3513,12 @@ app.post('/api/admin/missions', requireAdmin, async (req, res) => {
 app.patch('/api/admin/missions/:id', requireAdmin, async (req, res) => {
   const event = await getActiveEvent(req);
   const m = req.body;
+  const nextMissionId = await resolveAdminNextMissionId(event.id, req.params.id, m.next_mission_id);
+  const nextButtonLabel = normalizeNextMissionButtonLabel(m.next_mission_button_label || '');
+  const nextMessageTemplate = String(m.next_mission_message_template || '').trim();
   const result = await query(
-    `UPDATE missions SET mission_code=$1, mission_name=$2, mission_type=$3, question=$4, answer=$5, answer_explanation=$6, wrong_message=$7, wrong_penalty=$8, hint_penalty=$9, score=$10, hint=$11, location_name=$12, latitude=$13, longitude=$14, radius_m=$15, sort_order=$16, is_required=$17 WHERE id=$18 AND event_id=$19 RETURNING id, mission_code, mission_name;`,
-    [m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty || -5), Number(m.hint_penalty || -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, req.params.id, event.id]
+    `UPDATE missions SET mission_code=$1, mission_name=$2, mission_type=$3, question=$4, answer=$5, answer_explanation=$6, wrong_message=$7, wrong_penalty=$8, hint_penalty=$9, score=$10, hint=$11, location_name=$12, latitude=$13, longitude=$14, radius_m=$15, sort_order=$16, is_required=$17, next_mission_id=$18, next_mission_button_label=$19, next_mission_message_template=$20 WHERE id=$21 AND event_id=$22 RETURNING id, mission_code, mission_name;`,
+    [m.mission_code, m.mission_name, m.mission_type, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty || -5), Number(m.hint_penalty || -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, nextMissionId, nextButtonLabel, nextMessageTemplate, req.params.id, event.id]
   );
   if (!result.rows[0]) return res.status(404).json({ ok: false, message: '미션을 찾을 수 없습니다.' });
   res.json({ ok: true, mission: result.rows[0] });
@@ -3390,6 +3546,7 @@ app.delete('/api/admin/mission-images/:id', requireAdmin, async (req, res) => {
 
 app.delete('/api/admin/missions/:id', requireAdmin, async (req, res) => {
   const event = await getActiveEvent(req);
+  await query(`UPDATE missions SET next_mission_id=NULL WHERE event_id=$1 AND next_mission_id=$2;`, [event.id, req.params.id]);
   await query(`DELETE FROM missions WHERE id=$1 AND event_id=$2;`, [req.params.id, event.id]);
   res.json({ ok: true });
 });
@@ -3438,7 +3595,7 @@ app.post('/api/admin/submissions/:id/review', requireAdmin, async (req, res) => 
   }
 
   const sub = (
-    await query(`SELECT s.*, m.score AS mission_score, m.mission_code, m.mission_name FROM submissions s JOIN missions m ON m.id=s.mission_id WHERE s.id=$1;`, [req.params.id])
+    await query(`SELECT s.*, m.score AS mission_score, m.mission_code, m.mission_name, m.next_mission_id, m.next_mission_button_label, m.next_mission_message_template FROM submissions s JOIN missions m ON m.id=s.mission_id WHERE s.id=$1;`, [req.params.id])
   ).rows[0];
 
   if (!sub) return res.status(404).json({ ok: false, message: '제출 기록을 찾을 수 없습니다.' });
@@ -3455,7 +3612,8 @@ app.post('/api/admin/submissions/:id/review', requireAdmin, async (req, res) => 
   if (decision === 'approved') {
     const total = await teamTotalScore(team.id);
     const actorLabel = sub.actor_name || '팀원';
-    await addTeamNotice(sub.event_id, team.id, `${actorLabel}님이 업로드한 ${sub.mission_code} ${sub.mission_name} 사진 미션이 승인되었습니다. 현재 팀 점수는 ${total}점입니다.`, sub.actor_kakao_user_id || '');
+    const nextText = await nextMissionPlainText(sub.event_id, sub, { team_name: team.team_name || '', team_code: team.team_code || '', actor_name: actorLabel, total_score: total, total });
+    await addTeamNotice(sub.event_id, team.id, `${actorLabel}님이 업로드한 ${sub.mission_code} ${sub.mission_name} 사진 미션이 승인되었습니다. 현재 팀 점수는 ${total}점입니다.${nextText}`, sub.actor_kakao_user_id || '');
   }
 
   res.json({ ok: true, submission: result.rows[0] });

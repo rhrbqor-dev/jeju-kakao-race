@@ -142,7 +142,7 @@
       <section id="tab-missions" class="section grid two hidden">
         <div class="card mission-list-card">
           <h2>미션 목록</h2>
-          <div class="table-wrap mission-list-wrap"><table><thead><tr><th>코드</th><th>미션명</th><th>유형</th><th>점수</th><th>오답감점</th><th>힌트감점</th><th>미션 이미지</th><th>정답 설명 이미지</th><th>오답멘트</th><th>정답설명</th><th>관리</th></tr></thead><tbody id="missionBody"></tbody></table></div>
+          <div class="table-wrap mission-list-wrap"><table><thead><tr><th>코드</th><th>미션명</th><th>유형</th><th>점수</th><th>오답감점</th><th>힌트감점</th><th>연결 미션</th><th>연결 안내문</th><th>미션 이미지</th><th>정답 설명 이미지</th><th>오답멘트</th><th>정답설명</th><th>관리</th></tr></thead><tbody id="missionBody"></tbody></table></div>
         </div>
         <div class="card mission-form-card">
           <h2 id="missionFormTitle">미션 추가/수정</h2>
@@ -154,20 +154,26 @@
           <label>미션 이미지 업로드</label>
           <input id="missionImages" type="file" accept="image/jpeg,image/png,image/webp" multiple />
           <div id="missionImageStatus" class="small">등록된 미션 이미지 없음</div>
-          <p class="small">제한: 미션 이미지 최대 5장, 이미지 1장당 최대 2MB, JPG/PNG/WEBP만 업로드할 수 있습니다. 저장 후 카카오톡 미션 시작 화면에 표시됩니다.</p>
+          <p class="small">제한: 미션 이미지 최대 5장, 이미지 1장당 최대 5MB까지 선택할 수 있습니다. 2MB를 넘는 이미지는 업로드 전 자동 최적화됩니다.</p>
           <label>정답(복수 정답은 | 로 구분)</label><input id="missionAnswer" placeholder="해신사|해 신 사" />
           <label>오답 시 출력 멘트</label><textarea id="missionWrongMessage" rows="3" placeholder="비워두면 기본 오답 안내가 표시됩니다. 사용 가능: {wrong_count}, {hint}, {mission_name}, {actor_name}"></textarea>
           <label>정답 설명</label><textarea id="missionAnswerExplanation" rows="4" placeholder="예: 해신사는 바다의 안전과 풍어를 기원하던 장소입니다."></textarea>
           <label>정답 설명 이미지 업로드</label>
           <input id="answerImages" type="file" accept="image/jpeg,image/png,image/webp" multiple />
           <div id="answerImageStatus" class="small">등록된 정답 설명 이미지 없음</div>
-          <p class="small">제한: 정답 설명 이미지 최대 5장, 이미지 1장당 최대 2MB, JPG/PNG/WEBP만 업로드할 수 있습니다. 정답을 맞힌 뒤 설명과 함께 표시됩니다.</p>
+          <p class="small">제한: 정답 설명 이미지 최대 5장, 이미지 1장당 최대 5MB까지 선택할 수 있습니다. 2MB를 넘는 이미지는 업로드 전 자동 최적화됩니다.</p>
           <label>정답/완료 점수</label><input id="missionScore" type="number" value="100" />
           <label>오답 1회 감점</label><input id="missionWrongPenalty" type="number" value="-5" />
           <p class="small">예: -5로 입력하면 오답을 1회 입력할 때마다 팀 점수에서 5점이 차감됩니다.</p>
           <label>힌트 사용 감점</label><input id="missionHintPenalty" type="number" value="-10" />
           <p class="small">예: -10으로 입력하면 해당 미션에서 힌트를 처음 사용할 때 팀 점수에서 10점이 차감됩니다.</p>
           <label>힌트</label><input id="missionHint" placeholder="플레이어가 힌트라고 입력하면 표시됩니다." />
+          <label>완료 후 바로 연결할 다음 미션</label><select id="missionNextId"><option value="">연결 없음</option></select>
+          <label>다음 미션 버튼 문구</label><input id="missionNextButtonLabel" placeholder="예: 다음 미션 시작" value="다음 미션 시작" />
+          <label>다음 미션 안내 문구</label>
+          <textarea id="missionNextMessageTemplate" rows="4" placeholder="비워두면 기본 안내 문구가 표시됩니다.">다음 미션: {next_mission_code} {next_mission_name}
+아래 버튼을 누르면 QR을 다시 찍지 않아도 다음 미션을 바로 시작할 수 있습니다.</textarea>
+          <p class="small">연결 미션을 지정하면 정답/인증 완료 메시지에 카카오톡 버튼이 표시됩니다. 사용 가능: {mission_code}, {mission_name}, {next_mission_code}, {next_mission_name}, {team_name}, {team_code}, {actor_name}, {total}</p>
           <label>장소명</label><input id="missionLocation" />
           <label>GPS 위도</label><input id="missionLat" type="number" step="0.000001" />
           <label>GPS 경도</label><input id="missionLng" type="number" step="0.000001" />
@@ -291,7 +297,7 @@
 
       <section id="tab-messages" class="section card hidden">
         <h2>챗봇 문구 설정</h2>
-        <p class="small">게임 시작, 팀 생성, 완주 종료처럼 미션과 별도로 표시되는 카카오톡 안내 문구를 수정합니다. 아래 치환값을 문구 안에 넣을 수 있습니다: {team_name}, {team_code}, {member_name}, {actor_name}, {total}, {rank}</p>
+        <p class="small">게임 시작, 팀 생성, 미션 안내, 완주 종료처럼 미션과 별도로 표시되는 카카오톡 안내 문구를 수정합니다. 아래 치환값을 문구 안에 넣을 수 있습니다: {event_name}, {event_code}, {team_name}, {team_code}, {member_name}, {actor_name}, {total}, {rank}</p>
         <div class="grid two">
           <div>
             <label>게임 시작 멘트</label>
@@ -334,6 +340,15 @@
               <input id="imgTeamCreated" type="file" accept="image/*" />
               <label class="inline-check"><input id="clearImgTeamCreated" type="checkbox" /> 이미지 삭제</label>
             </div>
+
+            <label>미션 안내 문구 <span class="small">팀명/이름 입력 완료 후 자동 표시</span></label>
+            <textarea id="msgMissionGuide" rows="8" placeholder="미션 진행 방식, 미션 구역, 주의사항 등을 입력하세요."></textarea>
+            <div class="message-image-box">
+              <div id="imgMissionGuideStatus" class="small">등록된 이미지 없음</div>
+              <input id="imgMissionGuide" type="file" accept="image/*" />
+              <label class="inline-check"><input id="clearImgMissionGuide" type="checkbox" /> 이미지 삭제</label>
+            </div>
+            <p class="small">미션 안내는 팀 생성 또는 팀 참가 후 이름/닉네임 입력까지 완료되면 카카오톡에 바로 이어서 표시됩니다.</p>
 
             <label>팀 없이 다른 말을 입력했을 때 안내</label>
             <textarea id="msgNeedTeam" rows="3"></textarea>
@@ -671,6 +686,7 @@ const messageImageFields = [
   { key:'create_prompt', input:'imgCreatePrompt', clear:'clearImgCreatePrompt', status:'imgCreatePromptStatus' },
   { key:'team_name_saved', input:'imgTeamNameSaved', clear:'clearImgTeamNameSaved', status:'imgTeamNameSavedStatus' },
   { key:'team_created', input:'imgTeamCreated', clear:'clearImgTeamCreated', status:'imgTeamCreatedStatus' },
+  { key:'mission_guide', input:'imgMissionGuide', clear:'clearImgMissionGuide', status:'imgMissionGuideStatus' },
   { key:'need_team', input:'imgNeedTeam', clear:'clearImgNeedTeam', status:'imgNeedTeamStatus' },
   { key:'finish', input:'imgFinish', clear:'clearImgFinish', status:'imgFinishStatus' },
 ];
@@ -695,6 +711,7 @@ function fillMessageForm(s = {}, updateImages = true) {
   $('msgCreatePrompt').value = s.create_team_prompt || '';
   $('msgTeamNameSaved').value = s.team_name_saved_message || '';
   $('msgTeamCreated').value = s.team_created_message || '';
+  $('msgMissionGuide').value = s.mission_guide_message || '';
   $('msgNeedTeam').value = s.need_team_message || '';
   $('msgFinish').value = s.finish_message || '';
   if (updateImages) fillMessageImages(s);
@@ -717,6 +734,7 @@ async function collectMessageForm() {
     create_team_prompt: $('msgCreatePrompt').value,
     team_name_saved_message: $('msgTeamNameSaved').value,
     team_created_message: $('msgTeamCreated').value,
+    mission_guide_message: $('msgMissionGuide').value,
     need_team_message: $('msgNeedTeam').value,
     finish_message: $('msgFinish').value,
   };
@@ -918,8 +936,10 @@ async function loadMissions() {
   $('missionBody').innerHTML = data.missions.map(m => {
     const missionImg = Number(m.mission_image_count || 0) > 0 ? `${m.mission_image_count}장` : (m.has_mission_image ? '1장' : '-');
     const answerImg = Number(m.answer_image_count || 0) > 0 ? `${m.answer_image_count}장` : '-';
-    return `<tr><td>${esc(m.mission_code)}</td><td>${esc(m.mission_name)}</td><td>${esc(m.mission_type)}</td><td>${m.score}</td><td>${m.wrong_penalty ?? -5}</td><td>${m.hint_penalty ?? -10}</td><td>${missionImg}</td><td>${answerImg}</td><td>${m.wrong_message ? '있음' : '-'}</td><td>${m.answer_explanation ? '있음' : '-'}</td><td><button class="secondary" onclick="editMission(${m.id})">수정</button> <button class="danger" onclick="deleteMission(${m.id})">삭제</button></td></tr>`;
+    const nextMission = m.next_mission_code ? `${esc(m.next_mission_code)}<br><span class="small">${esc(m.next_mission_name || '')}</span>` : '-';
+    return `<tr><td>${esc(m.mission_code)}</td><td>${esc(m.mission_name)}</td><td>${esc(m.mission_type)}</td><td>${m.score}</td><td>${m.wrong_penalty ?? -5}</td><td>${m.hint_penalty ?? -10}</td><td>${nextMission}</td><td>${m.next_mission_message_template ? '사용자 문구' : '-'}</td><td>${missionImg}</td><td>${answerImg}</td><td>${m.wrong_message ? '있음' : '-'}</td><td>${m.answer_explanation ? '있음' : '-'}</td><td><button class="secondary" onclick="editMission(${m.id})">수정</button> <button class="danger" onclick="deleteMission(${m.id})">삭제</button></td></tr>`;
   }).join('');
+  fillNextMissionOptions($('missionNextId')?.value || '', $('missionId')?.value || '');
 }
 async function review(id, decision) {
   const note = prompt(decision === 'approved' ? '승인 메모(선택)' : '반려 사유(선택)', '') || '';
@@ -937,11 +957,29 @@ function showTab(name) {
   if (name === 'certificate') loadCertificateSettings().catch(e => alert(e.message));
   if (name === 'messages') loadMessageSettings().catch(e => alert(e.message));
 }
+
+function fillNextMissionOptions(selectedValue = '', currentMissionId = '') {
+  const select = $('missionNextId');
+  if (!select) return;
+  const options = ['<option value="">연결 없음</option>'];
+  missionsCache
+    .filter(m => String(m.id) !== String(currentMissionId || ''))
+    .forEach(m => {
+      const label = `${m.mission_code} ${m.mission_name}`;
+      options.push(`<option value="${m.id}">${esc(label)}</option>`);
+    });
+  select.innerHTML = options.join('');
+  select.value = selectedValue ? String(selectedValue) : '';
+}
+
 function editMission(id) {
   const m = missionsCache.find(x => x.id === id); if (!m) return;
   $('missionFormTitle').textContent = '미션 수정';
   $('missionId').value = m.id; $('missionCode').value = m.mission_code; $('missionName').value = m.mission_name; $('missionType').value = m.mission_type;
   $('missionQuestion').value = m.question; $('missionAnswer').value = m.answer; $('missionWrongMessage').value = m.wrong_message || ''; $('missionAnswerExplanation').value = m.answer_explanation || ''; $('missionScore').value = m.score; $('missionWrongPenalty').value = m.wrong_penalty ?? -5; $('missionHintPenalty').value = m.hint_penalty ?? -10; $('missionHint').value = m.hint;
+  fillNextMissionOptions(m.next_mission_id || '', m.id);
+  $('missionNextButtonLabel').value = m.next_mission_button_label || '다음 미션 시작';
+  $('missionNextMessageTemplate').value = m.next_mission_message_template || '다음 미션: {next_mission_code} {next_mission_name}\n아래 버튼을 누르면 QR을 다시 찍지 않아도 다음 미션을 바로 시작할 수 있습니다.';
   $('missionLocation').value = m.location_name; $('missionLat').value = m.latitude || ''; $('missionLng').value = m.longitude || ''; $('missionRadius').value = m.radius_m; $('missionOrder').value = m.sort_order;
   $('missionImages').value = ''; $('answerImages').value = '';
   loadMissionImagesForForm(m.id, 'mission').catch(e => $('missionImageStatus').textContent = e.message);
@@ -951,26 +989,94 @@ function clearMissionForm() {
   ['missionId','missionCode','missionName','missionQuestion','missionAnswer','missionWrongMessage','missionAnswerExplanation','missionHint','missionLocation','missionLat','missionLng'].forEach(id => $(id).value='');
   $('missionFormTitle').textContent = '미션 추가/수정';
   $('missionType').value='quiz'; $('missionScore').value=100; $('missionWrongPenalty').value=-5; $('missionHintPenalty').value=-10; $('missionRadius').value=80; $('missionOrder').value=1;
+  fillNextMissionOptions('', '');
+  $('missionNextButtonLabel').value='다음 미션 시작';
+  $('missionNextMessageTemplate').value='다음 미션: {next_mission_code} {next_mission_name}\n아래 버튼을 누르면 QR을 다시 찍지 않아도 다음 미션을 바로 시작할 수 있습니다.';
   $('missionImages').value=''; $('answerImages').value='';
   $('missionImageStatus').textContent='등록된 미션 이미지 없음';
   $('answerImageStatus').textContent='등록된 정답 설명 이미지 없음';
 }
-const MISSION_IMAGE_LIMITS = { maxCount: 5, maxBytes: 2 * 1024 * 1024, allowed: ['image/jpeg','image/png','image/webp'] };
+const MISSION_IMAGE_LIMITS = { maxCount: 5, uploadMaxBytes: 5 * 1024 * 1024, targetBytes: 2 * 1024 * 1024, allowed: ['image/jpeg','image/png','image/webp'] };
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1]);
+    reader.onerror = () => reject(new Error('이미지를 읽지 못했습니다.'));
+    reader.readAsDataURL(file);
+  });
+}
+function dataUrlToImage(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('이미지 최적화에 실패했습니다. 다른 이미지로 시도해주세요.'));
+    img.src = dataUrl;
+  });
+}
+function canvasToBlob(canvas, mime, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('이미지 압축에 실패했습니다.')), mime, quality);
+  });
+}
+async function optimizeMissionImageFile(file) {
+  const originalDataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error('이미지를 읽지 못했습니다.'));
+    reader.readAsDataURL(file);
+  });
+  const img = await dataUrlToImage(originalDataUrl);
+  const outputMime = file.type === 'image/png' ? 'image/jpeg' : (file.type || 'image/jpeg');
+  const maxSide = 1800;
+  let scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+  let quality = 0.86;
+  let blob = null;
+
+  for (let attempt = 0; attempt < 14; attempt += 1) {
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.width * scale));
+    canvas.height = Math.max(1, Math.round(img.height * scale));
+    const ctx = canvas.getContext('2d');
+    if (outputMime === 'image/jpeg') {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    blob = await canvasToBlob(canvas, outputMime, quality);
+    if (blob.size <= MISSION_IMAGE_LIMITS.targetBytes) break;
+    if (quality > 0.58) quality -= 0.08;
+    else scale *= 0.85;
+  }
+
+  if (!blob || blob.size > MISSION_IMAGE_LIMITS.uploadMaxBytes) {
+    throw new Error(`${file.name} 이미지는 자동 최적화 후에도 5MB를 초과합니다. 이미지 크기를 줄인 뒤 다시 업로드해주세요.`);
+  }
+
+  const optimizedFile = new File([blob], file.name.replace(/\.[^.]+$/, '') + '_optimized' + (outputMime === 'image/webp' ? '.webp' : '.jpg'), { type: outputMime });
+  return { file: optimizedFile, optimized: true, originalSize: file.size, finalSize: optimizedFile.size };
+}
+async function prepareMissionImageFile(file) {
+  if (!MISSION_IMAGE_LIMITS.allowed.includes(file.type)) throw new Error('JPG, PNG, WEBP 이미지만 업로드할 수 있습니다.');
+  if (file.size > MISSION_IMAGE_LIMITS.uploadMaxBytes) throw new Error(`${file.name} 파일이 5MB를 초과합니다. 먼저 이미지 크기를 줄여주세요.`);
+  if (file.size <= MISSION_IMAGE_LIMITS.targetBytes) return { file, optimized: false, originalSize: file.size, finalSize: file.size };
+  return optimizeMissionImageFile(file);
+}
 async function readImageFiles(inputId) {
   const files = Array.from($(inputId).files || []);
   if (!files.length) return [];
   if (files.length > MISSION_IMAGE_LIMITS.maxCount) throw new Error('이미지는 최대 5장까지 한 번에 선택할 수 있습니다.');
   const images = [];
   for (const file of files) {
-    if (!MISSION_IMAGE_LIMITS.allowed.includes(file.type)) throw new Error('JPG, PNG, WEBP 이미지만 업로드할 수 있습니다.');
-    if (file.size > MISSION_IMAGE_LIMITS.maxBytes) throw new Error('이미지 1장당 최대 2MB까지만 업로드할 수 있습니다.');
-    const data = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result).split(',')[1]);
-      reader.onerror = () => reject(new Error('이미지를 읽지 못했습니다.'));
-      reader.readAsDataURL(file);
+    const prepared = await prepareMissionImageFile(file);
+    const data = await fileToBase64(prepared.file);
+    images.push({
+      image_data: data,
+      image_mime: prepared.file.type,
+      file_name: prepared.file.name,
+      optimized: prepared.optimized,
+      original_size: prepared.originalSize,
+      final_size: prepared.finalSize,
     });
-    images.push({ image_data: data, image_mime: file.type, file_name: file.name });
   }
   return images;
 }
@@ -992,24 +1098,35 @@ async function deleteMissionImage(imageId, kind) {
   await loadMissions();
 }
 async function uploadMissionImages(missionId, kind, inputId) {
+  const statusEl = kind === 'answer' ? $('answerImageStatus') : $('missionImageStatus');
   const images = await readImageFiles(inputId);
   if (!images.length) return;
+  const optimizedCount = images.filter(img => img.optimized).length;
+  if (optimizedCount && statusEl) statusEl.textContent = `${optimizedCount}장 자동 최적화 후 업로드 중입니다...`;
   await api(`/api/admin/missions/${missionId}/images`, { method:'POST', body: JSON.stringify({ kind, images }) });
   $(inputId).value = '';
 }
 async function saveMission() {
-  const body = {
-    mission_code:$('missionCode').value.trim(), mission_name:$('missionName').value.trim(), mission_type:$('missionType').value,
-    question:$('missionQuestion').value, answer:$('missionAnswer').value, wrong_message:$('missionWrongMessage').value, answer_explanation:$('missionAnswerExplanation').value, score:Number($('missionScore').value||0), wrong_penalty:Number($('missionWrongPenalty').value||-5), hint_penalty:Number($('missionHintPenalty').value||-10), hint:$('missionHint').value,
-    location_name:$('missionLocation').value, latitude:$('missionLat').value ? Number($('missionLat').value) : null, longitude:$('missionLng').value ? Number($('missionLng').value) : null,
-    radius_m:Number($('missionRadius').value||80), sort_order:Number($('missionOrder').value||0), is_required:true
-  };
-  const id = $('missionId').value;
-  const data = await api(id ? `/api/admin/missions/${id}` : '/api/admin/missions', { method:id?'PATCH':'POST', body: JSON.stringify(body) });
-  const missionId = id || data.mission.id;
-  await uploadMissionImages(missionId, 'mission', 'missionImages');
-  await uploadMissionImages(missionId, 'answer', 'answerImages');
-  clearMissionForm(); await loadAll();
+  try {
+    const body = {
+      mission_code:$('missionCode').value.trim(), mission_name:$('missionName').value.trim(), mission_type:$('missionType').value,
+      question:$('missionQuestion').value, answer:$('missionAnswer').value, wrong_message:$('missionWrongMessage').value, answer_explanation:$('missionAnswerExplanation').value, score:Number($('missionScore').value||0), wrong_penalty:Number($('missionWrongPenalty').value||-5), hint_penalty:Number($('missionHintPenalty').value||-10), hint:$('missionHint').value,
+      next_mission_id:$('missionNextId')?.value ? Number($('missionNextId').value) : null,
+      next_mission_button_label:($('missionNextButtonLabel')?.value || '다음 미션 시작').trim(),
+      next_mission_message_template:($('missionNextMessageTemplate')?.value || '').trim(),
+      location_name:$('missionLocation').value, latitude:$('missionLat').value ? Number($('missionLat').value) : null, longitude:$('missionLng').value ? Number($('missionLng').value) : null,
+      radius_m:Number($('missionRadius').value||80), sort_order:Number($('missionOrder').value||0), is_required:true
+    };
+    const id = $('missionId').value;
+    const data = await api(id ? `/api/admin/missions/${id}` : '/api/admin/missions', { method:id?'PATCH':'POST', body: JSON.stringify(body) });
+    const missionId = id || data.mission.id;
+    await uploadMissionImages(missionId, 'mission', 'missionImages');
+    await uploadMissionImages(missionId, 'answer', 'answerImages');
+    clearMissionForm(); await loadAll();
+    alert('미션이 저장되었습니다.');
+  } catch (error) {
+    alert(error.message || '미션 저장 중 오류가 발생했습니다.');
+  }
 }
 async function deleteMission(id) { if(confirm('정말 삭제할까요? 제출 기록도 함께 삭제될 수 있습니다.')) { await api(`/api/admin/missions/${id}`, { method:'DELETE' }); await loadAll(); } }
 function downloadCsv() { location.href = eventUrl(`/api/admin/export/rankings.csv?admin_password=${encodeURIComponent(adminPassword)}`); }
