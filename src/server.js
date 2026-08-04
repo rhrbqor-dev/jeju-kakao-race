@@ -619,6 +619,7 @@ const MESSAGE_SETTING_DEFINITIONS = [
   { key: 'team_created', textKey: 'team_created_message', titleKey: 'team_created_title', label: '팀 생성 완료', title: '팀 생성 완료' },
   { key: 'mission_guide', textKey: 'mission_guide_message', titleKey: 'mission_guide_title', label: '미션 안내 문구', title: '미션 안내' },
   { key: 'no_teams', textKey: 'no_teams_message', titleKey: 'no_teams_title', label: '참가 가능한 팀 없음 안내', title: '팀 참가' },
+  { key: 'mission_list', textKey: 'mission_list_message', titleKey: 'mission_list_title', label: '미션 목록 안내', title: '' },
   { key: 'need_team', textKey: 'need_team_message', titleKey: 'need_team_title', label: '팀 필요 안내', title: '참가 안내' },
   { key: 'finish', textKey: 'finish_message', titleKey: 'finish_title', label: '완주 종료 멘트', title: '완주 완료' },
 ];
@@ -639,6 +640,7 @@ const DEFAULT_MESSAGE_SETTINGS = {
   team_created_title: '팀 생성 완료',
   mission_guide_title: '미션 안내',
   no_teams_title: '팀 참가',
+  mission_list_title: '',
   need_team_title: '참가 안내',
   finish_title: '완주 완료',
   start_message: `{event_name}에 오신 것을 환영합니다!
@@ -667,6 +669,11 @@ const DEFAULT_MESSAGE_SETTINGS = {
   no_teams_message: `아직 생성된 팀이 없습니다.
 
 새 팀을 만들려면 "팀 생성"을 입력해주세요.`,
+  mission_list_message: `미션 목록입니다.
+
+{mission_list}
+
+✅ 표시된 미션은 팀원 중 누가 수행했는지도 함께 표시됩니다.`,
   need_team_message: `먼저 팀을 만들거나 기존 팀에 참가해주세요.`,
   finish_message: `축하합니다! 완주 처리되었습니다.
 
@@ -2055,7 +2062,7 @@ async function completedMissionDetails(teamId) {
   return map;
 }
 
-async function handleMissionList(event, team) {
+async function handleMissionList(req, event, team, messages = DEFAULT_MESSAGE_SETTINGS) {
   const missions = await getMissions(event.id);
   const completedMap = team ? await completedMissionDetails(team.id) : new Map();
   const lines = missions.map((m) => {
@@ -2067,7 +2074,22 @@ async function handleMissionList(event, team) {
     const imageLabel = m.has_mission_image ? ' 🖼️' : '';
     return `⬜ ${m.mission_code} ${m.mission_name}${imageLabel} (${m.score}점)`;
   });
-  return kakaoText(`미션 목록입니다.\n\n${lines.join('\n')}\n\n✅ 표시된 미션은 팀원 중 누가 수행했는지도 함께 표시됩니다.`, menuQuickReplies);
+
+  const missionList = lines.length ? lines.join('\n') : '등록된 미션이 없습니다.';
+  const completedCount = completedMap.size;
+  const variables = {
+    ...eventTemplateVars(event, team),
+    mission_list: missionList,
+    mission_count: missions.length,
+    completed_count: completedCount,
+    remaining_count: Math.max(0, missions.length - completedCount),
+  };
+  const rawTemplate = messages?.mission_list_message || DEFAULT_MESSAGE_SETTINGS.mission_list_message;
+  const template = String(rawTemplate || '').includes('{mission_list}')
+    ? rawTemplate
+    : `${String(rawTemplate || '').trim()}\n\n{mission_list}`;
+  const text = renderTemplate(template, variables).trim() || missionList;
+  return kakaoConfiguredMessage(req, messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list', text, menuQuickReplies, '');
 }
 
 async function handleScore(team) {
@@ -2298,7 +2320,7 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
     return kakaoText(`${title}\n\n${desc}`, quickReplies);
   }
 
-  const desc = imageUrls.length ? `${mission.question}\n\n이미지와 현장 단서를 함께 확인한 뒤 정답을 입력해주세요.` : `${mission.question}\n\n정답을 입력해주세요.`;
+  const desc = String(mission.question || '').trim();
   if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls), menuQuickReplies);
   if (imageUrls.length === 1) return kakaoCard(title, desc, [], menuQuickReplies, imageUrls[0]);
   return kakaoText(`${title}\n\n${desc}`, menuQuickReplies);
@@ -2917,7 +2939,7 @@ async function handleKakaoSkill(req, res) {
     }
 
     if (isMissionListCommand(utterance)) {
-      return respondKakao(res, await handleMissionList(event, team), event, team, kakaoUserId);
+      return respondKakao(res, await handleMissionList(req, event, team, messages), event, team, kakaoUserId);
     }
 
     if (isHintCommand(utterance)) {

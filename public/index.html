@@ -323,7 +323,7 @@
 
       <section id="tab-messages" class="section card hidden">
         <h2>챗봇 문구 설정</h2>
-        <p class="small">게임 시작, 팀 생성, 미션 안내, 완주 종료처럼 미션과 별도로 표시되는 카카오톡 안내 문구를 수정합니다. 아래 치환값을 문구 안에 넣을 수 있습니다: {event_name}, {event_code}, {team_name}, {team_code}, {member_name}, {actor_name}, {total}, {rank}</p>
+        <p class="small">게임 시작, 팀 생성, 미션 안내, 완주 종료처럼 미션과 별도로 표시되는 카카오톡 안내 문구를 수정합니다. 아래 치환값을 문구 안에 넣을 수 있습니다: {event_name}, {event_code}, {team_name}, {team_code}, {member_name}, {actor_name}, {total}, {rank}, {mission_list}, {mission_count}, {completed_count}, {remaining_count}</p>
         <div class="grid two">
           <div>
             <label>게임 시작 카드 제목 <span class="small">비워두면 제목 없이 표시</span></label>
@@ -404,6 +404,18 @@
               <input id="imgNoTeams" type="file" accept="image/*" />
               <label class="inline-check"><input id="clearImgNoTeams" type="checkbox" /> 이미지 삭제</label>
             </div>
+
+            <label>미션 목록 카드 제목 <span class="small">비워두면 제목 없이 표시</span></label>
+            <input id="msgMissionListTitle" placeholder="예: 미션 목록" />
+            <label>미션 목록 안내 문구 <span class="small">미션 목록 입력 시 표시</span></label>
+            <textarea id="msgMissionList" rows="6" placeholder="미션 목록 위/아래 안내 문구를 입력하세요."></textarea>
+            <p id="msgMissionListCount" class="small"></p>
+            <div class="message-image-box">
+              <div id="imgMissionListStatus" class="small">등록된 이미지 없음</div>
+              <input id="imgMissionList" type="file" accept="image/*" />
+              <label class="inline-check"><input id="clearImgMissionList" type="checkbox" /> 이미지 삭제</label>
+            </div>
+            <p class="small">미션 목록 문구에는 반드시 <b>{mission_list}</b>를 넣어주세요. 이 위치에 실제 미션 목록이 자동으로 들어갑니다.</p>
 
             <label>팀 필요 안내 카드 제목</label>
             <input id="msgNeedTeamTitle" placeholder="예: 참가 안내" />
@@ -790,6 +802,7 @@ const messageImageFields = [
   { key:'team_created', input:'imgTeamCreated', clear:'clearImgTeamCreated', status:'imgTeamCreatedStatus' },
   { key:'mission_guide', input:'imgMissionGuide', clear:'clearImgMissionGuide', status:'imgMissionGuideStatus' },
   { key:'no_teams', input:'imgNoTeams', clear:'clearImgNoTeams', status:'imgNoTeamsStatus' },
+  { key:'mission_list', input:'imgMissionList', clear:'clearImgMissionList', status:'imgMissionListStatus' },
   { key:'need_team', input:'imgNeedTeam', clear:'clearImgNeedTeam', status:'imgNeedTeamStatus' },
   { key:'finish', input:'imgFinish', clear:'clearImgFinish', status:'imgFinishStatus' },
 ];
@@ -816,6 +829,7 @@ const messageTextFields = [
   { text:'msgTeamCreated', title:'msgTeamCreatedTitle', count:'msgTeamCreatedCount', titleKey:'team_created_title' },
   { text:'msgMissionGuide', title:'msgMissionGuideTitle', count:'msgMissionGuideCount', titleKey:'mission_guide_title' },
   { text:'msgNoTeams', title:'msgNoTeamsTitle', count:'msgNoTeamsCount', titleKey:'no_teams_title' },
+  { text:'msgMissionList', title:'msgMissionListTitle', count:'msgMissionListCount', titleKey:'mission_list_title' },
   { text:'msgNeedTeam', title:'msgNeedTeamTitle', count:'msgNeedTeamCount', titleKey:'need_team_title' },
   { text:'msgFinish', title:'msgFinishTitle', count:'msgFinishCount', titleKey:'finish_title' },
 ];
@@ -862,6 +876,7 @@ function fillMessageForm(s = {}, updateImages = true) {
   $('msgTeamCreated').value = s.team_created_message || '';
   $('msgMissionGuide').value = s.mission_guide_message || '';
   $('msgNoTeams').value = s.no_teams_message || '';
+  $('msgMissionList').value = s.mission_list_message || '';
   $('msgNeedTeam').value = s.need_team_message || '';
   $('msgFinish').value = s.finish_message || '';
   messageTextFields.forEach(f => { if ($(f.title)) $(f.title).value = s[f.titleKey] || ''; });
@@ -889,6 +904,7 @@ async function collectMessageForm() {
     team_created_message: $('msgTeamCreated').value,
     mission_guide_message: $('msgMissionGuide').value,
     no_teams_message: $('msgNoTeams').value,
+    mission_list_message: $('msgMissionList').value,
     need_team_message: $('msgNeedTeam').value,
     finish_message: $('msgFinish').value,
     start_title: $('msgStartTitle').value,
@@ -898,6 +914,7 @@ async function collectMessageForm() {
     team_created_title: $('msgTeamCreatedTitle').value,
     mission_guide_title: $('msgMissionGuideTitle').value,
     no_teams_title: $('msgNoTeamsTitle').value,
+    mission_list_title: $('msgMissionListTitle').value,
     need_team_title: $('msgNeedTeamTitle').value,
     finish_title: $('msgFinishTitle').value,
   };
