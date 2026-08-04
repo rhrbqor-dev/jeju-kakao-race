@@ -159,6 +159,36 @@ function extractKakaoRawQr(body) {
   }
 }
 
+function extractKakaoSecureImageUrls(body) {
+  const params = body?.action?.params || {};
+  const detailParams = body?.action?.detailParams || {};
+  const raw = params.secureimage || params.secure_image || detailParams.secureimage?.value || detailParams.secure_image?.value || '';
+  if (!raw) return [];
+  let parsed = raw;
+  try {
+    parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  } catch {
+    parsed = { secureUrls: raw };
+  }
+  const secureUrls = parsed?.secureUrls ?? parsed?.secure_urls ?? '';
+  if (Array.isArray(secureUrls)) return secureUrls.map((url) => String(url || '').trim()).filter((url) => /^https?:\/\//i.test(url));
+  const text = String(secureUrls || '').trim();
+  const listText = /^List\([\s\S]*\)$/i.test(text) ? text.slice(5, -1) : text;
+  return listText.split(',').map((url) => url.trim()).filter((url) => /^https?:\/\//i.test(url));
+}
+
+async function downloadKakaoSecureImage(imageUrl) {
+  const response = await fetch(imageUrl, { signal: AbortSignal.timeout(10000) });
+  if (!response.ok) throw new Error('카카오에서 전송한 사진을 내려받지 못했습니다. 다시 제출해주세요.');
+  const mime = String(response.headers.get('content-type') || 'image/jpeg').split(';')[0].trim().toLowerCase();
+  if (!ALLOWED_MISSION_IMAGE_MIMES.has(mime)) throw new Error('JPG, PNG, WEBP 사진만 제출할 수 있습니다.');
+  const declaredBytes = Number(response.headers.get('content-length') || 0);
+  if (declaredBytes > 8 * 1024 * 1024) throw new Error('사진 용량은 최대 8MB까지 제출할 수 있습니다.');
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length > 8 * 1024 * 1024) throw new Error('사진 용량은 최대 8MB까지 제출할 수 있습니다.');
+  return { image_data: bytes.toString('base64'), image_mime: mime };
+}
+
 function extractEventIdentifierFromText(value = '') {
   const text = String(value || '').trim();
   if (!text) return '';
@@ -1754,7 +1784,6 @@ ${promptText}`.trim();
 
   if (firstOutput.simpleText?.text) {
     firstOutput.basicCard = {
-      title: '완주 미션 안내',
       description: `${String(firstOutput.simpleText.text || '').trim()}
 
 ${promptText}`.trim(),
@@ -2055,20 +2084,14 @@ async function getReadyCompleteMission(eventId, teamId) {
 
 function completeMissionPromptText(mission) {
   if (!mission) return '';
-  const question = String(mission.question || '').trim();
-  return `🎉 모든 필수 미션을 완료했습니다!
-
-완주 미션: ${mission.mission_code} ${mission.mission_name}${question ? `
-
-${question}` : ''}
-
-아래 버튼을 누르면 완주 처리를 진행할 수 있습니다.`;
+  // 관리자가 완주 미션에 작성한 문구 외에는 자동 문장을 붙이지 않습니다.
+  return String(mission.question || '').trim();
 }
 
 function completeMissionButton(mission) {
   if (!mission) return [];
   const messageText = firstRawAnswer(mission.answer || '완주');
-  return [{ action: 'message', label: '완주하기', messageText }];
+  return [{ action: 'message', label: String(messageText || '완주').slice(0, 12), messageText }];
 }
 
 async function activateCompleteMissionIfReady(eventId, team, currentMission = null) {
@@ -2524,13 +2547,12 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
   const messageSettings = await getMessageSettings(event.id);
 
   if (mission.mission_type === 'photo') {
-    const url = `${baseUrl(req)}/upload?event=${encodeURIComponent(eventQueryValue(event))}&team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}&actor=${encodeURIComponent(kakaoUserId)}`;
     const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
     const desc = renderTemplate(messageSettings.photo_mission_guide_message, {
       ...eventTemplateVars(event, team), question: mission.question, mission_code: mission.mission_code,
       mission_name: mission.mission_name, score: mission.score,
     });
-    const buttons = [{ action: 'webLink', label: '사진 업로드', webLinkUrl: url }];
+    const buttons = [{ action: 'message', label: '사진 업로드', messageText: '사진 인증' }];
     if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls, buttons), menuQuickReplies);
     return kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || '');
   }
@@ -2538,20 +2560,20 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
     const url = `${baseUrl(req)}/gps?event=${encodeURIComponent(eventQueryValue(event))}&team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}&actor=${encodeURIComponent(kakaoUserId)}`;
     const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
     const desc = `${mission.question}\n\n아래 버튼을 눌러 위치 권한을 허용해주세요.`;
-    const fallbackUrl = `${baseUrl(req)}/upload?event=${encodeURIComponent(eventQueryValue(event))}&team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}&actor=${encodeURIComponent(kakaoUserId)}&fallback=gps`;
     const buttons = [
       { action: 'webLink', label: 'GPS 인증하기', webLinkUrl: url },
-      { action: 'webLink', label: 'GPS가 안 될 때 사진 인증', webLinkUrl: fallbackUrl },
+      { action: 'message', label: 'GPS가 안 될 때 사진 인증', messageText: 'GPS 대체 사진 인증' },
     ];
     if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls, buttons), menuQuickReplies);
     return kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || '');
   }
   if (mission.mission_type === 'complete') {
     const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
-    const desc = `${mission.question}\n\n완료하려면 '${mission.answer || '완주'}'라고 입력해주세요.`;
-    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls), ['완주', ...menuQuickReplies]);
-    if (imageUrls.length === 1) return kakaoCard(title, desc, [], ['완주', ...menuQuickReplies], imageUrls[0]);
-    return kakaoText(desc, ['완주', ...menuQuickReplies]);
+    const desc = String(mission.question || '').trim();
+    const completeReply = firstRawAnswer(mission.answer || '완주');
+    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls), [completeReply, ...menuQuickReplies]);
+    if (imageUrls.length === 1) return kakaoCard(title, desc, [], [completeReply, ...menuQuickReplies], imageUrls[0]);
+    return kakaoText(desc, [completeReply, ...menuQuickReplies]);
   }
   const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
   const quizType = normalizeQuizType(mission.quiz_type || 'short');
@@ -2658,7 +2680,8 @@ async function nextMissionPlainText(eventId, mission, variables = {}) {
 async function nextOrCompleteMissionPlainText(eventId, team, mission, variables = {}) {
   const autoCompleteMission = await activateCompleteMissionIfReady(eventId, team, mission);
   if (autoCompleteMission) {
-    return `\n\n${completeMissionPromptText(autoCompleteMission)}\n카카오톡 챗봇에서 "${firstRawAnswer(autoCompleteMission.answer || '완주')}"를 입력해도 완주 처리가 가능합니다.`;
+    const authoredText = completeMissionPromptText(autoCompleteMission);
+    return authoredText ? `\n\n${authoredText}` : '';
   }
   return nextMissionPlainText(eventId, mission, variables);
 }
@@ -2732,6 +2755,57 @@ ${inserted ? `힌트 사용 감점: ${penalty}점` : '이 미션의 힌트 감�
 현재 팀 총점: ${total}점`,
     menuQuickReplies
   );
+}
+
+async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, messages, imageUrls = []) {
+  if (!team) return kakaoConfiguredMessage(req, messages, 'need_team', messages.need_team_message, startQuickReplies, '참가 안내');
+  const teamReload = (await query(`SELECT * FROM teams WHERE id=$1 AND event_id=$2;`, [team.id, event.id])).rows[0];
+  if (!teamReload?.current_mission_id) return kakaoText('먼저 사진 미션을 시작해주세요.', menuQuickReplies);
+  const mission = (await query(`SELECT * FROM missions WHERE id=$1 AND event_id=$2;`, [teamReload.current_mission_id, event.id])).rows[0];
+  if (!mission || !['photo', 'gps'].includes(mission.mission_type)) return kakaoText('현재 진행 중인 미션은 사진 인증 미션이 아닙니다.', menuQuickReplies);
+
+  const actor = await resolveActorForTeam(event.id, team.id, kakaoUserId, team.leader_name || '팀원');
+  if (await isMissionAlreadyCompleted(team.id, mission.id)) {
+    return kakaoAlreadyCompletedMissionMessage(req, event, team, mission, actor.actor_name, messages);
+  }
+  const pending = await query(
+    `SELECT id FROM submissions WHERE event_id=$1 AND team_id=$2 AND mission_id=$3 AND actor_kakao_user_id=$4 AND status='pending' LIMIT 1;`,
+    [event.id, team.id, mission.id, actor.actor_kakao_user_id]
+  );
+  if (pending.rows.length) return kakaoText('이미 제출한 사진이 승인 대기 중입니다.', menuQuickReplies);
+
+  const image = await downloadKakaoSecureImage(imageUrls[0]);
+  const photoAutoApproval = await getPhotoAutoApprovalSettings(event.id);
+  const autoApprove = isPhotoAutoApprovalActive(photoAutoApproval);
+  const status = autoApprove ? 'approved' : 'pending';
+  const score = autoApprove ? Number(mission.score || 0) : 0;
+  await query(
+    `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, image_data, image_mime, actor_kakao_user_id, actor_name, submission_key, status, score, reviewed_at, review_note)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,CASE WHEN $10='approved' THEN NOW() ELSE NULL END,$12);`,
+    [event.id, team.id, mission.id, mission.mission_type === 'gps' ? '카카오 GPS 대체 사진 인증' : '카카오 이미지 보안전송', image.image_data, image.image_mime, actor.actor_kakao_user_id, actor.actor_name, `secureimage:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`, status, score, autoApprove ? '카카오 이미지 보안전송 자동 승인' : '']
+  );
+
+  if (!autoApprove) {
+    await addTeamNotice(event.id, team.id, `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} 사진을 업로드했습니다. 운영자 승인 후 점수가 반영됩니다.`, actor.actor_kakao_user_id);
+    const pendingText = cleanRenderedMessage(renderTemplate(messages.photo_upload_pending_message, {
+      ...eventTemplateVars(event, team, actor.actor_name), mission_code: mission.mission_code,
+      mission_name: mission.mission_name, actor_name: actor.actor_name, photo_type: mission.mission_type === 'gps' ? 'GPS 대체 사진' : '사진',
+    }));
+    return kakaoText(pendingText, menuQuickReplies);
+  }
+
+  const total = await afterMissionCompleted(event, team, mission, kakaoUserId, actor.actor_name);
+  const approvedText = cleanRenderedMessage(renderTemplate(messages.photo_upload_approved_message, {
+    ...eventTemplateVars(event, team, actor.actor_name), mission_code: mission.mission_code,
+    mission_name: mission.mission_name, actor_name: actor.actor_name, earned_score: score,
+    total, answer_explanation: mission.answer_explanation || '', next_message: '',
+    photo_type: mission.mission_type === 'gps' ? 'GPS 대체 사진' : '사진',
+  }));
+  const answerImages = await getMissionImages(mission.id, 'answer');
+  const answerImageUrls = missionImageLinks(req, answerImages);
+  return missionCompletionResponse(req, event, mission, approvedText, menuQuickReplies, answerImageUrls, '', {
+    team, actorName: actor.actor_name, total, settings: messages,
+  });
 }
 
 async function handleAnswer(req, event, team, utterance, kakaoUserId, messages = DEFAULT_MESSAGE_SETTINGS) {
@@ -2938,7 +3012,9 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
   if (mission.mission_type === 'complete') {
     const acceptable = splitAnswers(mission.answer || '완주');
     if (!acceptable.includes(normalizeAnswer(utterance))) {
-      return kakaoText(`완료하려면 '${mission.answer || '완주'}'라고 입력해주세요.`, ['완주', ...menuQuickReplies]);
+      const authoredMessage = String(mission.wrong_message || mission.question || '').trim();
+      const completeReply = firstRawAnswer(mission.answer || '완주');
+      return kakaoText(authoredMessage, [completeReply, ...menuQuickReplies]);
     }
 
     await query(
@@ -3039,6 +3115,12 @@ async function handleKakaoSkill(req, res) {
     let team = await getTeamByKakaoUser(event.id, kakaoUserId);
     const userState = await getUserState(event.id, kakaoUserId);
     const data = stateData(userState);
+    const secureImageUrls = extractKakaoSecureImageUrls(req.body);
+
+    if (secureImageUrls.length) {
+      const response = await handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, messages, secureImageUrls);
+      return respondKakao(res, response, event, team, kakaoUserId);
+    }
 
     if (isCancelCommand(utterance)) {
       await clearUserState(event.id, kakaoUserId);
@@ -3644,15 +3726,16 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
       await maybeMarkFinished(team, event.id);
       const total = await teamTotalScore(team.id);
       const nextText = await nextOrCompleteMissionPlainText(event.id, team, mission, nextMissionTemplateVariables({ event, team, mission, actorName: actor.actor_name, total }));
+      const approvedNotice = cleanRenderedMessage(renderTemplate(messages.photo_review_approved_message, {
+        team_name: team.team_name, team_code: team.team_code, actor_name: actor.actor_name,
+        mission_code: mission.mission_code, mission_name: mission.mission_name, total,
+        earned_score: mission.score, answer_explanation: mission.answer_explanation || '',
+        next_message: String(nextText || '').trim(), photo_type: gpsFallback ? 'GPS 대체 사진' : '사진',
+      }));
       await addTeamNotice(
         event.id,
         team.id,
-        cleanRenderedMessage(renderTemplate(messages.photo_review_approved_message, {
-          team_name: team.team_name, team_code: team.team_code, actor_name: actor.actor_name,
-          mission_code: mission.mission_code, mission_name: mission.mission_name, total,
-          earned_score: mission.score, answer_explanation: mission.answer_explanation || '',
-          next_message: String(nextText || '').trim(), photo_type: gpsFallback ? 'GPS 대체 사진' : '사진',
-        })),
+        approvedNotice,
         ''
       );
       return res.json({
@@ -3668,11 +3751,12 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
     }
 
     await addTeamNotice(event.id, team.id, `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} ${gpsFallback ? 'GPS 대체 사진' : '사진'}을 업로드했습니다. 운영자 승인 후 점수가 반영됩니다.`, actor.actor_kakao_user_id);
-    res.json({ ok: true, message: cleanRenderedMessage(renderTemplate(messages.photo_upload_pending_message, {
+    const pendingMessage = cleanRenderedMessage(renderTemplate(messages.photo_upload_pending_message, {
       ...eventTemplateVars(event, team, actor.actor_name), mission_code: mission.mission_code,
       mission_name: mission.mission_name, actor_name: actor.actor_name,
       photo_type: gpsFallback ? 'GPS 대체 사진' : '사진',
-    })) });
+    }));
+    res.json({ ok: true, message: pendingMessage });
   } catch (error) {
     console.error('Photo upload failed:', error);
     res.status(500).json({ ok: false, message: error.message });
@@ -4489,18 +4573,20 @@ app.post('/api/admin/submissions/:id/review', requireAdmin, async (req, res) => 
     const total = await teamTotalScore(team.id);
     const actorLabel = sub.actor_name || '팀원';
     const nextText = await nextOrCompleteMissionPlainText(sub.event_id, team, sub, { team_name: team.team_name || '', team_code: team.team_code || '', actor_name: actorLabel, total_score: total, total });
-    await addTeamNotice(sub.event_id, team.id, cleanRenderedMessage(renderTemplate(messages.photo_review_approved_message, {
+    const reviewMessage = cleanRenderedMessage(renderTemplate(messages.photo_review_approved_message, {
       team_name: team.team_name, team_code: team.team_code, actor_name: actorLabel,
       mission_code: sub.mission_code, mission_name: sub.mission_name, total,
       earned_score: score, answer_explanation: sub.answer_explanation || '', next_message: String(nextText || '').trim(),
-    })), '');
+    }));
+    await addTeamNotice(sub.event_id, team.id, reviewMessage, '');
   } else {
     const actorLabel = sub.actor_name || '팀원';
-    await addTeamNotice(sub.event_id, team.id, cleanRenderedMessage(renderTemplate(messages.photo_review_rejected_message, {
+    const reviewMessage = cleanRenderedMessage(renderTemplate(messages.photo_review_rejected_message, {
       team_name: team.team_name, team_code: team.team_code, actor_name: actorLabel,
       mission_code: sub.mission_code, mission_name: sub.mission_name,
       wrong_message: sub.wrong_message || '', review_note: note || '',
-    })), '');
+    }));
+    await addTeamNotice(sub.event_id, team.id, reviewMessage, '');
   }
 
   res.json({ ok: true, submission: result.rows[0] });
