@@ -803,17 +803,22 @@ function normalizeNextMissionButtonLabel(value = '') {
 }
 
 function nextMissionTemplateVariables({ event = {}, team = {}, mission = {}, nextMission = {}, actorName = '', total = '' } = {}) {
+  const safeEvent = event || {};
+  const safeTeam = team || {};
+  const safeMission = mission || {};
+  const safeNextMission = nextMission || {};
+
   return {
-    event_name: event.event_name || '',
-    event_code: event.event_code || '',
-    team_name: team.team_name || '',
-    team_code: team.team_code || '',
+    event_name: safeEvent.event_name || '',
+    event_code: safeEvent.event_code || '',
+    team_name: safeTeam.team_name || '',
+    team_code: safeTeam.team_code || '',
     actor_name: actorName || '',
-    mission_code: mission.mission_code || '',
-    mission_name: mission.mission_name || '',
-    next_mission_code: nextMission.mission_code || '',
-    next_mission_name: nextMission.mission_name || '',
-    next_mission_type: nextMission.mission_type || '',
+    mission_code: safeMission.mission_code || '',
+    mission_name: safeMission.mission_name || '',
+    next_mission_code: safeNextMission.mission_code || '',
+    next_mission_name: safeNextMission.mission_name || '',
+    next_mission_type: safeNextMission.mission_type || '',
     total_score: total,
     total,
   };
