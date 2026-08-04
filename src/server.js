@@ -675,6 +675,7 @@ const SYSTEM_MESSAGE_SETTING_DEFINITIONS = [
   { textKey: 'photo_mission_guide_message', label: '사진 미션 업로드 안내' },
   { textKey: 'photo_upload_pending_message', label: '사진 접수 대기 안내' },
   { textKey: 'photo_upload_approved_message', label: '사진 자동 승인 안내' },
+  { textKey: 'photo_replaced_message', label: '사진 다시 제출 완료 안내' },
   { textKey: 'photo_review_approved_message', label: '사진 수동 승인 알림' },
   { textKey: 'photo_review_rejected_message', label: '사진 반려 알림' },
 ];
@@ -814,6 +815,10 @@ const DEFAULT_MESSAGE_SETTINGS = {
 
 {answer_explanation}
 {next_message}`,
+  photo_replaced_message: `{mission_code} {mission_name} 사진을 새 사진으로 교체했습니다.
+
+업로드한 팀원: {actor_name}
+현재 상태: {submission_status}`,
   photo_review_approved_message: `{actor_name}님이 업로드한 {mission_code} {mission_name} 인증 사진이 승인되었습니다.
 현재 팀 점수는 {total}점입니다.
 
@@ -2765,16 +2770,39 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
   if (!mission || !['photo', 'gps'].includes(mission.mission_type)) return kakaoText('현재 진행 중인 미션은 사진 인증 미션이 아닙니다.', menuQuickReplies);
 
   const actor = await resolveActorForTeam(event.id, team.id, kakaoUserId, team.leader_name || '팀원');
-  if (await isMissionAlreadyCompleted(team.id, mission.id)) {
+  const existing = (await query(
+    `SELECT * FROM submissions
+     WHERE event_id=$1 AND team_id=$2 AND mission_id=$3
+       AND status IN ('pending','approved','correct') AND COALESCE(image_data, '') <> ''
+     ORDER BY CASE WHEN status IN ('approved','correct') THEN 0 ELSE 1 END, submitted_at DESC
+     LIMIT 1;`,
+    [event.id, team.id, mission.id]
+  )).rows[0];
+  if (!existing && await isMissionAlreadyCompleted(team.id, mission.id)) {
     return kakaoAlreadyCompletedMissionMessage(req, event, team, mission, actor.actor_name, messages);
   }
-  const pending = await query(
-    `SELECT id FROM submissions WHERE event_id=$1 AND team_id=$2 AND mission_id=$3 AND actor_kakao_user_id=$4 AND status='pending' LIMIT 1;`,
-    [event.id, team.id, mission.id, actor.actor_kakao_user_id]
-  );
-  if (pending.rows.length) return kakaoText('이미 제출한 사진이 승인 대기 중입니다.', menuQuickReplies);
 
   const image = await downloadKakaoSecureImage(imageUrls[0]);
+  const photoQuickReplies = ['사진 다시 제출', ...menuQuickReplies];
+  if (existing) {
+    await query(
+      `UPDATE submissions
+       SET image_data=$1, image_mime=$2, actor_kakao_user_id=$3, actor_name=$4,
+           answer_text=$5, submission_key=$6, submitted_at=NOW()
+       WHERE id=$7;`,
+      [image.image_data, image.image_mime, actor.actor_kakao_user_id, actor.actor_name,
+       mission.mission_type === 'gps' ? '카카오 GPS 대체 사진 재제출' : '카카오 이미지 보안전송 재제출',
+       `secureimage:replace:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`, existing.id]
+    );
+    const replacedText = cleanRenderedMessage(renderTemplate(messages.photo_replaced_message, {
+      ...eventTemplateVars(event, team, actor.actor_name), mission_code: mission.mission_code,
+      mission_name: mission.mission_name, actor_name: actor.actor_name,
+      submission_status: existing.status === 'pending' ? '승인 대기' : '승인 완료',
+      photo_type: mission.mission_type === 'gps' ? 'GPS 대체 사진' : '사진',
+    }));
+    return kakaoText(replacedText, photoQuickReplies);
+  }
+
   const photoAutoApproval = await getPhotoAutoApprovalSettings(event.id);
   const autoApprove = isPhotoAutoApprovalActive(photoAutoApproval);
   const status = autoApprove ? 'approved' : 'pending';
@@ -2791,7 +2819,7 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
       ...eventTemplateVars(event, team, actor.actor_name), mission_code: mission.mission_code,
       mission_name: mission.mission_name, actor_name: actor.actor_name, photo_type: mission.mission_type === 'gps' ? 'GPS 대체 사진' : '사진',
     }));
-    return kakaoText(pendingText, menuQuickReplies);
+    return kakaoText(pendingText, photoQuickReplies);
   }
 
   const total = await afterMissionCompleted(event, team, mission, kakaoUserId, actor.actor_name);
@@ -2803,7 +2831,7 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
   }));
   const answerImages = await getMissionImages(mission.id, 'answer');
   const answerImageUrls = missionImageLinks(req, answerImages);
-  return missionCompletionResponse(req, event, mission, approvedText, menuQuickReplies, answerImageUrls, '', {
+  return missionCompletionResponse(req, event, mission, approvedText, photoQuickReplies, answerImageUrls, '', {
     team, actorName: actor.actor_name, total, settings: messages,
   });
 }
