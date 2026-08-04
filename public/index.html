@@ -23,6 +23,12 @@
     nav { display:flex; gap:8px; flex-wrap:wrap; margin:18px 0; }
     .event-bar { display:grid; grid-template-columns:minmax(250px,.9fr) minmax(0,1.1fr); gap:14px; align-items:start; }
     .event-links { line-height:1.7; word-break:break-all; }
+    .event-url-box { margin-top:12px; padding:12px; border:1px solid #e2e8f0; border-radius:12px; background:#f8fafc; }
+    .event-url-row { display:grid; grid-template-columns:130px minmax(0,1fr) 70px; gap:8px; align-items:center; margin-top:8px; }
+    .event-url-label { font-weight:700; color:#334155; }
+    .event-url-value { padding:8px 10px; border:1px solid #cbd5e1; border-radius:8px; background:#fff; font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .event-url-copy { padding:8px 10px; min-width:0; }
+    @media(max-width:700px){ .event-url-row { grid-template-columns:1fr; } .event-url-value { white-space:normal; } }
     .event-mini { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
     button, .btn { border:0; background:var(--primary); color:white; padding:10px 14px; border-radius:10px; cursor:pointer; font-weight:700; text-decoration:none; display:inline-block; }
     button.secondary { background:#edf2ff; color:#1c459d; }
@@ -320,32 +326,44 @@
         <p class="small">게임 시작, 팀 생성, 미션 안내, 완주 종료처럼 미션과 별도로 표시되는 카카오톡 안내 문구를 수정합니다. 아래 치환값을 문구 안에 넣을 수 있습니다: {event_name}, {event_code}, {team_name}, {team_code}, {member_name}, {actor_name}, {total}, {rank}</p>
         <div class="grid two">
           <div>
+            <label>게임 시작 카드 제목 <span class="small">비워두면 제목 없이 표시</span></label>
+            <input id="msgStartTitle" placeholder="예: 화북포구 AI 미션레이스" />
             <label>게임 시작 멘트</label>
             <textarea id="msgStart" rows="4"></textarea>
+            <p id="msgStartCount" class="small"></p>
             <div class="message-image-box">
               <div id="imgStartStatus" class="small">등록된 이미지 없음</div>
               <input id="imgStart" type="file" accept="image/*" />
               <label class="inline-check"><input id="clearImgStart" type="checkbox" /> 이미지 삭제</label>
             </div>
 
+            <label>기존 참가자 안내 카드 제목 <span class="small">비워두면 제목 없이 표시</span></label>
+            <input id="msgReturningTitle" placeholder="예: 참가 안내" />
             <label>이미 팀에 속한 참가자가 게임 시작/도움말을 눌렀을 때</label>
             <textarea id="msgReturning" rows="4"></textarea>
+            <p id="msgReturningCount" class="small"></p>
             <div class="message-image-box">
               <div id="imgReturningStatus" class="small">등록된 이미지 없음</div>
               <input id="imgReturning" type="file" accept="image/*" />
               <label class="inline-check"><input id="clearImgReturning" type="checkbox" /> 이미지 삭제</label>
             </div>
 
+            <label>팀명 입력 안내 카드 제목</label>
+            <input id="msgCreatePromptTitle" placeholder="예: 팀 생성" />
             <label>팀 생성 버튼을 눌렀을 때 팀명 입력 안내</label>
             <textarea id="msgCreatePrompt" rows="3"></textarea>
+            <p id="msgCreatePromptCount" class="small"></p>
             <div class="message-image-box">
               <div id="imgCreatePromptStatus" class="small">등록된 이미지 없음</div>
               <input id="imgCreatePrompt" type="file" accept="image/*" />
               <label class="inline-check"><input id="clearImgCreatePrompt" type="checkbox" /> 이미지 삭제</label>
             </div>
 
+            <label>이름/닉네임 입력 안내 카드 제목</label>
+            <input id="msgTeamNameSavedTitle" placeholder="예: 팀 생성" />
             <label>팀 이름 입력 후 이름/닉네임 입력 안내</label>
             <textarea id="msgTeamNameSaved" rows="4"></textarea>
+            <p id="msgTeamNameSavedCount" class="small"></p>
             <div class="message-image-box">
               <div id="imgTeamNameSavedStatus" class="small">등록된 이미지 없음</div>
               <input id="imgTeamNameSaved" type="file" accept="image/*" />
@@ -353,16 +371,22 @@
             </div>
           </div>
           <div>
+            <label>팀 생성 완료 카드 제목</label>
+            <input id="msgTeamCreatedTitle" placeholder="예: 팀 생성 완료" />
             <label>팀 생성 완료 멘트</label>
             <textarea id="msgTeamCreated" rows="5"></textarea>
+            <p id="msgTeamCreatedCount" class="small"></p>
             <div class="message-image-box">
               <div id="imgTeamCreatedStatus" class="small">등록된 이미지 없음</div>
               <input id="imgTeamCreated" type="file" accept="image/*" />
               <label class="inline-check"><input id="clearImgTeamCreated" type="checkbox" /> 이미지 삭제</label>
             </div>
 
+            <label>미션 안내 카드 제목</label>
+            <input id="msgMissionGuideTitle" placeholder="예: 미션 안내" />
             <label>미션 안내 문구 <span class="small">팀명/이름 입력 완료 후 자동 표시</span></label>
             <textarea id="msgMissionGuide" rows="8" placeholder="미션 진행 방식, 미션 구역, 주의사항 등을 입력하세요."></textarea>
+            <p id="msgMissionGuideCount" class="small"></p>
             <div class="message-image-box">
               <div id="imgMissionGuideStatus" class="small">등록된 이미지 없음</div>
               <input id="imgMissionGuide" type="file" accept="image/*" />
@@ -370,16 +394,22 @@
             </div>
             <p class="small">미션 안내는 팀 생성 또는 팀 참가 후 이름/닉네임 입력까지 완료되면 카카오톡에 바로 이어서 표시됩니다.</p>
 
+            <label>팀 필요 안내 카드 제목</label>
+            <input id="msgNeedTeamTitle" placeholder="예: 참가 안내" />
             <label>팀 없이 다른 말을 입력했을 때 안내</label>
             <textarea id="msgNeedTeam" rows="3"></textarea>
+            <p id="msgNeedTeamCount" class="small"></p>
             <div class="message-image-box">
               <div id="imgNeedTeamStatus" class="small">등록된 이미지 없음</div>
               <input id="imgNeedTeam" type="file" accept="image/*" />
               <label class="inline-check"><input id="clearImgNeedTeam" type="checkbox" /> 이미지 삭제</label>
             </div>
 
+            <label>완주 종료 카드 제목</label>
+            <input id="msgFinishTitle" placeholder="예: 완주 완료" />
             <label>완주 시 종료 멘트</label>
             <textarea id="msgFinish" rows="5"></textarea>
+            <p id="msgFinishCount" class="small"></p>
             <div class="message-image-box">
               <div id="imgFinishStatus" class="small">등록된 이미지 없음</div>
               <input id="imgFinish" type="file" accept="image/*" />
@@ -402,6 +432,7 @@ const $ = (id) => document.getElementById(id);
 let adminPassword = localStorage.getItem('adminPassword') || localStorage.getItem('admin_password') || '';
 let missionsCache = [];
 let eventsCache = [];
+let kakaoSkillKey = '';
 let currentEventId = localStorage.getItem('currentEventId') || '';
 let knownPendingPhotoIds = new Set();
 let notificationEnabled = false;
@@ -458,14 +489,54 @@ function refreshEventLinks() {
   ['rankingNavLink','rankingSettingsLink','rankingTextLink'].forEach(id => { if ($(id)) { $(id).href = rankingUrl; $(id).textContent = id === 'rankingTextLink' ? rankingUrl : $(id).textContent; } });
   if ($('eventLinks') && ev) {
     const base = location.origin;
-    const skillKey = '';
+    const code = encodeURIComponent(ev.event_code || ev.id);
+    const keyPart = kakaoSkillKey ? `key=${encodeURIComponent(kakaoSkillKey)}&` : '';
+    const skillUrl = `${base}/kakao/skill?${keyPart}event=${code}`;
+    const rankingFullUrl = `${base}${rankingUrl}`;
+    const qrStartUrl = `${base}/qr?event=${code}`;
+    const qrMissionUrl = `${base}/qr?event=${code}&mission=M1`;
+    const keyNotice = kakaoSkillKey ? 'Render 환경변수 KAKAO_SKILL_KEY가 반영된 스킬 URL입니다.' : 'KAKAO_SKILL_KEY가 설정되어 있지 않아 key 없이 표시됩니다.';
     $('eventLinks').innerHTML = `
-      <b>선택 레이스 주소</b><br>
-      실시간 랭킹: <a href="${rankingUrl}" target="_blank">${rankingUrl}</a><br>
-      카카오 스킬 URL 예시: <code>${base}/kakao/skill?event=${esc(ev.event_code || ev.id)}</code><br>
-      QR 시작 데이터 예시: <code>${base}/qr?event=${esc(ev.event_code || ev.id)}</code><br>
-      QR 미션 데이터 예시: <code>${base}/qr?event=${esc(ev.event_code || ev.id)}&mission=M1</code>
+      <div class="event-url-box">
+        <b>선택 레이스 주소 자동 생성</b>
+        <div class="small">${esc(keyNotice)} 필요한 주소를 그대로 복사해서 사용하세요.</div>
+        ${urlCopyRow('카카오 스킬 URL', skillUrl)}
+        ${urlCopyRow('실시간 랭킹', rankingFullUrl)}
+        ${urlCopyRow('QR 시작 주소', qrStartUrl)}
+        ${urlCopyRow('QR 미션 예시', qrMissionUrl)}
+        <div class="small" style="margin-top:8px;">미션 QR은 마지막 <code>mission=M1</code> 부분만 실제 미션 코드로 바꾸면 됩니다. 예: M2, M3</div>
+      </div>
     `;
+  }
+}
+function urlCopyRow(label, url) {
+  const encoded = encodeURIComponent(url);
+  return `
+    <div class="event-url-row">
+      <div class="event-url-label">${esc(label)}</div>
+      <div class="event-url-value" title="${esc(url)}">${esc(url)}</div>
+      <button type="button" class="secondary event-url-copy" onclick="copyText(decodeURIComponent('${encoded}'))">복사</button>
+    </div>
+  `;
+}
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+    alert('복사했습니다.');
+  } catch (e) {
+    prompt('아래 주소를 복사해주세요.', text);
   }
 }
 function esc(v) { return String(v ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -725,6 +796,51 @@ function fillMessageImages(s = {}) {
     if ($(f.status)) $(f.status).innerHTML = messageImageStatusHtml(s, f.key);
   });
 }
+const messageTextFields = [
+  { text:'msgStart', title:'msgStartTitle', count:'msgStartCount', titleKey:'start_title' },
+  { text:'msgReturning', title:'msgReturningTitle', count:'msgReturningCount', titleKey:'returning_title' },
+  { text:'msgCreatePrompt', title:'msgCreatePromptTitle', count:'msgCreatePromptCount', titleKey:'create_prompt_title' },
+  { text:'msgTeamNameSaved', title:'msgTeamNameSavedTitle', count:'msgTeamNameSavedCount', titleKey:'team_name_saved_title' },
+  { text:'msgTeamCreated', title:'msgTeamCreatedTitle', count:'msgTeamCreatedCount', titleKey:'team_created_title' },
+  { text:'msgMissionGuide', title:'msgMissionGuideTitle', count:'msgMissionGuideCount', titleKey:'mission_guide_title' },
+  { text:'msgNeedTeam', title:'msgNeedTeamTitle', count:'msgNeedTeamCount', titleKey:'need_team_title' },
+  { text:'msgFinish', title:'msgFinishTitle', count:'msgFinishCount', titleKey:'finish_title' },
+];
+function kakaoPreviewChunks(text, maxLen = 650) {
+  const source = String(text || '').trim();
+  if (!source) return [];
+  const chunks = [];
+  let current = '';
+  for (const para of source.split(/\n{2,}/)) {
+    const p = para.trim();
+    if (!p) continue;
+    if (!current) current = p;
+    else if ((current + '\n\n' + p).length <= maxLen) current += '\n\n' + p;
+    else { chunks.push(current); current = p; }
+    while (current.length > maxLen) { chunks.push(current.slice(0, maxLen)); current = current.slice(maxLen).trim(); }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+function updateMessageCounter(textId, countId) {
+  const el = $(textId); const out = $(countId);
+  if (!el || !out) return;
+  const chunks = kakaoPreviewChunks(el.value);
+  const len = el.value.length;
+  out.textContent = len ? `글자 수: ${len}자 · 카카오톡 말풍선 예상: ${Math.max(1, chunks.length)}개${chunks.length > 3 ? ' · 3개를 넘으면 일부 문구가 생략될 수 있습니다.' : ''}` : '글자 수: 0자';
+}
+function updateAllMessageCounters() {
+  messageTextFields.forEach(f => updateMessageCounter(f.text, f.count));
+}
+function bindMessageCounters() {
+  messageTextFields.forEach(f => {
+    const el = $(f.text);
+    if (el && !el.dataset.counterBound) {
+      el.dataset.counterBound = '1';
+      el.addEventListener('input', () => updateMessageCounter(f.text, f.count));
+    }
+  });
+}
 function fillMessageForm(s = {}, updateImages = true) {
   $('msgStart').value = s.start_message || '';
   $('msgReturning').value = s.returning_team_message || '';
@@ -734,6 +850,9 @@ function fillMessageForm(s = {}, updateImages = true) {
   $('msgMissionGuide').value = s.mission_guide_message || '';
   $('msgNeedTeam').value = s.need_team_message || '';
   $('msgFinish').value = s.finish_message || '';
+  messageTextFields.forEach(f => { if ($(f.title)) $(f.title).value = s[f.titleKey] || ''; });
+  bindMessageCounters();
+  updateAllMessageCounters();
   if (updateImages) fillMessageImages(s);
 }
 function readMessageImage(inputId) {
@@ -757,6 +876,14 @@ async function collectMessageForm() {
     mission_guide_message: $('msgMissionGuide').value,
     need_team_message: $('msgNeedTeam').value,
     finish_message: $('msgFinish').value,
+    start_title: $('msgStartTitle').value,
+    returning_title: $('msgReturningTitle').value,
+    create_prompt_title: $('msgCreatePromptTitle').value,
+    team_name_saved_title: $('msgTeamNameSavedTitle').value,
+    team_created_title: $('msgTeamCreatedTitle').value,
+    mission_guide_title: $('msgMissionGuideTitle').value,
+    need_team_title: $('msgNeedTeamTitle').value,
+    finish_title: $('msgFinishTitle').value,
   };
 
   for (const f of messageImageFields) {
@@ -801,6 +928,7 @@ async function resetMessageSettings() {
 async function loadEvents() {
   const data = await api('/api/admin/events', { noEvent:true });
   eventsCache = data.events || [];
+  kakaoSkillKey = data.kakao_skill_key || '';
   if (!eventsCache.length) throw new Error('등록된 미션레이스가 없습니다.');
   const exists = eventsCache.some(e => String(e.id) === String(currentEventId));
   if (!currentEventId || !exists) {

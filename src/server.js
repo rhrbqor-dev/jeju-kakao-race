@@ -612,21 +612,34 @@ function isPhotoAutoApprovalActive(settings = {}, now = new Date()) {
 
 
 const MESSAGE_SETTING_DEFINITIONS = [
-  { key: 'start', textKey: 'start_message', label: '게임 시작 멘트', title: '제주 AI 탐험대' },
-  { key: 'returning', textKey: 'returning_team_message', label: '기존 참가자 안내', title: '제주 AI 탐험대' },
-  { key: 'create_prompt', textKey: 'create_team_prompt', label: '팀명 입력 안내', title: '팀 생성' },
-  { key: 'team_name_saved', textKey: 'team_name_saved_message', label: '이름/닉네임 입력 안내', title: '팀 생성' },
-  { key: 'team_created', textKey: 'team_created_message', label: '팀 생성 완료', title: '팀 생성 완료' },
-  { key: 'mission_guide', textKey: 'mission_guide_message', label: '미션 안내 문구', title: '미션 안내' },
-  { key: 'need_team', textKey: 'need_team_message', label: '팀 필요 안내', title: '참가 안내' },
-  { key: 'finish', textKey: 'finish_message', label: '완주 종료 멘트', title: '완주 완료' },
+  { key: 'start', textKey: 'start_message', titleKey: 'start_title', label: '게임 시작 멘트', title: '' },
+  { key: 'returning', textKey: 'returning_team_message', titleKey: 'returning_title', label: '기존 참가자 안내', title: '' },
+  { key: 'create_prompt', textKey: 'create_team_prompt', titleKey: 'create_prompt_title', label: '팀명 입력 안내', title: '팀 생성' },
+  { key: 'team_name_saved', textKey: 'team_name_saved_message', titleKey: 'team_name_saved_title', label: '이름/닉네임 입력 안내', title: '팀 생성' },
+  { key: 'team_created', textKey: 'team_created_message', titleKey: 'team_created_title', label: '팀 생성 완료', title: '팀 생성 완료' },
+  { key: 'mission_guide', textKey: 'mission_guide_message', titleKey: 'mission_guide_title', label: '미션 안내 문구', title: '미션 안내' },
+  { key: 'need_team', textKey: 'need_team_message', titleKey: 'need_team_title', label: '팀 필요 안내', title: '참가 안내' },
+  { key: 'finish', textKey: 'finish_message', titleKey: 'finish_title', label: '완주 종료 멘트', title: '완주 완료' },
 ];
 
 const MESSAGE_TEXT_KEYS = MESSAGE_SETTING_DEFINITIONS.map((item) => item.textKey);
+const MESSAGE_TITLE_KEYS = MESSAGE_SETTING_DEFINITIONS.map((item) => item.titleKey);
 const MESSAGE_IMAGE_KEYS = new Set(MESSAGE_SETTING_DEFINITIONS.map((item) => item.key));
 
+const LEGACY_START_MESSAGE = `제주 AI 탐험대에 오신 것을 환영합니다!
+
+새 팀을 만들거나 기존 팀에 참가해주세요.`;
+
 const DEFAULT_MESSAGE_SETTINGS = {
-  start_message: `제주 AI 탐험대에 오신 것을 환영합니다!
+  start_title: '',
+  returning_title: '',
+  create_prompt_title: '팀 생성',
+  team_name_saved_title: '팀 생성',
+  team_created_title: '팀 생성 완료',
+  mission_guide_title: '미션 안내',
+  need_team_title: '참가 안내',
+  finish_title: '완주 완료',
+  start_message: `{event_name}에 오신 것을 환영합니다!
 
 새 팀을 만들거나 기존 팀에 참가해주세요.`,
   returning_team_message: `{team_name} 팀으로 참여 중입니다.
@@ -664,8 +677,13 @@ function normalizeMessageSettings(value = {}, existing = {}) {
   const out = {};
 
   for (const key of MESSAGE_TEXT_KEYS) {
-    const text = String(incoming[key] ?? previous[key] ?? DEFAULT_MESSAGE_SETTINGS[key] ?? '').trim();
+    let text = String(incoming[key] ?? previous[key] ?? DEFAULT_MESSAGE_SETTINGS[key] ?? '').trim();
+    if (key === 'start_message' && text === LEGACY_START_MESSAGE) text = DEFAULT_MESSAGE_SETTINGS.start_message;
     out[key] = text || DEFAULT_MESSAGE_SETTINGS[key] || '';
+  }
+
+  for (const key of MESSAGE_TITLE_KEYS) {
+    out[key] = String(incoming[key] ?? previous[key] ?? DEFAULT_MESSAGE_SETTINGS[key] ?? '').trim().slice(0, 40);
   }
 
   for (const item of MESSAGE_SETTING_DEFINITIONS) {
@@ -693,6 +711,7 @@ function normalizeMessageSettings(value = {}, existing = {}) {
 function publicMessageSettings(settings = {}, req = null) {
   const out = {};
   for (const key of MESSAGE_TEXT_KEYS) out[key] = settings[key] || DEFAULT_MESSAGE_SETTINGS[key] || '';
+  for (const key of MESSAGE_TITLE_KEYS) out[key] = settings[key] ?? DEFAULT_MESSAGE_SETTINGS[key] ?? '';
   for (const item of MESSAGE_SETTING_DEFINITIONS) {
     const hasImage = Boolean(settings[`${item.key}_image_data`]);
     out[`${item.key}_has_image`] = hasImage;
@@ -716,9 +735,20 @@ function messageImageUrl(req, settings = {}, key = '') {
   return `${baseUrl(req)}${urlWithEvent(`/api/public/settings/messages/${encodeURIComponent(key)}/image`, req?.selectedEvent)}`;
 }
 
-function kakaoConfiguredMessage(req, settings, key, text, quickReplies = [], title = '제주 AI 탐험대') {
+function messageDefinition(key = '') {
+  return MESSAGE_SETTING_DEFINITIONS.find((item) => item.key === key) || null;
+}
+
+function messageTitle(settings = {}, key = '', fallback = '') {
+  const def = messageDefinition(key);
+  const saved = def?.titleKey ? settings?.[def.titleKey] : '';
+  return String(saved ?? fallback ?? '').trim().slice(0, 40);
+}
+
+function kakaoConfiguredMessage(req, settings, key, text, quickReplies = [], title = '') {
   const imageUrl = messageImageUrl(req, settings, key);
-  if (imageUrl) return kakaoCard(title, text, [], quickReplies, imageUrl);
+  const cardTitle = messageTitle(settings, key, title);
+  if (imageUrl) return kakaoCard(cardTitle, text, [], quickReplies, imageUrl);
   return kakaoText(text, quickReplies);
 }
 
@@ -730,7 +760,8 @@ ${guideText}` : String(baseText || '').trim();
   const guideImage = guideText ? messageImageUrl(req, settings, 'mission_guide') : '';
   const baseImage = messageImageUrl(req, settings, baseKey);
   const imageUrl = guideImage || baseImage;
-  if (imageUrl) return kakaoCard(title, text, [], quickReplies, imageUrl);
+  const cardTitle = messageTitle(settings, guideImage ? 'mission_guide' : baseKey, title);
+  if (imageUrl) return kakaoCard(cardTitle, text, [], quickReplies, imageUrl);
   return kakaoText(text, quickReplies);
 }
 
@@ -739,6 +770,17 @@ function renderTemplate(template = '', variables = {}) {
     const value = variables[key];
     return value === undefined || value === null ? match : String(value);
   });
+}
+
+function eventTemplateVars(event = {}, team = null, memberName = '') {
+  return {
+    event_name: event?.event_name || '',
+    event_code: event?.event_code || '',
+    team_name: team?.team_name || '',
+    team_code: team?.team_code || '',
+    member_name: memberName || '',
+    actor_name: memberName || '',
+  };
 }
 
 const DEFAULT_NEXT_MISSION_MESSAGE_TEMPLATE = `다음 미션: {next_mission_code} {next_mission_name}
@@ -1524,11 +1566,70 @@ async function addReadyCompleteMissionToResponse(eventId, team, response) {
   return appendCompletePromptToResponse(response, completeMissionPromptText(completeMission), completeMissionButton(completeMission));
 }
 
+
+function normalizeKakaoResponse(response) {
+  if (!response?.template?.outputs || !Array.isArray(response.template.outputs)) return response;
+
+  const normalized = [];
+  const addSimpleChunks = (text, room = KAKAO_MAX_OUTPUTS - normalized.length) => {
+    if (room <= 0) return;
+    const chunks = splitKakaoText(text, KAKAO_TEXT_CHUNK_LIMIT, room);
+    for (const chunk of chunks) {
+      if (normalized.length >= KAKAO_MAX_OUTPUTS) break;
+      normalized.push({ simpleText: { text: chunk } });
+    }
+  };
+
+  for (const output of response.template.outputs) {
+    if (normalized.length >= KAKAO_MAX_OUTPUTS) break;
+
+    if (output?.simpleText?.text) {
+      addSimpleChunks(output.simpleText.text);
+      continue;
+    }
+
+    if (output?.basicCard) {
+      const card = { ...output.basicCard };
+      const desc = String(card.description || '').trim();
+      const hasButtons = Array.isArray(card.buttons) && card.buttons.length > 0;
+      const hasThumbnail = Boolean(card.thumbnail?.imageUrl);
+      const hasTitle = Boolean(String(card.title || '').trim());
+      const shouldSplitDesc = desc.length > KAKAO_CARD_DESC_LIMIT;
+
+      if (shouldSplitDesc) {
+        delete card.description;
+        if (!hasThumbnail && !hasButtons && !hasTitle) {
+          addSimpleChunks(desc);
+        } else if (hasButtons && !hasThumbnail) {
+          addSimpleChunks(desc, Math.max(0, KAKAO_MAX_OUTPUTS - normalized.length - 1));
+          const buttonCard = { ...card, description: card.description || '아래 버튼을 선택해주세요.' };
+          if (normalized.length < KAKAO_MAX_OUTPUTS) normalized.push({ basicCard: buttonCard });
+        } else {
+          if (!hasTitle && !hasButtons && hasThumbnail) {
+            // image-only card is allowed in most Kakao clients. Keep it simple so no unwanted title appears.
+          }
+          normalized.push({ basicCard: card });
+          addSimpleChunks(desc);
+        }
+      } else {
+        normalized.push(output);
+      }
+      continue;
+    }
+
+    normalized.push(output);
+  }
+
+  response.template.outputs = normalized.length ? normalized.slice(0, KAKAO_MAX_OUTPUTS) : [{ simpleText: { text: '응답 메시지가 없습니다.' } }];
+  return response;
+}
+
 async function respondKakao(res, response, event = null, team = null, kakaoUserId = '') {
   if (event && team && kakaoUserId) {
     response = await addUnreadNoticesToResponse(event.id, team, kakaoUserId, response);
     response = await addReadyCompleteMissionToResponse(event.id, team, response);
   }
+  response = normalizeKakaoResponse(response);
   return res.status(200).json(response);
 }
 
@@ -1769,65 +1870,130 @@ async function buildRanking(eventId) {
   return result.rows.map((row, idx) => ({ ...row, rank: idx + 1 }));
 }
 
-function kakaoText(text, quickReplies = []) {
-  const safeQuickReplies = Array.isArray(quickReplies)
+
+const KAKAO_MAX_OUTPUTS = 3;
+const KAKAO_TEXT_CHUNK_LIMIT = 650;
+const KAKAO_CARD_DESC_LIMIT = 180;
+
+function safeKakaoQuickReplies(quickReplies = []) {
+  return Array.isArray(quickReplies)
     ? quickReplies
         .filter((q) => typeof q === 'string' && q.trim() !== '')
         .slice(0, 10)
-        .map((q) => ({ action: 'message', label: q, messageText: q }))
+        .map((q) => {
+          const label = q.trim().slice(0, 20);
+          return { action: 'message', label, messageText: q.trim() };
+        })
     : [];
+}
 
-  const response = {
-    version: '2.0',
-    template: {
-      outputs: [{ simpleText: { text: String(text || '응답 메시지가 없습니다.') } }],
-    },
+function splitKakaoText(text = '', maxLen = KAKAO_TEXT_CHUNK_LIMIT, maxChunks = KAKAO_MAX_OUTPUTS) {
+  const source = String(text || '').replace(/\r\n/g, '\n').trim();
+  if (!source) return ['응답 메시지가 없습니다.'];
+
+  const chunks = [];
+  let current = '';
+  const paragraphs = source.split(/\n{2,}/);
+
+  const pushCurrent = () => {
+    const clean = current.trim();
+    if (clean) chunks.push(clean);
+    current = '';
   };
 
+  const addPiece = (piece) => {
+    const cleanPiece = String(piece || '').trim();
+    if (!cleanPiece) return;
+    if (!current) {
+      current = cleanPiece;
+    } else if ((current + '\n\n' + cleanPiece).length <= maxLen) {
+      current += '\n\n' + cleanPiece;
+    } else {
+      pushCurrent();
+      current = cleanPiece;
+    }
+
+    while (current.length > maxLen) {
+      let cut = current.lastIndexOf('\n', maxLen);
+      if (cut < Math.floor(maxLen * 0.5)) cut = current.lastIndexOf(' ', maxLen);
+      if (cut < Math.floor(maxLen * 0.5)) cut = maxLen;
+      chunks.push(current.slice(0, cut).trim());
+      current = current.slice(cut).trim();
+    }
+  };
+
+  for (const paragraph of paragraphs) {
+    if (paragraph.length <= maxLen) {
+      addPiece(paragraph);
+    } else {
+      for (const line of paragraph.split('\n')) {
+        if (line.length <= maxLen) addPiece(line);
+        else {
+          let rest = line;
+          while (rest.length > maxLen) {
+            let cut = rest.lastIndexOf(' ', maxLen);
+            if (cut < Math.floor(maxLen * 0.5)) cut = maxLen;
+            addPiece(rest.slice(0, cut));
+            rest = rest.slice(cut).trim();
+          }
+          addPiece(rest);
+        }
+      }
+    }
+  }
+  pushCurrent();
+
+  if (chunks.length <= maxChunks) return chunks;
+  const limited = chunks.slice(0, maxChunks);
+  limited[maxChunks - 1] = `${limited[maxChunks - 1]}\n\n※ 안내문이 길어 일부만 표시되었습니다. 관리자 페이지에서 문구를 나누거나 줄여주세요.`;
+  return limited;
+}
+
+function kakaoResponse(outputs = [], quickReplies = []) {
+  const safeOutputs = outputs.filter(Boolean).slice(0, KAKAO_MAX_OUTPUTS);
+  const response = { version: '2.0', template: { outputs: safeOutputs.length ? safeOutputs : [{ simpleText: { text: '응답 메시지가 없습니다.' } }] } };
+  const safeQuickReplies = safeKakaoQuickReplies(quickReplies);
   if (safeQuickReplies.length > 0) response.template.quickReplies = safeQuickReplies;
   return response;
 }
 
+function kakaoText(text, quickReplies = []) {
+  const chunks = splitKakaoText(text, KAKAO_TEXT_CHUNK_LIMIT, KAKAO_MAX_OUTPUTS);
+  return kakaoResponse(chunks.map((chunk) => ({ simpleText: { text: chunk } })), quickReplies);
+}
+
 function kakaoCard(title, description, buttons = [], quickReplies = [], imageUrl = '') {
-  const safeQuickReplies = Array.isArray(quickReplies)
-    ? quickReplies
-        .filter((q) => typeof q === 'string' && q.trim() !== '')
-        .slice(0, 10)
-        .map((q) => ({ action: 'message', label: q, messageText: q }))
-    : [];
-
-  const basicCard = {
-    title: String(title || ''),
-    description: String(description || ''),
-  };
-
   const safeButtons = Array.isArray(buttons) ? buttons.slice(0, 3) : [];
-  if (safeButtons.length > 0) basicCard.buttons = safeButtons;
+  const safeTitle = String(title || '').trim().slice(0, 40);
+  const text = String(description || '').trim();
 
+  // BasicCard description can be shortened by Kakao clients. Keep cards short and put long text in separate simpleText bubbles.
   if (imageUrl) {
-    basicCard.thumbnail = { imageUrl, fixedRatio: true };
+    const basicCard = { thumbnail: { imageUrl, fixedRatio: true } };
+    if (safeTitle) basicCard.title = safeTitle;
+    if (safeButtons.length > 0) basicCard.buttons = safeButtons;
+    const chunks = text ? splitKakaoText(text, KAKAO_TEXT_CHUNK_LIMIT, KAKAO_MAX_OUTPUTS - 1) : [];
+    return kakaoResponse([{ basicCard }, ...chunks.map((chunk) => ({ simpleText: { text: chunk } }))], quickReplies);
   }
 
-  const response = {
-    version: '2.0',
-    template: {
-      outputs: [{ basicCard }],
-    },
-  };
+  if (safeButtons.length > 0) {
+    const chunks = text ? splitKakaoText(text, KAKAO_TEXT_CHUNK_LIMIT, KAKAO_MAX_OUTPUTS - 1) : [];
+    const buttonCard = { description: '아래 버튼을 선택해주세요.', buttons: safeButtons };
+    if (safeTitle) buttonCard.title = safeTitle;
+    return kakaoResponse([...chunks.map((chunk) => ({ simpleText: { text: chunk } })), { basicCard: buttonCard }], quickReplies);
+  }
 
-  if (safeQuickReplies.length > 0) response.template.quickReplies = safeQuickReplies;
-  return response;
+  if (text.length > KAKAO_CARD_DESC_LIMIT) return kakaoText(text, quickReplies);
+
+  const basicCard = { description: text || '안내를 확인해주세요.' };
+  if (safeTitle) basicCard.title = safeTitle;
+  return kakaoResponse([{ basicCard }], quickReplies);
 }
 
 function kakaoCarousel(cards = [], quickReplies = []) {
   const safeCards = Array.isArray(cards) ? cards.filter(Boolean).slice(0, 10) : [];
   if (!safeCards.length) return kakaoText('표시할 카드가 없습니다.', quickReplies);
-  const safeQuickReplies = Array.isArray(quickReplies)
-    ? quickReplies.filter((q) => typeof q === 'string' && q.trim() !== '').slice(0, 10).map((q) => ({ action: 'message', label: q, messageText: q }))
-    : [];
-  const response = { version: '2.0', template: { outputs: [{ carousel: { type: 'basicCard', items: safeCards } }] } };
-  if (safeQuickReplies.length > 0) response.template.quickReplies = safeQuickReplies;
-  return response;
+  return kakaoResponse([{ carousel: { type: 'basicCard', items: safeCards } }], quickReplies);
 }
 
 function buildImageCards(title, description, imageUrls = [], buttons = []) {
@@ -2586,7 +2752,7 @@ async function handleKakaoSkill(req, res) {
       const teamName = String(data.teamName || '').trim();
       if (!teamName) {
         await setUserState(event.id, kakaoUserId, 'WAIT_TEAM_NAME', {});
-        return respondKakao(res, kakaoConfiguredMessage(req, messages, 'create_prompt', messages.create_team_prompt, ['취소'], '팀 생성'));
+        return respondKakao(res, kakaoConfiguredMessage(req, messages, 'create_prompt', renderTemplate(messages.create_team_prompt, eventTemplateVars(event)), ['취소'], '팀 생성'));
       }
       if (memberName.length < 2) {
         return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동', ['취소']));
@@ -2701,12 +2867,12 @@ async function handleKakaoSkill(req, res) {
       if (!team) {
         return respondKakao(
           res,
-          kakaoConfiguredMessage(req, messages, 'start', messages.start_message, startQuickReplies, '제주 AI 탐험대')
+          kakaoConfiguredMessage(req, messages, 'start', renderTemplate(messages.start_message, eventTemplateVars(event)), startQuickReplies, '')
         );
       }
       return respondKakao(
         res,
-        kakaoConfiguredMessage(req, messages, 'returning', renderTemplate(messages.returning_team_message, { team_name: team.team_name, team_code: team.team_code }), menuQuickReplies, '제주 AI 탐험대'),
+        kakaoConfiguredMessage(req, messages, 'returning', renderTemplate(messages.returning_team_message, eventTemplateVars(event, team)), menuQuickReplies, ''),
         event,
         team,
         kakaoUserId
@@ -2715,7 +2881,7 @@ async function handleKakaoSkill(req, res) {
 
     if (!team && isCreateTeamCommand(utterance)) {
       await setUserState(event.id, kakaoUserId, 'WAIT_TEAM_NAME', {});
-      return respondKakao(res, kakaoConfiguredMessage(req, messages, 'create_prompt', messages.create_team_prompt, ['취소'], '팀 생성'));
+      return respondKakao(res, kakaoConfiguredMessage(req, messages, 'create_prompt', renderTemplate(messages.create_team_prompt, eventTemplateVars(event)), ['취소'], '팀 생성'));
     }
 
     if (!team && isJoinTeamCommand(utterance)) {
@@ -3326,7 +3492,12 @@ app.get('/api/admin/events', requireAdmin, async (req, res) => {
   `);
   const selectedIdentifier = getEventIdentifierFromRequest(req);
   const selected = selectedIdentifier ? await getEventByIdentifier(selectedIdentifier) : await getDefaultEvent();
-  res.json({ ok: true, events: result.rows, selected_event_id: selected?.id || null });
+  res.json({
+    ok: true,
+    events: result.rows,
+    selected_event_id: selected?.id || null,
+    kakao_skill_key: KAKAO_SKILL_KEY || ''
+  });
 });
 
 app.post('/api/admin/events', requireAdmin, async (req, res) => {
