@@ -324,6 +324,22 @@
       <section id="tab-messages" class="section card hidden">
         <h2>챗봇 문구 설정</h2>
         <p class="small">게임 시작, 팀 생성, 미션 안내, 완주 종료처럼 미션과 별도로 표시되는 카카오톡 안내 문구를 수정합니다. 아래 치환값을 문구 안에 넣을 수 있습니다: {event_name}, {event_code}, {team_name}, {team_code}, {member_name}, {actor_name}, {total}, {rank}, {mission_list}, {mission_count}, {completed_count}, {remaining_count}</p>
+
+        <div class="message-focus-box">
+          <h3>미션 목록 안내 문구</h3>
+          <p class="small">카카오톡에서 참가자가 <b>미션 목록</b>을 입력했을 때 나오는 안내 문구입니다. 이 항목은 찾기 쉽도록 챗봇 문구 설정 상단에 고정했습니다.</p>
+          <label>미션 목록 카드 제목 <span class="small">비워두면 제목 없이 표시</span></label>
+          <input id="msgMissionListTitle" placeholder="예: 미션 목록" />
+          <label>미션 목록 안내 문구 <span class="small">미션 목록 입력 시 표시</span></label>
+          <textarea id="msgMissionList" rows="6" placeholder="미션 목록 위/아래 안내 문구를 입력하세요."></textarea>
+          <p id="msgMissionListCount" class="small"></p>
+          <div class="message-image-box">
+            <div id="imgMissionListStatus" class="small">등록된 이미지 없음</div>
+            <input id="imgMissionList" type="file" accept="image/*" />
+            <label class="inline-check"><input id="clearImgMissionList" type="checkbox" /> 이미지 삭제</label>
+          </div>
+          <p class="small">미션 목록 문구에는 반드시 <b>{mission_list}</b>를 넣어주세요. 이 위치에 실제 미션 목록이 자동으로 들어갑니다.</p>
+        </div>
         <div class="grid two">
           <div>
             <label>게임 시작 카드 제목 <span class="small">비워두면 제목 없이 표시</span></label>
@@ -404,18 +420,6 @@
               <input id="imgNoTeams" type="file" accept="image/*" />
               <label class="inline-check"><input id="clearImgNoTeams" type="checkbox" /> 이미지 삭제</label>
             </div>
-
-            <label>미션 목록 카드 제목 <span class="small">비워두면 제목 없이 표시</span></label>
-            <input id="msgMissionListTitle" placeholder="예: 미션 목록" />
-            <label>미션 목록 안내 문구 <span class="small">미션 목록 입력 시 표시</span></label>
-            <textarea id="msgMissionList" rows="6" placeholder="미션 목록 위/아래 안내 문구를 입력하세요."></textarea>
-            <p id="msgMissionListCount" class="small"></p>
-            <div class="message-image-box">
-              <div id="imgMissionListStatus" class="small">등록된 이미지 없음</div>
-              <input id="imgMissionList" type="file" accept="image/*" />
-              <label class="inline-check"><input id="clearImgMissionList" type="checkbox" /> 이미지 삭제</label>
-            </div>
-            <p class="small">미션 목록 문구에는 반드시 <b>{mission_list}</b>를 넣어주세요. 이 위치에 실제 미션 목록이 자동으로 들어갑니다.</p>
 
             <label>팀 필요 안내 카드 제목</label>
             <input id="msgNeedTeamTitle" placeholder="예: 참가 안내" />
