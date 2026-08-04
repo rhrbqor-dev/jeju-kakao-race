@@ -1764,17 +1764,24 @@ async function addUnreadNoticesToResponse(eventId, team, kakaoUserId, response) 
 }
 
 function kakaoResponseTextSnapshot(response) {
-  const firstOutput = response?.template?.outputs?.[0];
-  if (firstOutput?.simpleText?.text) return String(firstOutput.simpleText.text || '');
-  if (firstOutput?.basicCard?.description) return String(firstOutput.basicCard.description || '');
-  if (firstOutput?.carousel?.items?.[0]?.description) return String(firstOutput.carousel.items[0].description || '');
-  return '';
+  const outputs = Array.isArray(response?.template?.outputs) ? response.template.outputs : [];
+  return outputs.flatMap((output) => {
+    if (output?.simpleText?.text) return [String(output.simpleText.text || '')];
+    if (output?.basicCard?.description) return [String(output.basicCard.description || '')];
+    if (output?.textCard?.description) return [String(output.textCard.description || '')];
+    if (Array.isArray(output?.carousel?.items)) {
+      return output.carousel.items.map((item) => String(item?.description || '')).filter(Boolean);
+    }
+    return [];
+  }).join('\n');
 }
 
-function addButtonsToBasicCard(firstOutput, buttons = []) {
+function addButtonsToCard(firstOutput, buttons = []) {
   if (!buttons.length) return;
-  firstOutput.basicCard.buttons = [
-    ...(firstOutput.basicCard.buttons || []),
+  const card = firstOutput.basicCard || firstOutput.textCard;
+  if (!card) return;
+  card.buttons = [
+    ...(card.buttons || []),
     ...buttons,
   ].slice(0, 3);
 }
@@ -1785,18 +1792,27 @@ function appendCompletePromptToResponse(response, promptText, buttons = []) {
   if (!firstOutput) return response;
 
   const existing = kakaoResponseTextSnapshot(response);
+  if (existing.includes(String(promptText).trim())) return response;
   if (existing.includes('완주 미션:') || existing.includes('완주 처리')) return response;
 
   if (firstOutput.basicCard) {
     firstOutput.basicCard.description = `${String(firstOutput.basicCard.description || '').trim()}
 
 ${promptText}`.trim();
-    addButtonsToBasicCard(firstOutput, buttons);
+    addButtonsToCard(firstOutput, buttons);
+    return response;
+  }
+
+  if (firstOutput.textCard) {
+    firstOutput.textCard.description = `${String(firstOutput.textCard.description || '').trim()}
+
+${promptText}`.trim();
+    addButtonsToCard(firstOutput, buttons);
     return response;
   }
 
   if (firstOutput.simpleText?.text) {
-    firstOutput.basicCard = {
+    firstOutput.textCard = {
       description: `${String(firstOutput.simpleText.text || '').trim()}
 
 ${promptText}`.trim(),
@@ -1886,6 +1902,37 @@ function normalizeKakaoResponse(response) {
       } else {
         normalized.push(output);
       }
+      continue;
+    }
+
+    if (output?.textCard) {
+      const card = { ...output.textCard };
+      const title = String(card.title || '').trim().slice(0, 50);
+      const desc = String(card.description || '').trim();
+      const buttons = Array.isArray(card.buttons) ? card.buttons.slice(0, 3) : [];
+      const descriptionLimit = Math.max(1, 400 - title.length);
+      if (title) card.title = title;
+      else delete card.title;
+      if (buttons.length) card.buttons = buttons;
+      else delete card.buttons;
+      if (buttons.length > 2) card.buttonLayout = 'vertical';
+
+      if (desc.length > descriptionLimit) {
+        const room = KAKAO_MAX_OUTPUTS - normalized.length;
+        const chunks = splitKakaoText(desc, descriptionLimit, room);
+        const cardDescription = chunks.pop() || title || String(buttons[0]?.label || '').trim();
+        for (const chunk of chunks) {
+          if (normalized.length >= KAKAO_MAX_OUTPUTS - 1) break;
+          normalized.push({ simpleText: { text: chunk } });
+        }
+        card.description = cardDescription;
+      } else if (desc) {
+        card.description = desc;
+      } else {
+        delete card.description;
+      }
+
+      if (card.title || card.description) normalized.push({ textCard: card });
       continue;
     }
 
@@ -2268,17 +2315,17 @@ function kakaoCard(title, description, buttons = [], quickReplies = [], imageUrl
   }
 
   if (safeButtons.length > 0) {
-    const chunks = text ? splitKakaoText(text, KAKAO_TEXT_CHUNK_LIMIT, KAKAO_MAX_OUTPUTS - 1) : [];
-    const buttonCard = { description: '아래 버튼을 선택해주세요.', buttons: safeButtons };
-    if (safeTitle) buttonCard.title = safeTitle;
-    return kakaoResponse([...chunks.map((chunk) => ({ simpleText: { text: chunk } })), { basicCard: buttonCard }], quickReplies);
+    const descriptionLimit = Math.max(1, 400 - safeTitle.length);
+    const authoredFallback = safeTitle || String(safeButtons[0]?.label || '').trim();
+    const chunks = text ? splitKakaoText(text, descriptionLimit, KAKAO_MAX_OUTPUTS) : [authoredFallback];
+    const cardText = chunks.pop() || authoredFallback;
+    const textCard = { description: cardText, buttons: safeButtons };
+    if (safeTitle) textCard.title = safeTitle;
+    if (safeButtons.length > 2) textCard.buttonLayout = 'vertical';
+    return kakaoResponse([...chunks.map((chunk) => ({ simpleText: { text: chunk } })), { textCard }], quickReplies);
   }
 
-  if (text.length > KAKAO_CARD_DESC_LIMIT) return kakaoText(text, quickReplies);
-
-  const basicCard = { description: text || '안내를 확인해주세요.' };
-  if (safeTitle) basicCard.title = safeTitle;
-  return kakaoResponse([{ basicCard }], quickReplies);
+  return kakaoText(text || safeTitle, quickReplies);
 }
 
 function kakaoCarousel(cards = [], quickReplies = []) {
