@@ -12,6 +12,7 @@ const PORT = Number(process.env.PORT || 3000);
 const DATABASE_URL = process.env.DATABASE_URL || '';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin1234';
 const KAKAO_SKILL_KEY = process.env.KAKAO_SKILL_KEY || '';
+const KAKAO_SECURE_IMAGE_BLOCK_ID = String(process.env.KAKAO_SECURE_IMAGE_BLOCK_ID || '').trim();
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
 
 let dbReady = false;
@@ -74,6 +75,13 @@ function nowIso() {
 function baseUrl(req) {
   if (PUBLIC_BASE_URL) return PUBLIC_BASE_URL;
   return `${req.protocol}://${req.get('host')}`;
+}
+
+function secureImagePluginButton(label = '사진 업로드', messageText = '사진 인증') {
+  if (KAKAO_SECURE_IMAGE_BLOCK_ID) {
+    return { action: 'block', label, blockId: KAKAO_SECURE_IMAGE_BLOCK_ID, messageText };
+  }
+  return { action: 'message', label, messageText };
 }
 
 function normalizeAnswer(value = '') {
@@ -2154,12 +2162,13 @@ const KAKAO_MAX_OUTPUTS = 3;
 const KAKAO_TEXT_CHUNK_LIMIT = 650;
 const KAKAO_CARD_DESC_LIMIT = 180;
 const QR_SCAN_QUICK_REPLY = 'QR코드 스캔';
+const CANCEL_QUICK_REPLY = '취소';
 
 function safeKakaoQuickReplies(quickReplies = []) {
   const requested = Array.isArray(quickReplies) ? quickReplies : [];
-  // 모든 챗봇 응답 하단에 스캔 진입 버튼을 고정합니다.
-  // 카카오 빠른응답 최대 10개 제한 때문에 나머지 메뉴는 최대 9개만 유지합니다.
-  const values = [QR_SCAN_QUICK_REPLY, ...requested]
+  // 스캔/플러그인 되묻기 상태에서 빠져나올 수 있도록 취소 버튼도 항상 고정합니다.
+  // 카카오 빠른응답 최대 10개 제한 때문에 나머지 메뉴는 최대 8개만 유지합니다.
+  const values = [QR_SCAN_QUICK_REPLY, CANCEL_QUICK_REPLY, ...requested]
     .filter((q) => typeof q === 'string' && q.trim() !== '')
     .filter((q, index, all) => all.findIndex((item) => item.trim() === q.trim()) === index)
     .slice(0, 10);
@@ -2557,7 +2566,7 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
       ...eventTemplateVars(event, team), question: mission.question, mission_code: mission.mission_code,
       mission_name: mission.mission_name, score: mission.score,
     });
-    const buttons = [{ action: 'message', label: '사진 업로드', messageText: '사진 인증' }];
+    const buttons = [secureImagePluginButton('사진 업로드', '사진 인증')];
     if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls, buttons), menuQuickReplies);
     return kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || '');
   }
@@ -2567,7 +2576,7 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
     const desc = `${mission.question}\n\n아래 버튼을 눌러 위치 권한을 허용해주세요.`;
     const buttons = [
       { action: 'webLink', label: 'GPS 인증하기', webLinkUrl: url },
-      { action: 'message', label: 'GPS가 안 될 때 사진 인증', messageText: 'GPS 대체 사진 인증' },
+      secureImagePluginButton('GPS가 안 될 때 사진 인증', 'GPS 대체 사진 인증'),
     ];
     if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls, buttons), menuQuickReplies);
     return kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || '');
