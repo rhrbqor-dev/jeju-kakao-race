@@ -195,7 +195,8 @@
           <p class="small">예: -10으로 입력하면 해당 미션에서 힌트를 처음 사용할 때 팀 점수에서 10점이 차감됩니다.</p>
           <label>힌트</label><input id="missionHint" placeholder="플레이어가 힌트라고 입력하면 표시됩니다." />
           <label>완료 후 바로 연결할 다음 미션</label><select id="missionNextId"><option value="">연결 없음</option></select>
-          <label>다음 미션 버튼 문구</label><input id="missionNextButtonLabel" placeholder="예: 다음 미션 시작" value="다음 미션 시작" />
+          <label>다음 미션 버튼 문구 <span class="small">최대 12자</span></label><input id="missionNextButtonLabel" maxlength="12" placeholder="예: 다음 미션" value="다음 미션 시작" oninput="updateNextMissionButtonCount()" />
+          <p id="missionNextButtonCount" class="small">0/12자</p>
           <label>다음 미션 안내 문구</label>
           <textarea id="missionNextMessageTemplate" rows="4" placeholder="비워두면 기본 안내 문구가 표시됩니다.">다음 미션: {next_mission_code} {next_mission_name}
 아래 버튼을 누르면 QR을 다시 찍지 않아도 다음 미션을 바로 시작할 수 있습니다.</textarea>
@@ -324,6 +325,8 @@
       <section id="tab-messages" class="section card hidden">
         <h2>챗봇 문구 설정</h2>
         <p class="small">게임 시작, 팀 생성, 미션 안내, 완주 종료처럼 미션과 별도로 표시되는 카카오톡 안내 문구를 수정합니다. 아래 치환값을 문구 안에 넣을 수 있습니다: {event_name}, {event_code}, {team_name}, {team_code}, {member_name}, {actor_name}, {total}, {rank}, {mission_list}, {mission_count}, {completed_count}, {remaining_count}, {mission_code}, {mission_name}</p>
+        <label class="inline-check"><input id="msgShowCardTitles" type="checkbox" /> 카카오톡 카드 제목 노출</label>
+        <p class="small">OFF이면 게임 시작, 미션 시작, 정답 설명, 완주 안내 등에서 카드 제목을 숨깁니다. 문구 본문은 그대로 표시됩니다.</p>
 
         <div class="message-focus-box">
           <h3>미션 목록 안내 문구</h3>
@@ -436,6 +439,37 @@
             </div>
             <p class="small">기본값은 미션명 없이 표시됩니다. 필요할 때만 {mission_code}, {mission_name}, {team_name}, {actor_name}, {total}을 문구에 넣어 사용할 수 있습니다.</p>
 
+            <label>정답/미션 완료 카드 제목</label>
+            <input id="msgMissionSuccessTitle" placeholder="예: 정답 설명" />
+            <label>정답/미션 완료 안내 문구 <span class="small">정답 입력 후 표시</span></label>
+            <textarea id="msgMissionSuccess" rows="8" placeholder="예: 정답입니다!
+
+획득 점수: {earned_score}점
+현재 팀 총점: {total}점
+
+{answer_explanation}"></textarea>
+            <p id="msgMissionSuccessCount" class="small"></p>
+            <div class="message-image-box">
+              <div id="imgMissionSuccessStatus" class="small">등록된 이미지 없음</div>
+              <input id="imgMissionSuccess" type="file" accept="image/*" />
+              <label class="inline-check"><input id="clearImgMissionSuccess" type="checkbox" /> 이미지 삭제</label>
+            </div>
+            <p class="small">사용 가능: {base_score}, {wrong_count}, {wrong_penalty}, {wrong_penalty_total}, {hint_penalty_total}, {penalty_total}, {earned_score}, {total}, {answer_explanation}, {mission_code}, {mission_name}, {team_name}, {actor_name}</p>
+
+            <label>방문 인증 완료 카드 제목</label>
+            <input id="msgVisitSuccessTitle" placeholder="예: 방문 인증 완료" />
+            <label>방문 인증 완료 안내 문구</label>
+            <textarea id="msgVisitSuccess" rows="4" placeholder="예: 방문 인증 완료!
+
+획득 점수: {earned_score}점
+현재 팀 총점: {total}점"></textarea>
+            <p id="msgVisitSuccessCount" class="small"></p>
+            <div class="message-image-box">
+              <div id="imgVisitSuccessStatus" class="small">등록된 이미지 없음</div>
+              <input id="imgVisitSuccess" type="file" accept="image/*" />
+              <label class="inline-check"><input id="clearImgVisitSuccess" type="checkbox" /> 이미지 삭제</label>
+            </div>
+
             <label>팀 필요 안내 카드 제목</label>
             <input id="msgNeedTeamTitle" placeholder="예: 참가 안내" />
             <label>팀 없이 다른 말을 입력했을 때 안내</label>
@@ -458,6 +492,11 @@
               <label class="inline-check"><input id="clearImgFinish" type="checkbox" /> 이미지 삭제</label>
             </div>
 
+            <div style="height:18px"></div>
+            <h3>기본·시스템 문구 전체 설정</h3>
+            <p class="small">점수, 순위, 팀 참가/수정, 사진 접수·승인·반려처럼 기존에 코드가 자동으로 붙이던 문구입니다. 치환값은 중괄호 그대로 유지하고 나머지 어투를 행사 테마에 맞게 바꿀 수 있습니다.</p>
+            <div id="systemMessageFields"></div>
+
             <div style="height:12px"></div>
             <button onclick="saveMessageSettings()">문구/이미지 저장</button>
             <button class="secondary" onclick="loadMessageSettings()">다시 불러오기</button>
@@ -474,6 +513,7 @@ const $ = (id) => document.getElementById(id);
 let adminPassword = localStorage.getItem('adminPassword') || localStorage.getItem('admin_password') || '';
 let missionsCache = [];
 let eventsCache = [];
+let systemMessageItems = [];
 let kakaoSkillKey = '';
 let currentEventId = localStorage.getItem('currentEventId') || '';
 let knownPendingPhotoIds = new Set();
@@ -823,6 +863,8 @@ const messageImageFields = [
   { key:'no_teams', input:'imgNoTeams', clear:'clearImgNoTeams', status:'imgNoTeamsStatus' },
   { key:'mission_list', input:'imgMissionList', clear:'clearImgMissionList', status:'imgMissionListStatus' },
   { key:'already_completed', input:'imgAlreadyCompleted', clear:'clearImgAlreadyCompleted', status:'imgAlreadyCompletedStatus' },
+  { key:'mission_success', input:'imgMissionSuccess', clear:'clearImgMissionSuccess', status:'imgMissionSuccessStatus' },
+  { key:'visit_success', input:'imgVisitSuccess', clear:'clearImgVisitSuccess', status:'imgVisitSuccessStatus' },
   { key:'need_team', input:'imgNeedTeam', clear:'clearImgNeedTeam', status:'imgNeedTeamStatus' },
   { key:'finish', input:'imgFinish', clear:'clearImgFinish', status:'imgFinishStatus' },
 ];
@@ -851,6 +893,8 @@ const messageTextFields = [
   { text:'msgNoTeams', title:'msgNoTeamsTitle', count:'msgNoTeamsCount', titleKey:'no_teams_title' },
   { text:'msgMissionList', title:'msgMissionListTitle', count:'msgMissionListCount', titleKey:'mission_list_title' },
   { text:'msgAlreadyCompleted', title:'msgAlreadyCompletedTitle', count:'msgAlreadyCompletedCount', titleKey:'already_completed_title' },
+  { text:'msgMissionSuccess', title:'msgMissionSuccessTitle', count:'msgMissionSuccessCount', titleKey:'mission_success_title' },
+  { text:'msgVisitSuccess', title:'msgVisitSuccessTitle', count:'msgVisitSuccessCount', titleKey:'visit_success_title' },
   { text:'msgNeedTeam', title:'msgNeedTeamTitle', count:'msgNeedTeamCount', titleKey:'need_team_title' },
   { text:'msgFinish', title:'msgFinishTitle', count:'msgFinishCount', titleKey:'finish_title' },
 ];
@@ -870,6 +914,15 @@ function kakaoPreviewChunks(text, maxLen = 650) {
   if (current) chunks.push(current);
   return chunks;
 }
+
+function updateNextMissionButtonCount() {
+  const el = $('missionNextButtonLabel');
+  const out = $('missionNextButtonCount');
+  if (!el || !out) return;
+  if (el.value.length > 12) el.value = el.value.slice(0, 12);
+  out.textContent = `${el.value.length}/12자 · 카카오톡 버튼에서 잘리지 않도록 짧게 입력하세요.`;
+}
+
 function updateMessageCounter(textId, countId) {
   const el = $(textId); const out = $(countId);
   if (!el || !out) return;
@@ -899,12 +952,30 @@ function fillMessageForm(s = {}, updateImages = true) {
   $('msgNoTeams').value = s.no_teams_message || '';
   $('msgMissionList').value = s.mission_list_message || '';
   $('msgAlreadyCompleted').value = s.already_completed_message || '';
+  $('msgMissionSuccess').value = s.mission_success_message || '';
+  $('msgVisitSuccess').value = s.visit_success_message || '';
+  if ($('msgShowCardTitles')) $('msgShowCardTitles').checked = Boolean(s.show_card_titles);
   $('msgNeedTeam').value = s.need_team_message || '';
   $('msgFinish').value = s.finish_message || '';
   messageTextFields.forEach(f => { if ($(f.title)) $(f.title).value = s[f.titleKey] || ''; });
   bindMessageCounters();
   updateAllMessageCounters();
   if (updateImages) fillMessageImages(s);
+  renderSystemMessageFields(s);
+}
+
+function systemMessageId(key) { return 'sysmsg_' + String(key).replace(/[^a-zA-Z0-9_]/g, '_'); }
+function renderSystemMessageFields(s = {}) {
+  const box = $('systemMessageFields');
+  if (!box) return;
+  box.innerHTML = systemMessageItems.map(item => {
+    const id = systemMessageId(item.textKey);
+    return `<label>${esc(item.label)}</label><textarea id="${id}" rows="5"></textarea><p class="small">설정 키: ${esc(item.textKey)}</p>`;
+  }).join('');
+  systemMessageItems.forEach(item => {
+    const el = $(systemMessageId(item.textKey));
+    if (el) el.value = s[item.textKey] || '';
+  });
 }
 function readMessageImage(inputId) {
   const file = $(inputId).files[0];
@@ -928,6 +999,9 @@ async function collectMessageForm() {
     no_teams_message: $('msgNoTeams').value,
     mission_list_message: $('msgMissionList').value,
     already_completed_message: $('msgAlreadyCompleted').value,
+    mission_success_message: $('msgMissionSuccess').value,
+    visit_success_message: $('msgVisitSuccess').value,
+    show_card_titles: $('msgShowCardTitles')?.checked || false,
     need_team_message: $('msgNeedTeam').value,
     finish_message: $('msgFinish').value,
     start_title: $('msgStartTitle').value,
@@ -939,9 +1013,15 @@ async function collectMessageForm() {
     no_teams_title: $('msgNoTeamsTitle').value,
     mission_list_title: $('msgMissionListTitle').value,
     already_completed_title: $('msgAlreadyCompletedTitle').value,
+    mission_success_title: $('msgMissionSuccessTitle').value,
+    visit_success_title: $('msgVisitSuccessTitle').value,
     need_team_title: $('msgNeedTeamTitle').value,
     finish_title: $('msgFinishTitle').value,
   };
+  systemMessageItems.forEach(item => {
+    const el = $(systemMessageId(item.textKey));
+    if (el) body[item.textKey] = el.value;
+  });
 
   for (const f of messageImageFields) {
     if ($(f.clear).checked) {
@@ -959,6 +1039,7 @@ async function collectMessageForm() {
 }
 async function loadMessageSettings() {
   const data = await api('/api/admin/settings/messages');
+  systemMessageItems = data.system_message_items || [];
   messageDefaults = data.defaults || null;
   fillMessageForm(data.settings || {});
   $('messageSettingsStatus').textContent = '문구/이미지 설정을 불러왔습니다.';
@@ -1205,20 +1286,23 @@ function editMission(id) {
   $('missionId').value = m.id; $('missionCode').value = m.mission_code; $('missionName').value = m.mission_name; $('missionType').value = m.mission_type;
   $('missionQuestion').value = m.question; $('missionAnswer').value = m.answer; $('missionQuizType').value = m.quiz_type || 'short'; $('missionChoices').value = m.choices || ''; $('missionSequenceAnswer').value = m.sequence_answer || ''; $('missionWrongMessage').value = m.wrong_message || ''; $('missionAnswerExplanation').value = m.answer_explanation || ''; $('missionScore').value = m.score; $('missionWrongPenalty').value = m.wrong_penalty ?? -5; $('missionHintPenalty').value = m.hint_penalty ?? -10; $('missionHint').value = m.hint; $('missionRequired').checked = m.is_required !== false;
   fillNextMissionOptions(m.next_mission_id || '', m.id);
-  $('missionNextButtonLabel').value = m.next_mission_button_label || '다음 미션 시작';
+  $('missionNextButtonLabel').value = (m.next_mission_button_label || '다음 미션 시작').slice(0, 12);
+  updateNextMissionButtonCount();
   $('missionNextMessageTemplate').value = m.next_mission_message_template || '다음 미션: {next_mission_code} {next_mission_name}\n아래 버튼을 누르면 QR을 다시 찍지 않아도 다음 미션을 바로 시작할 수 있습니다.';
   $('missionLocation').value = m.location_name; $('missionLat').value = m.latitude || ''; $('missionLng').value = m.longitude || ''; $('missionRadius').value = m.radius_m; $('missionOrder').value = m.sort_order;
   $('missionImages').value = ''; $('answerImages').value = '';
   loadMissionImagesForForm(m.id, 'mission').catch(e => $('missionImageStatus').textContent = e.message);
   loadMissionImagesForForm(m.id, 'answer').catch(e => $('answerImageStatus').textContent = e.message);
   toggleQuizFields();
+updateNextMissionButtonCount();
 }
 function clearMissionForm() {
   ['missionId','missionCode','missionName','missionQuestion','missionAnswer','missionChoices','missionSequenceAnswer','missionWrongMessage','missionAnswerExplanation','missionHint','missionLocation','missionLat','missionLng'].forEach(id => $(id).value='');
   $('missionFormTitle').textContent = '미션 추가/수정';
   $('missionType').value='quiz'; $('missionQuizType').value='short'; $('missionScore').value=100; $('missionWrongPenalty').value=-5; $('missionHintPenalty').value=-10; $('missionRadius').value=80; $('missionOrder').value=1; $('missionRequired').checked = true;
   fillNextMissionOptions('', '');
-  $('missionNextButtonLabel').value='다음 미션 시작';
+  $('missionNextButtonLabel').value='다음 미션 시작'.slice(0, 12);
+  updateNextMissionButtonCount();
   $('missionNextMessageTemplate').value='다음 미션: {next_mission_code} {next_mission_name}\n아래 버튼을 누르면 QR을 다시 찍지 않아도 다음 미션을 바로 시작할 수 있습니다.';
   $('missionImages').value=''; $('answerImages').value='';
   $('missionImageStatus').textContent='등록된 미션 이미지 없음';
@@ -1342,7 +1426,7 @@ async function saveMission() {
       quiz_type:$('missionQuizType')?.value || 'short', choices:$('missionChoices')?.value || '', sequence_answer:$('missionSequenceAnswer')?.value || '',
       question:$('missionQuestion').value, answer:$('missionAnswer').value, wrong_message:$('missionWrongMessage').value, answer_explanation:$('missionAnswerExplanation').value, score:Number($('missionScore').value||0), wrong_penalty:Number($('missionWrongPenalty').value||-5), hint_penalty:Number($('missionHintPenalty').value||-10), hint:$('missionHint').value,
       next_mission_id:$('missionNextId')?.value ? Number($('missionNextId').value) : null,
-      next_mission_button_label:($('missionNextButtonLabel')?.value || '다음 미션 시작').trim(),
+      next_mission_button_label:($('missionNextButtonLabel')?.value || '다음 미션 시작').trim().slice(0, 12),
       next_mission_message_template:($('missionNextMessageTemplate')?.value || '').trim(),
       location_name:$('missionLocation').value, latitude:$('missionLat').value ? Number($('missionLat').value) : null, longitude:$('missionLng').value ? Number($('missionLng').value) : null,
       radius_m:Number($('missionRadius').value||80), sort_order:Number($('missionOrder').value||0), is_required:$('missionRequired').checked

@@ -621,11 +621,38 @@ const MESSAGE_SETTING_DEFINITIONS = [
   { key: 'no_teams', textKey: 'no_teams_message', titleKey: 'no_teams_title', label: '참가 가능한 팀 없음 안내', title: '팀 참가' },
   { key: 'mission_list', textKey: 'mission_list_message', titleKey: 'mission_list_title', label: '미션 목록 안내', title: '' },
   { key: 'already_completed', textKey: 'already_completed_message', titleKey: 'already_completed_title', label: '이미 완료한 미션 안내', title: '' },
+  { key: 'mission_success', textKey: 'mission_success_message', titleKey: 'mission_success_title', label: '정답/미션 완료 안내', title: '' },
+  { key: 'visit_success', textKey: 'visit_success_message', titleKey: 'visit_success_title', label: '방문 인증 완료 안내', title: '' },
   { key: 'need_team', textKey: 'need_team_message', titleKey: 'need_team_title', label: '팀 필요 안내', title: '참가 안내' },
   { key: 'finish', textKey: 'finish_message', titleKey: 'finish_title', label: '완주 종료 멘트', title: '완주 완료' },
 ];
 
-const MESSAGE_TEXT_KEYS = MESSAGE_SETTING_DEFINITIONS.map((item) => item.textKey);
+// 이미지/카드가 필요 없는 참가자용 시스템 문구도 모두 행사별 설정으로 관리합니다.
+// 관리자가 작성하지 않은 말투가 코드에서 갑자기 섞이지 않도록 한 곳에 모읍니다.
+const SYSTEM_MESSAGE_SETTING_DEFINITIONS = [
+  { textKey: 'score_message', label: '내 점수 안내' },
+  { textKey: 'ranking_message', label: '순위 안내' },
+  { textKey: 'ranking_empty_message', label: '순위에 팀이 없을 때' },
+  { textKey: 'team_members_message', label: '팀원 목록 안내' },
+  { textKey: 'team_members_empty_message', label: '팀원 정보가 없을 때' },
+  { textKey: 'join_team_select_message', label: '참가할 팀 선택 안내' },
+  { textKey: 'join_member_prompt_message', label: '팀 참가 이름 입력 안내' },
+  { textKey: 'join_complete_message', label: '팀 참가 완료 안내' },
+  { textKey: 'edit_team_name_prompt_message', label: '새 팀명 입력 안내' },
+  { textKey: 'edit_team_name_complete_message', label: '팀명 수정 완료 안내' },
+  { textKey: 'edit_member_name_prompt_message', label: '새 이름 입력 안내' },
+  { textKey: 'edit_member_name_complete_message', label: '이름 수정 완료 안내' },
+  { textKey: 'photo_mission_guide_message', label: '사진 미션 업로드 안내' },
+  { textKey: 'photo_upload_pending_message', label: '사진 접수 대기 안내' },
+  { textKey: 'photo_upload_approved_message', label: '사진 자동 승인 안내' },
+  { textKey: 'photo_review_approved_message', label: '사진 수동 승인 알림' },
+  { textKey: 'photo_review_rejected_message', label: '사진 반려 알림' },
+];
+
+const MESSAGE_TEXT_KEYS = [
+  ...MESSAGE_SETTING_DEFINITIONS.map((item) => item.textKey),
+  ...SYSTEM_MESSAGE_SETTING_DEFINITIONS.map((item) => item.textKey),
+];
 const MESSAGE_TITLE_KEYS = MESSAGE_SETTING_DEFINITIONS.map((item) => item.titleKey);
 const MESSAGE_IMAGE_KEYS = new Set(MESSAGE_SETTING_DEFINITIONS.map((item) => item.key));
 
@@ -634,6 +661,7 @@ const LEGACY_START_MESSAGE = `제주 AI 탐험대에 오신 것을 환영합니�
 새 팀을 만들거나 기존 팀에 참가해주세요.`;
 
 const DEFAULT_MESSAGE_SETTINGS = {
+  show_card_titles: false,
   start_title: '',
   returning_title: '',
   create_prompt_title: '팀 생성',
@@ -643,6 +671,8 @@ const DEFAULT_MESSAGE_SETTINGS = {
   no_teams_title: '팀 참가',
   mission_list_title: '',
   already_completed_title: '',
+  mission_success_title: '',
+  visit_success_title: '',
   need_team_title: '참가 안내',
   finish_title: '완주 완료',
   start_message: `{event_name}에 오신 것을 환영합니다!
@@ -679,6 +709,21 @@ const DEFAULT_MESSAGE_SETTINGS = {
   already_completed_message: `이미 완료한 미션입니다.
 
 다음 미션으로 이동해주세요.`,
+  mission_success_message: `정답입니다!
+
+수행자: {actor_name}
+기본 점수: {base_score}점
+오답 횟수: {wrong_count}회
+오답 감점: {wrong_penalty_total}점
+획득 점수: {earned_score}점
+현재 팀 총점: {total}점
+
+{answer_explanation}`,
+  visit_success_message: `방문 인증 완료!
+
+수행자: {actor_name}
+획득 점수: {earned_score}점
+현재 팀 총점: {total}점`,
   need_team_message: `먼저 팀을 만들거나 기존 팀에 참가해주세요.`,
   finish_message: `축하합니다! 완주 처리되었습니다.
 
@@ -686,12 +731,79 @@ const DEFAULT_MESSAGE_SETTINGS = {
 수행자: {actor_name}
 최종 점수: {total}점
 현재 순위: {rank}위`,
+  score_message: `{team_name} 현재 점수
+
+총점: {total}점
+
+미션 점수
+{mission_detail}
+
+감점/보너스 내역
+{adjustment_detail}`,
+  ranking_message: `현재 순위입니다.
+
+{ranking_list}`,
+  ranking_empty_message: `아직 등록된 팀이 없습니다.`,
+  team_members_message: `{team_name} 팀원 목록
+
+{member_list}`,
+  team_members_empty_message: `{team_name} 팀원 정보가 없습니다.`,
+  join_team_select_message: `참가할 팀을 선택해주세요.
+
+{team_list}
+
+번호를 입력하면 이름 또는 닉네임 입력 단계로 넘어갑니다.
+취소하려면 "취소"를 입력하세요.`,
+  join_member_prompt_message: `{team_name} 팀에 참가합니다.
+
+팀원 목록에 표시될 이름 또는 닉네임을 입력해주세요.
+예: 홍길동`,
+  join_complete_message: `{team_name} 팀 참가 완료!
+
+이름/닉네임: {member_name}
+팀코드: {team_code}`,
+  edit_team_name_prompt_message: `새 팀명을 입력해주세요.
+예: 한라탐험대`,
+  edit_team_name_complete_message: `팀명 수정 완료!
+
+새 팀명: {team_name}`,
+  edit_member_name_prompt_message: `새 이름 또는 닉네임을 입력해주세요.
+예: 홍길동`,
+  edit_member_name_complete_message: `이름/닉네임 수정 완료!
+
+새 이름: {member_name}`,
+  photo_mission_guide_message: `{question}
+
+아래 버튼을 눌러 사진을 업로드하면 운영자 승인 후 점수가 반영됩니다.`,
+  photo_upload_pending_message: `사진이 접수되었습니다.
+업로드한 팀원: {actor_name}
+운영자 승인 후 점수가 반영됩니다.`,
+  photo_upload_approved_message: `사진이 접수되어 승인되었습니다.
+업로드한 팀원: {actor_name}
+획득 점수: {earned_score}점
+
+{answer_explanation}
+{next_message}`,
+  photo_review_approved_message: `{actor_name}님이 업로드한 {mission_code} {mission_name} 인증 사진이 승인되었습니다.
+현재 팀 점수는 {total}점입니다.
+
+{answer_explanation}
+{next_message}`,
+  photo_review_rejected_message: `{actor_name}님이 업로드한 {mission_code} {mission_name} 인증 사진이 반려되었습니다.
+
+{wrong_message}
+{review_note}`,
 };
 
 function normalizeMessageSettings(value = {}, existing = {}) {
   const incoming = value && typeof value === 'object' ? value : {};
   const previous = existing && typeof existing === 'object' ? existing : {};
   const out = {};
+  out.show_card_titles = incoming.show_card_titles === true || incoming.show_card_titles === 'true' || incoming.show_card_titles === 'on'
+    ? true
+    : (incoming.show_card_titles === false || incoming.show_card_titles === 'false' || incoming.show_card_titles === 'off'
+      ? false
+      : Boolean(previous.show_card_titles ?? DEFAULT_MESSAGE_SETTINGS.show_card_titles));
 
   for (const key of MESSAGE_TEXT_KEYS) {
     let text = String(incoming[key] ?? previous[key] ?? DEFAULT_MESSAGE_SETTINGS[key] ?? '').trim();
@@ -727,6 +839,7 @@ function normalizeMessageSettings(value = {}, existing = {}) {
 
 function publicMessageSettings(settings = {}, req = null) {
   const out = {};
+  out.show_card_titles = Boolean(settings.show_card_titles);
   for (const key of MESSAGE_TEXT_KEYS) out[key] = settings[key] || DEFAULT_MESSAGE_SETTINGS[key] || '';
   for (const key of MESSAGE_TITLE_KEYS) out[key] = settings[key] ?? DEFAULT_MESSAGE_SETTINGS[key] ?? '';
   for (const item of MESSAGE_SETTING_DEFINITIONS) {
@@ -756,15 +869,35 @@ function messageDefinition(key = '') {
   return MESSAGE_SETTING_DEFINITIONS.find((item) => item.key === key) || null;
 }
 
+function cardTitlesEnabled(settings = {}) {
+  return settings?.show_card_titles === true || settings?.show_card_titles === 'true';
+}
+
 function messageTitle(settings = {}, key = '', fallback = '') {
   const def = messageDefinition(key);
   const saved = def?.titleKey ? settings?.[def.titleKey] : '';
   return String(saved ?? fallback ?? '').trim().slice(0, 40);
 }
 
+function visibleMessageTitle(settings = {}, key = '', fallback = '') {
+  if (!cardTitlesEnabled(settings)) return '';
+  return messageTitle(settings, key, fallback);
+}
+
+function visibleRawTitle(settings = {}, title = '') {
+  if (!cardTitlesEnabled(settings)) return '';
+  return String(title || '').trim().slice(0, 40);
+}
+
+function textWithOptionalTitle(title = '', text = '') {
+  const cleanTitle = String(title || '').trim();
+  const cleanText = String(text || '').trim();
+  return cleanTitle ? `${cleanTitle}\n\n${cleanText}` : cleanText;
+}
+
 function kakaoConfiguredMessage(req, settings, key, text, quickReplies = [], title = '') {
   const imageUrl = messageImageUrl(req, settings, key);
-  const cardTitle = messageTitle(settings, key, title);
+  const cardTitle = visibleMessageTitle(settings, key, title);
   if (imageUrl) return kakaoCard(cardTitle, text, [], quickReplies, imageUrl);
   return kakaoText(text, quickReplies);
 }
@@ -777,7 +910,7 @@ ${guideText}` : String(baseText || '').trim();
   const guideImage = guideText ? messageImageUrl(req, settings, 'mission_guide') : '';
   const baseImage = messageImageUrl(req, settings, baseKey);
   const imageUrl = guideImage || baseImage;
-  const cardTitle = messageTitle(settings, guideImage ? 'mission_guide' : baseKey, title);
+  const cardTitle = visibleMessageTitle(settings, guideImage ? 'mission_guide' : baseKey, title);
   if (imageUrl) return kakaoCard(cardTitle, text, [], quickReplies, imageUrl);
   return kakaoText(text, quickReplies);
 }
@@ -806,6 +939,14 @@ function renderTemplate(template = '', variables = {}) {
   });
 }
 
+function cleanRenderedMessage(text = '') {
+  return String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function eventTemplateVars(event = {}, team = null, memberName = '') {
   return {
     event_name: event?.event_name || '',
@@ -821,7 +962,7 @@ const DEFAULT_NEXT_MISSION_MESSAGE_TEMPLATE = `다음 미션: {next_mission_code
 아래 버튼을 누르면 QR을 다시 찍지 않아도 다음 미션을 바로 시작할 수 있습니다.`;
 
 function normalizeNextMissionButtonLabel(value = '') {
-  return (String(value || '').trim() || '다음 미션 시작').slice(0, 20);
+  return (String(value || '').trim() || '다음 미션 시작').slice(0, 12);
 }
 
 function nextMissionTemplateVariables({ event = {}, team = {}, mission = {}, nextMission = {}, actorName = '', total = '' } = {}) {
@@ -998,7 +1139,10 @@ async function initDb() {
       AND mi.image_kind = 'mission'
       AND ai.image_kind = 'answer'
       AND mi.id <> ai.id
-      AND mi.image_data = ai.image_data;
+      AND (
+        mi.image_data = ai.image_data
+        OR (COALESCE(mi.file_name, '') <> '' AND COALESCE(mi.file_name, '') = COALESCE(ai.file_name, ''))
+      );
   `);
 
   await query(`
@@ -1321,6 +1465,32 @@ async function getMissionImageCount(missionId, kind = 'mission') {
   return Number(result.rows[0]?.count || 0);
 }
 
+async function removeMissionAnswerImageDuplicates(eventId, missionId = null) {
+  if (!eventId) return;
+  const params = [eventId];
+  let missionFilter = '';
+  if (missionId) {
+    params.push(missionId);
+    missionFilter = `AND mi.mission_id=$${params.length}`;
+  }
+  await query(
+    `DELETE FROM mission_images mi
+     USING mission_images ai
+     WHERE mi.event_id=$1
+       ${missionFilter}
+       AND mi.mission_id = ai.mission_id
+       AND mi.event_id = ai.event_id
+       AND mi.image_kind = 'mission'
+       AND ai.image_kind = 'answer'
+       AND mi.id <> ai.id
+       AND (
+         mi.image_data = ai.image_data
+         OR (COALESCE(mi.file_name, '') <> '' AND COALESCE(mi.file_name, '') = COALESCE(ai.file_name, ''))
+       );`,
+    params
+  );
+}
+
 async function addMissionImages(eventId, missionId, kind, images = []) {
   const imageKind = normalizeMissionImageKind(kind);
   const cleanImages = Array.isArray(images) ? images.map(validateMissionImagePayload) : [];
@@ -1341,19 +1511,7 @@ async function addMissionImages(eventId, missionId, kind, images = []) {
 
   // 정답 이미지 업로드 중 mission 쪽에 만들어진 동일 이미지 중복본은 질문 이미지 목록에서 제거합니다.
   if (imageKind === 'answer' && inserted.length) {
-    await query(
-      `DELETE FROM mission_images mi
-       USING mission_images ai
-       WHERE mi.event_id=$1
-         AND mi.mission_id=$2
-         AND mi.image_kind='mission'
-         AND ai.event_id=mi.event_id
-         AND ai.mission_id=mi.mission_id
-         AND ai.image_kind='answer'
-         AND ai.id = ANY($3::int[])
-         AND mi.image_data=ai.image_data;`,
-      [eventId, missionId, inserted.map((img) => img.id)]
-    );
+    await removeMissionAnswerImageDuplicates(eventId, missionId);
   }
 
   return inserted;
@@ -1772,6 +1930,27 @@ async function scoreAdjustmentDetails(teamId) {
   return result.rows;
 }
 
+async function missionAdjustmentTotal(teamId, missionId, eventTypes = []) {
+  if (!teamId || !missionId) return 0;
+  const types = Array.isArray(eventTypes) ? eventTypes.map(String).filter(Boolean) : [];
+  if (types.length) {
+    const result = await query(
+      `SELECT COALESCE(SUM(score_delta), 0)::int AS total
+       FROM score_events
+       WHERE team_id=$1 AND mission_id=$2 AND event_type = ANY($3::text[]);`,
+      [teamId, missionId, types]
+    );
+    return Number(result.rows[0]?.total || 0);
+  }
+  const result = await query(
+    `SELECT COALESCE(SUM(score_delta), 0)::int AS total
+     FROM score_events
+     WHERE team_id=$1 AND mission_id=$2;`,
+    [teamId, missionId]
+  );
+  return Number(result.rows[0]?.total || 0);
+}
+
 async function getCompletedMissionIds(teamId) {
   const result = await query(
     `SELECT DISTINCT mission_id
@@ -1941,17 +2120,20 @@ async function buildRanking(eventId) {
 const KAKAO_MAX_OUTPUTS = 3;
 const KAKAO_TEXT_CHUNK_LIMIT = 650;
 const KAKAO_CARD_DESC_LIMIT = 180;
+const QR_SCAN_QUICK_REPLY = 'QR코드 스캔';
 
 function safeKakaoQuickReplies(quickReplies = []) {
-  return Array.isArray(quickReplies)
-    ? quickReplies
-        .filter((q) => typeof q === 'string' && q.trim() !== '')
-        .slice(0, 10)
-        .map((q) => {
-          const label = q.trim().slice(0, 20);
-          return { action: 'message', label, messageText: q.trim() };
-        })
-    : [];
+  const requested = Array.isArray(quickReplies) ? quickReplies : [];
+  // 모든 챗봇 응답 하단에 스캔 진입 버튼을 고정합니다.
+  // 카카오 빠른응답 최대 10개 제한 때문에 나머지 메뉴는 최대 9개만 유지합니다.
+  const values = [QR_SCAN_QUICK_REPLY, ...requested]
+    .filter((q) => typeof q === 'string' && q.trim() !== '')
+    .filter((q, index, all) => all.findIndex((item) => item.trim() === q.trim()) === index)
+    .slice(0, 10);
+  return values.map((q) => {
+    const label = q.trim().slice(0, 20);
+    return { action: 'message', label, messageText: q.trim() };
+  });
 }
 
 function splitKakaoText(text = '', maxLen = KAKAO_TEXT_CHUNK_LIMIT, maxChunks = KAKAO_MAX_OUTPUTS) {
@@ -2065,8 +2247,10 @@ function kakaoCarousel(cards = [], quickReplies = []) {
 
 function buildImageCards(title, description, imageUrls = [], buttons = []) {
   const urls = Array.isArray(imageUrls) ? imageUrls.filter(Boolean).slice(0, 10) : [];
+  const safeTitle = String(title || '').trim();
   return urls.map((imageUrl, index) => {
-    const card = { title: urls.length === 1 ? String(title || '') : `${title} (${index + 1}/${urls.length})`, description: index === 0 ? String(description || '') : '이미지를 좌우로 넘겨 확인해주세요.', thumbnail: { imageUrl, fixedRatio: true } };
+    const card = { description: index === 0 ? String(description || '') : '이미지를 좌우로 넘겨 확인해주세요.', thumbnail: { imageUrl, fixedRatio: true } };
+    if (safeTitle) card.title = urls.length === 1 ? safeTitle : `${safeTitle} (${index + 1}/${urls.length})`;
     const safeButtons = Array.isArray(buttons) ? buttons.slice(0, 3) : [];
     if (safeButtons.length > 0 && index === 0) card.buttons = safeButtons;
     return card;
@@ -2102,13 +2286,23 @@ function isMissionCode(text) {
 
 async function completedMissionDetails(teamId) {
   const result = await query(
-    `SELECT DISTINCT ON (s.mission_id)
-       s.mission_id, s.score, s.actor_name, s.submitted_at,
-       m.mission_code, m.mission_name, m.sort_order
-     FROM submissions s
-     JOIN missions m ON m.id=s.mission_id
-     WHERE s.team_id=$1 AND s.status IN ('correct', 'approved') AND s.score > 0
-     ORDER BY s.mission_id, s.score DESC, s.submitted_at ASC;`,
+    `WITH best AS (
+       SELECT DISTINCT ON (s.mission_id)
+         s.mission_id, s.score, s.actor_name, s.submitted_at,
+         m.mission_code, m.mission_name, m.sort_order
+       FROM submissions s
+       JOIN missions m ON m.id=s.mission_id
+       WHERE s.team_id=$1 AND s.status IN ('correct', 'approved') AND s.score > 0
+       ORDER BY s.mission_id, s.score DESC, s.submitted_at ASC
+     ), adjustments AS (
+       SELECT mission_id, COALESCE(SUM(score_delta), 0)::int AS adjustment_score
+       FROM score_events
+       WHERE team_id=$1 AND mission_id IS NOT NULL
+       GROUP BY mission_id
+     )
+     SELECT best.*, (best.score + COALESCE(adjustments.adjustment_score, 0))::int AS net_score
+     FROM best
+     LEFT JOIN adjustments ON adjustments.mission_id=best.mission_id;`,
     [teamId]
   );
 
@@ -2124,7 +2318,7 @@ async function handleMissionList(req, event, team, messages = DEFAULT_MESSAGE_SE
     const done = completedMap.get(m.id);
     if (done) {
       const actor = done.actor_name || '팀원';
-      return `✅ ${m.mission_code} ${m.mission_name} (획득 +${done.score}점 / 수행자: ${actor})`;
+      return `✅ ${m.mission_code} ${m.mission_name} (획득 +${Number(done.net_score ?? done.score ?? 0)}점 / 수행자: ${actor})`;
     }
     return `⬜ ${m.mission_code} ${m.mission_name}`;
   });
@@ -2146,7 +2340,7 @@ async function handleMissionList(req, event, team, messages = DEFAULT_MESSAGE_SE
   return kakaoConfiguredMessage(req, messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list', text, menuQuickReplies, '');
 }
 
-async function handleScore(team) {
+async function handleScore(team, messages = DEFAULT_MESSAGE_SETTINGS) {
   const total = await teamTotalScore(team.id);
   const result = await query(
     `SELECT DISTINCT ON (m.id)
@@ -2174,27 +2368,22 @@ async function handleScore(team) {
       }).join('\n')
     : '감점/보너스 내역이 없습니다.';
 
-  return kakaoText(`${team.team_name} 현재 점수
-
-총점: ${total}점
-
-미션 점수
-${missionDetail}
-
-감점/보너스 내역
-${adjustmentDetail}`, menuQuickReplies);
+  return kakaoText(renderTemplate(messages.score_message, {
+    team_name: team.team_name, team_code: team.team_code, total,
+    mission_detail: missionDetail, adjustment_detail: adjustmentDetail,
+  }), menuQuickReplies);
 }
 
-async function handleRanking(eventId) {
+async function handleRanking(eventId, messages = DEFAULT_MESSAGE_SETTINGS) {
   const ranking = await buildRanking(eventId);
-  if (!ranking.length) return kakaoText('아직 등록된 팀이 없습니다.', menuQuickReplies);
+  if (!ranking.length) return kakaoText(messages.ranking_empty_message, menuQuickReplies);
   const top = ranking.slice(0, 10).map((r) => `${r.rank}위 ${r.team_name} (${r.team_code}) - ${r.total_score}점`).join('\n');
-  return kakaoText(`현재 순위입니다.\n\n${top}`, menuQuickReplies);
+  return kakaoText(renderTemplate(messages.ranking_message, { ranking_list: top, team_count: ranking.length }), menuQuickReplies);
 }
 
-async function handleTeamMembers(team) {
+async function handleTeamMembers(team, messages = DEFAULT_MESSAGE_SETTINGS) {
   const members = await getTeamMembers(team.id);
-  if (!members.length) return kakaoText(`${team.team_name} 팀원 정보가 없습니다.`, menuQuickReplies);
+  if (!members.length) return kakaoText(renderTemplate(messages.team_members_empty_message, { team_name: team.team_name, team_code: team.team_code }), menuQuickReplies);
 
   const lines = members.map((m, idx) => {
     const roleLabel = m.role === 'leader' ? '팀장' : '팀원';
@@ -2202,7 +2391,7 @@ async function handleTeamMembers(team) {
     return `${idx + 1}. ${name} (${roleLabel})`;
   });
 
-  return kakaoText(`${team.team_name} 팀원 목록\n\n${lines.join('\n')}`, menuQuickReplies);
+  return kakaoText(renderTemplate(messages.team_members_message, { team_name: team.team_name, team_code: team.team_code, member_list: lines.join('\n'), member_count: members.length }), menuQuickReplies);
 }
 
 async function handleJoinTeamList(req, event, kakaoUserId, messages) {
@@ -2223,7 +2412,7 @@ async function handleJoinTeamList(req, event, kakaoUserId, messages) {
 
   const quickReplies = teams.slice(0, 10).map((_, index) => String(index + 1));
   return kakaoText(
-    `참가할 팀을 선택해주세요.\n\n${lines.join('\n')}\n\n번호를 입력하면 이름 또는 닉네임 입력 단계로 넘어갑니다.\n취소하려면 "취소"를 입력하세요.`,
+    renderTemplate(messages.join_team_select_message, { ...eventTemplateVars(event), team_list: lines.join('\n'), team_count: teams.length }),
     [...quickReplies, '취소'].slice(0, 10)
   );
 }
@@ -2323,18 +2512,22 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
   await query(`UPDATE teams SET current_mission_id=$1 WHERE id=$2;`, [mission.id, team.id]);
   const missionImages = await getMissionImages(mission.id, 'mission');
   const imageUrls = missionImageLinks(req, missionImages);
+  const messageSettings = await getMessageSettings(event.id);
 
   if (mission.mission_type === 'photo') {
     const url = `${baseUrl(req)}/upload?event=${encodeURIComponent(eventQueryValue(event))}&team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}&actor=${encodeURIComponent(kakaoUserId)}`;
-    const title = `${mission.mission_code} ${mission.mission_name}`;
-    const desc = `${mission.question}\n\n아래 버튼을 눌러 사진을 업로드하면 운영자 승인 후 점수가 반영됩니다.`;
+    const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
+    const desc = renderTemplate(messageSettings.photo_mission_guide_message, {
+      ...eventTemplateVars(event, team), question: mission.question, mission_code: mission.mission_code,
+      mission_name: mission.mission_name, score: mission.score,
+    });
     const buttons = [{ action: 'webLink', label: '사진 업로드', webLinkUrl: url }];
     if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls, buttons), menuQuickReplies);
     return kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || '');
   }
   if (mission.mission_type === 'gps') {
     const url = `${baseUrl(req)}/gps?event=${encodeURIComponent(eventQueryValue(event))}&team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}&actor=${encodeURIComponent(kakaoUserId)}`;
-    const title = `${mission.mission_code} ${mission.mission_name}`;
+    const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
     const desc = `${mission.question}\n\n아래 버튼을 눌러 위치 권한을 허용해주세요.`;
     const fallbackUrl = `${baseUrl(req)}/upload?event=${encodeURIComponent(eventQueryValue(event))}&team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}&actor=${encodeURIComponent(kakaoUserId)}&fallback=gps`;
     const buttons = [
@@ -2345,13 +2538,13 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
     return kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || '');
   }
   if (mission.mission_type === 'complete') {
-    const title = `${mission.mission_code} ${mission.mission_name}`;
+    const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
     const desc = `${mission.question}\n\n완료하려면 '${mission.answer || '완주'}'라고 입력해주세요.`;
     if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls), ['완주', ...menuQuickReplies]);
     if (imageUrls.length === 1) return kakaoCard(title, desc, [], ['완주', ...menuQuickReplies], imageUrls[0]);
     return kakaoText(desc, ['완주', ...menuQuickReplies]);
   }
-  const title = `${mission.mission_code} ${mission.mission_name}`;
+  const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
   const quizType = normalizeQuizType(mission.quiz_type || 'short');
 
   if (mission.mission_type === 'quiz' && quizType === 'choice') {
@@ -2361,7 +2554,7 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
     const quickReplies = choiceQuickReplies(mission, menuQuickReplies);
     if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls), quickReplies);
     if (imageUrls.length === 1) return kakaoCard(title, desc, [], quickReplies, imageUrls[0]);
-    return kakaoText(`${title}\n\n${desc}`, quickReplies);
+    return kakaoText(textWithOptionalTitle(title, desc), quickReplies);
   }
 
   if (mission.mission_type === 'quiz' && quizType === 'sequence') {
@@ -2370,13 +2563,13 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
     const quickReplies = sequenceQuickReplies(mission, []);
     if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls), quickReplies);
     if (imageUrls.length === 1) return kakaoCard(title, desc, [], quickReplies, imageUrls[0]);
-    return kakaoText(`${title}\n\n${desc}`, quickReplies);
+    return kakaoText(textWithOptionalTitle(title, desc), quickReplies);
   }
 
   const desc = String(mission.question || '').trim();
   if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls), menuQuickReplies);
   if (imageUrls.length === 1) return kakaoCard(title, desc, [], menuQuickReplies, imageUrls[0]);
-  return kakaoText(`${title}\n\n${desc}`, menuQuickReplies);
+  return kakaoText(textWithOptionalTitle(title, desc), menuQuickReplies);
 }
 
 
@@ -2412,6 +2605,8 @@ function linkedNextMissionButton(mission, nextMission) {
 
 async function missionCompletionResponse(req, event, mission, text, quickReplies = menuQuickReplies, imageUrls = [], title = '미션 완료', options = {}) {
   const team = options.team || {};
+  const messageSettings = options.settings || await getMessageSettings(event.id);
+  const cardTitle = visibleRawTitle(messageSettings, title);
   const autoCompleteMission = await activateCompleteMissionIfReady(event.id, team, mission);
 
   let buttons = [];
@@ -2434,9 +2629,9 @@ async function missionCompletionResponse(req, event, mission, text, quickReplies
     finalText = nextMessage ? `${text}\n\n${nextMessage}` : text;
   }
 
-  if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, finalText, imageUrls, buttons), quickReplies);
-  if (imageUrls.length === 1) return kakaoCard(title, finalText, buttons, quickReplies, imageUrls[0]);
-  if (buttons.length) return kakaoCard(title, finalText, buttons, quickReplies);
+  if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(cardTitle, finalText, imageUrls, buttons), quickReplies);
+  if (imageUrls.length === 1) return kakaoCard(cardTitle, finalText, buttons, quickReplies, imageUrls[0]);
+  if (buttons.length) return kakaoCard(cardTitle, finalText, buttons, quickReplies);
   return kakaoText(finalText, quickReplies);
 }
 
@@ -2634,23 +2829,37 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
     if (isCorrect) {
       const total = await afterMissionCompleted(event, team, mission, kakaoUserId, actorName);
       const explanation = String(mission.answer_explanation || '').trim();
-      const successText = `정답입니다!
-
-${mission.mission_code} ${mission.mission_name} 완료
-수행자: ${actorName}
-기본 점수: ${baseScore}점
-오답 횟수: ${wrongCount}회${wrongCount > 0 ? `
-오답 감점은 이미 팀 점수에 반영되었습니다.` : ''}
-획득 점수: ${earnedScore}점
-현재 팀 총점: ${total}점${explanation ? `
-
-정답 설명
-${explanation}` : ''}
-
-다른 팀원에게도 미션 완료 알림이 표시됩니다.`;
+      const missionAdjustment = await missionAdjustmentTotal(team.id, mission.id);
+      const wrongPenaltyTotal = await missionAdjustmentTotal(team.id, mission.id, ['wrong']);
+      const hintPenaltyTotal = await missionAdjustmentTotal(team.id, mission.id, ['hint']);
+      const displayEarnedScore = baseScore + missionAdjustment;
+      const successVariables = {
+        ...eventTemplateVars(event, team, actorName),
+        mission_code: mission.mission_code || '',
+        mission_name: mission.mission_name || '',
+        actor_name: actorName,
+        member_name: actorName,
+        base_score: baseScore,
+        wrong_count: wrongCount,
+        wrong_penalty: wrongPenalty,
+        wrong_penalty_total: wrongPenaltyTotal,
+        hint_penalty_total: hintPenaltyTotal,
+        penalty_total: missionAdjustment,
+        adjustment_total: missionAdjustment,
+        earned_score: displayEarnedScore,
+        mission_net_score: displayEarnedScore,
+        submitted_score: earnedScore,
+        total_score: total,
+        total,
+        answer_explanation: explanation,
+      };
+      const successTemplate = String(messages?.mission_success_message || DEFAULT_MESSAGE_SETTINGS.mission_success_message || '').trim();
+      const successText = cleanRenderedMessage(renderTemplate(successTemplate, successVariables)) || cleanRenderedMessage(explanation || '정답입니다!');
       const answerImages = await getMissionImages(mission.id, 'answer');
       const answerImageUrls = missionImageLinks(req, answerImages);
-      return missionCompletionResponse(req, event, mission, successText, menuQuickReplies, answerImageUrls, `${mission.mission_code} ${mission.mission_name} 정답 설명`, { team, actorName, total });
+      const successSettingImageUrl = messageImageUrl(req, messages, 'mission_success');
+      const finalImageUrls = answerImageUrls.length ? answerImageUrls : (successSettingImageUrl ? [successSettingImageUrl] : []);
+      return missionCompletionResponse(req, event, mission, successText, menuQuickReplies, finalImageUrls, `${mission.mission_code} ${mission.mission_name} 정답 설명`, { team, actorName, total, settings: messages });
     }
 
     const totalAfterWrong = await teamTotalScore(team.id);
@@ -2693,7 +2902,20 @@ ${explanation}` : ''}
 
     if (ok) {
       const total = await afterMissionCompleted(event, team, mission, kakaoUserId, actorName);
-      return missionCompletionResponse(req, event, mission, `방문 인증 완료!\n\n수행자: ${actorName}\n획득 점수: ${mission.score}점\n현재 팀 총점: ${total}점`, menuQuickReplies, [], `${mission.mission_code} ${mission.mission_name} 완료`, { team, actorName, total });
+      const visitVariables = {
+        ...eventTemplateVars(event, team, actorName),
+        mission_code: mission.mission_code || '',
+        mission_name: mission.mission_name || '',
+        actor_name: actorName,
+        member_name: actorName,
+        base_score: Number(mission.score || 0),
+        earned_score: Number(mission.score || 0),
+        total_score: total,
+        total,
+      };
+      const visitText = cleanRenderedMessage(renderTemplate(messages?.visit_success_message || DEFAULT_MESSAGE_SETTINGS.visit_success_message, visitVariables));
+      const visitSettingImageUrl = messageImageUrl(req, messages, 'visit_success');
+      return missionCompletionResponse(req, event, mission, visitText, menuQuickReplies, visitSettingImageUrl ? [visitSettingImageUrl] : [], `${mission.mission_code} ${mission.mission_name} 완료`, { team, actorName, total, settings: messages });
     }
 
     const wrongText = String(mission.wrong_message || '').trim()
@@ -2733,7 +2955,7 @@ ${explanation}` : ''}
       : [];
     const finishImageUrl = messageImageUrl(req, messages, 'finish');
     if (certificateButton.length || finishImageUrl) {
-      return kakaoCard('완주 완료', finishText, certificateButton, ['순위', '내 점수'], finishImageUrl);
+      return kakaoCard(visibleMessageTitle(messages, 'finish', '완주 완료'), finishText, certificateButton, ['순위', '내 점수'], finishImageUrl);
     }
     return kakaoText(finishText, ['순위', '내 점수']);
   }
@@ -2881,7 +3103,7 @@ async function handleKakaoSkill(req, res) {
       await setUserState(event.id, kakaoUserId, 'WAIT_JOIN_MEMBER_NAME', { teamId: selected.id, teamName: selected.name });
       return respondKakao(
         res,
-        kakaoText(`${selected.name} 팀에 참가합니다.\n\n팀원 목록에 표시될 이름 또는 닉네임을 입력해주세요.\n예: 홍길동`, ['취소'])
+        kakaoText(renderTemplate(messages.join_member_prompt_message, { ...eventTemplateVars(event), team_name: selected.name }), ['취소'])
       );
     }
 
@@ -2905,10 +3127,7 @@ async function handleKakaoSkill(req, res) {
         member_name: memberName,
         actor_name: memberName,
       };
-      const joinText = `${team.team_name} 팀 참가 완료!
-
-이름/닉네임: ${memberName}
-팀코드: ${team.team_code}`;
+      const joinText = renderTemplate(messages.join_complete_message, joinReadyVars);
       return respondKakao(
         res,
         kakaoTeamReadyMessage(req, messages, 'team_created', joinText, joinReadyVars, menuQuickReplies, '팀 참가 완료'),
@@ -2930,7 +3149,7 @@ async function handleKakaoSkill(req, res) {
       await clearUserState(event.id, kakaoUserId);
       team = await getTeamByKakaoUser(event.id, kakaoUserId);
       await addTeamNotice(event.id, team.id, `팀명이 '${team.team_name}'(으)로 변경되었습니다.`, kakaoUserId);
-      return respondKakao(res, kakaoText(`팀명 수정 완료!\n\n새 팀명: ${team.team_name}`, menuQuickReplies), event, team, kakaoUserId);
+      return respondKakao(res, kakaoText(renderTemplate(messages.edit_team_name_complete_message, eventTemplateVars(event, team)), menuQuickReplies), event, team, kakaoUserId);
     }
 
     if (team && userState?.state === 'WAIT_EDIT_MEMBER_NAME') {
@@ -2944,7 +3163,7 @@ async function handleKakaoSkill(req, res) {
       );
       await clearUserState(event.id, kakaoUserId);
       await addTeamNotice(event.id, team.id, `${memberName}님이 이름/닉네임을 수정했습니다.`, kakaoUserId);
-      return respondKakao(res, kakaoText(`이름/닉네임 수정 완료!\n\n새 이름: ${memberName}`, menuQuickReplies), event, team, kakaoUserId);
+      return respondKakao(res, kakaoText(renderTemplate(messages.edit_member_name_complete_message, { ...eventTemplateVars(event, team, memberName), member_name: memberName }), menuQuickReplies), event, team, kakaoUserId);
     }
 
     if (isStartCommand(utterance) || isHelpCommand(utterance)) {
@@ -2979,16 +3198,16 @@ async function handleKakaoSkill(req, res) {
 
     if (isTeamNameEditCommand(utterance)) {
       await setUserState(event.id, kakaoUserId, 'WAIT_EDIT_TEAM_NAME', {});
-      return respondKakao(res, kakaoText('새 팀명을 입력해주세요.\n예: 한라탐험대', ['취소']), event, team, kakaoUserId);
+      return respondKakao(res, kakaoText(renderTemplate(messages.edit_team_name_prompt_message, eventTemplateVars(event, team)), ['취소']), event, team, kakaoUserId);
     }
 
     if (isMemberNameEditCommand(utterance)) {
       await setUserState(event.id, kakaoUserId, 'WAIT_EDIT_MEMBER_NAME', {});
-      return respondKakao(res, kakaoText('새 이름 또는 닉네임을 입력해주세요.\n예: 홍길동', ['취소']), event, team, kakaoUserId);
+      return respondKakao(res, kakaoText(renderTemplate(messages.edit_member_name_prompt_message, eventTemplateVars(event, team)), ['취소']), event, team, kakaoUserId);
     }
 
     if (isTeamMembersCommand(utterance)) {
-      return respondKakao(res, await handleTeamMembers(team), event, team, kakaoUserId);
+      return respondKakao(res, await handleTeamMembers(team, messages), event, team, kakaoUserId);
     }
 
     if (isMissionListCommand(utterance)) {
@@ -3000,11 +3219,11 @@ async function handleKakaoSkill(req, res) {
     }
 
     if (isScoreCommand(utterance)) {
-      return respondKakao(res, await handleScore(team), event, team, kakaoUserId);
+      return respondKakao(res, await handleScore(team, messages), event, team, kakaoUserId);
     }
 
     if (isRankCommand(utterance)) {
-      return respondKakao(res, await handleRanking(event.id), event, team, kakaoUserId);
+      return respondKakao(res, await handleRanking(event.id, messages), event, team, kakaoUserId);
     }
 
     if (isMissionCode(utterance)) {
@@ -3346,6 +3565,7 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
     const actor = await resolveActorForTeam(event.id, team.id, actorId, team.leader_name || '팀원');
 
     const photoAutoApproval = await getPhotoAutoApprovalSettings(event.id);
+    const messages = await getMessageSettings(event.id);
     const autoApprove = isPhotoAutoApprovalActive(photoAutoApproval);
     const finalStatus = autoApprove ? 'approved' : 'pending';
     const finalScore = autoApprove ? Number(mission.score || 0) : 0;
@@ -3419,16 +3639,21 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
       return res.json({
         ok: true,
         auto_approved: true,
-        message: `${gpsFallback ? 'GPS 대체 사진' : '사진'}이 접수되어 자동 승인되었습니다.
-업로드한 팀원: ${actor.actor_name}
-획득 점수: ${mission.score}점${nextText}`,
+        message: cleanRenderedMessage(renderTemplate(messages.photo_upload_approved_message, {
+          ...eventTemplateVars(event, team, actor.actor_name), mission_code: mission.mission_code,
+          mission_name: mission.mission_name, actor_name: actor.actor_name,
+          earned_score: mission.score, total, answer_explanation: mission.answer_explanation || '',
+          next_message: String(nextText || '').trim(), photo_type: gpsFallback ? 'GPS 대체 사진' : '사진',
+        })),
       });
     }
 
     await addTeamNotice(event.id, team.id, `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} ${gpsFallback ? 'GPS 대체 사진' : '사진'}을 업로드했습니다. 운영자 승인 후 점수가 반영됩니다.`, actor.actor_kakao_user_id);
-    res.json({ ok: true, message: `${gpsFallback ? 'GPS 대체 사진' : '사진'}이 접수되었습니다.
-업로드한 팀원: ${actor.actor_name}
-운영자 승인 후 점수가 반영됩니다.` });
+    res.json({ ok: true, message: cleanRenderedMessage(renderTemplate(messages.photo_upload_pending_message, {
+      ...eventTemplateVars(event, team, actor.actor_name), mission_code: mission.mission_code,
+      mission_name: mission.mission_name, actor_name: actor.actor_name,
+      photo_type: gpsFallback ? 'GPS 대체 사진' : '사진',
+    })) });
   } catch (error) {
     console.error('Photo upload failed:', error);
     res.status(500).json({ ok: false, message: error.message });
@@ -4001,6 +4226,7 @@ app.get('/api/admin/settings/messages', requireAdmin, async (req, res) => {
     settings: publicMessageSettings(settings, req),
     defaults: publicMessageSettings(DEFAULT_MESSAGE_SETTINGS, req),
     message_items: MESSAGE_SETTING_DEFINITIONS.map(({ key, textKey, label }) => ({ key, textKey, label })),
+    system_message_items: SYSTEM_MESSAGE_SETTING_DEFINITIONS,
   });
 });
 
@@ -4014,6 +4240,7 @@ app.patch('/api/admin/settings/messages', requireAdmin, async (req, res) => {
     settings: publicMessageSettings(settings, req),
     defaults: publicMessageSettings(DEFAULT_MESSAGE_SETTINGS, req),
     message_items: MESSAGE_SETTING_DEFINITIONS.map(({ key, textKey, label }) => ({ key, textKey, label })),
+    system_message_items: SYSTEM_MESSAGE_SETTING_DEFINITIONS,
   });
 });
 
@@ -4050,7 +4277,7 @@ app.patch('/api/admin/photo-auto-approval', requireAdmin, async (req, res) => {
 app.get('/api/admin/chatbot-messages', requireAdmin, async (req, res) => {
   const event = await getActiveEvent(req);
   const settings = await getMessageSettings(event.id);
-  res.json({ ok: true, settings: publicMessageSettings(settings, req), defaults: publicMessageSettings(DEFAULT_MESSAGE_SETTINGS, req), message_items: MESSAGE_SETTING_DEFINITIONS.map(({ key, textKey, label }) => ({ key, textKey, label })) });
+  res.json({ ok: true, settings: publicMessageSettings(settings, req), defaults: publicMessageSettings(DEFAULT_MESSAGE_SETTINGS, req), message_items: MESSAGE_SETTING_DEFINITIONS.map(({ key, textKey, label }) => ({ key, textKey, label })), system_message_items: SYSTEM_MESSAGE_SETTING_DEFINITIONS });
 });
 
 app.patch('/api/admin/chatbot-messages', requireAdmin, async (req, res) => {
@@ -4058,7 +4285,7 @@ app.patch('/api/admin/chatbot-messages', requireAdmin, async (req, res) => {
   const current = await getMessageSettings(event.id);
   const settings = normalizeMessageSettings(req.body || {}, current);
   await setSetting(event.id, 'chatbot_messages', settings);
-  res.json({ ok: true, settings: publicMessageSettings(settings, req), defaults: publicMessageSettings(DEFAULT_MESSAGE_SETTINGS, req), message_items: MESSAGE_SETTING_DEFINITIONS.map(({ key, textKey, label }) => ({ key, textKey, label })) });
+  res.json({ ok: true, settings: publicMessageSettings(settings, req), defaults: publicMessageSettings(DEFAULT_MESSAGE_SETTINGS, req), message_items: MESSAGE_SETTING_DEFINITIONS.map(({ key, textKey, label }) => ({ key, textKey, label })), system_message_items: SYSTEM_MESSAGE_SETTING_DEFINITIONS });
 });
 
 app.get('/api/admin/status', requireAdmin, async (req, res) => {
@@ -4126,6 +4353,8 @@ app.patch('/api/admin/missions/:id', requireAdmin, async (req, res) => {
 });
 
 app.get('/api/admin/missions/:id/images', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
+  await removeMissionAnswerImageDuplicates(event.id, req.params.id);
   const kind = normalizeMissionImageKind(req.query.kind || 'mission');
   const images = await getMissionImages(req.params.id, kind);
   res.json({ ok: true, images: images.map((img) => ({ ...img, image_url: `${baseUrl(req)}/api/public/mission-images/${img.id}` })), max_count: MAX_MISSION_IMAGES_PER_KIND, max_bytes: MAX_MISSION_IMAGE_BYTES, allowed_mimes: [...ALLOWED_MISSION_IMAGE_MIMES] });
@@ -4196,7 +4425,7 @@ app.post('/api/admin/submissions/:id/review', requireAdmin, async (req, res) => 
   }
 
   const sub = (
-    await query(`SELECT s.*, m.score AS mission_score, m.mission_code, m.mission_name, m.next_mission_id, m.next_mission_button_label, m.next_mission_message_template FROM submissions s JOIN missions m ON m.id=s.mission_id WHERE s.id=$1;`, [req.params.id])
+    await query(`SELECT s.*, m.score AS mission_score, m.mission_code, m.mission_name, m.answer_explanation, m.wrong_message, m.next_mission_id, m.next_mission_button_label, m.next_mission_message_template FROM submissions s JOIN missions m ON m.id=s.mission_id WHERE s.id=$1;`, [req.params.id])
   ).rows[0];
 
   if (!sub) return res.status(404).json({ ok: false, message: '제출 기록을 찾을 수 없습니다.' });
@@ -4208,13 +4437,25 @@ app.post('/api/admin/submissions/:id/review', requireAdmin, async (req, res) => 
   );
 
   const team = (await query(`SELECT * FROM teams WHERE id=$1;`, [sub.team_id])).rows[0];
+  const messages = await getMessageSettings(sub.event_id);
   await maybeMarkFinished(team, sub.event_id);
 
   if (decision === 'approved') {
     const total = await teamTotalScore(team.id);
     const actorLabel = sub.actor_name || '팀원';
     const nextText = await nextOrCompleteMissionPlainText(sub.event_id, team, sub, { team_name: team.team_name || '', team_code: team.team_code || '', actor_name: actorLabel, total_score: total, total });
-    await addTeamNotice(sub.event_id, team.id, `${actorLabel}님이 업로드한 ${sub.mission_code} ${sub.mission_name} 인증 사진이 승인되었습니다. 현재 팀 점수는 ${total}점입니다.${nextText}`, sub.actor_kakao_user_id || '');
+    await addTeamNotice(sub.event_id, team.id, cleanRenderedMessage(renderTemplate(messages.photo_review_approved_message, {
+      team_name: team.team_name, team_code: team.team_code, actor_name: actorLabel,
+      mission_code: sub.mission_code, mission_name: sub.mission_name, total,
+      earned_score: score, answer_explanation: sub.answer_explanation || '', next_message: String(nextText || '').trim(),
+    })), sub.actor_kakao_user_id || '');
+  } else {
+    const actorLabel = sub.actor_name || '팀원';
+    await addTeamNotice(sub.event_id, team.id, cleanRenderedMessage(renderTemplate(messages.photo_review_rejected_message, {
+      team_name: team.team_name, team_code: team.team_code, actor_name: actorLabel,
+      mission_code: sub.mission_code, mission_name: sub.mission_name,
+      wrong_message: sub.wrong_message || '', review_note: note || '',
+    })), sub.actor_kakao_user_id || '');
   }
 
   res.json({ ok: true, submission: result.rows[0] });
