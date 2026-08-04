@@ -955,14 +955,11 @@ async function initDb() {
 
   await query(`CREATE INDEX IF NOT EXISTS idx_mission_images_mission_kind ON mission_images(mission_id, image_kind, sort_order, id);`);
 
-  await query(`
-    INSERT INTO mission_images(event_id, mission_id, image_kind, image_data, image_mime, file_name, sort_order)
-    SELECT event_id, id, 'mission', mission_image_data, COALESCE(NULLIF(mission_image_mime, ''), 'image/jpeg'), 'legacy_mission_image', 0
-    FROM missions m
-    WHERE mission_image_data IS NOT NULL
-      AND mission_image_data <> ''
-      AND NOT EXISTS (SELECT 1 FROM mission_images mi WHERE mi.mission_id=m.id AND mi.image_kind='mission');
-  `);
+  // 중요: 이전 버전의 단일 이미지 컬럼(missions.mission_image_data)을
+  // mission_images 테이블로 자동 복사하지 않습니다.
+  // 이 자동 복사 로직이 정답 설명 이미지/미션 안내 이미지를 구분하지 못해
+  // 업데이트 후 정답 이미지가 질문 안내 이미지 목록에 섞여 보이는 원인이 될 수 있습니다.
+  // 앞으로는 mission_images.image_kind='mission' 또는 'answer'로 저장된 이미지만 사용합니다.
 
   await query(`
     CREATE TABLE IF NOT EXISTS teams (
@@ -1181,7 +1178,7 @@ async function getMissions(eventId) {
        nm.mission_code AS next_mission_code, nm.mission_name AS next_mission_name,
        COALESCE(mi.mission_image_count, 0)::int AS mission_image_count,
        COALESCE(ai.answer_image_count, 0)::int AS answer_image_count,
-       (COALESCE(mi.mission_image_count, 0) > 0 OR m.mission_image_data IS NOT NULL AND m.mission_image_data <> '') AS has_mission_image,
+       (COALESCE(mi.mission_image_count, 0) > 0) AS has_mission_image,
        (COALESCE(ai.answer_image_count, 0) > 0) AS has_answer_image
      FROM missions m
      LEFT JOIN missions nm ON nm.id=m.next_mission_id AND nm.event_id=m.event_id
@@ -2069,10 +2066,9 @@ async function handleMissionList(req, event, team, messages = DEFAULT_MESSAGE_SE
     const done = completedMap.get(m.id);
     if (done) {
       const actor = done.actor_name || '팀원';
-      return `✅ ${m.mission_code} ${m.mission_name} (${done.score}점 / 수행자: ${actor})`;
+      return `✅ ${m.mission_code} ${m.mission_name} (획득 +${done.score}점 / 수행자: ${actor})`;
     }
-    const imageLabel = m.has_mission_image ? ' 🖼️' : '';
-    return `⬜ ${m.mission_code} ${m.mission_name}${imageLabel} (${m.score}점)`;
+    return `⬜ ${m.mission_code} ${m.mission_name}`;
   });
 
   const missionList = lines.length ? lines.join('\n') : '등록된 미션이 없습니다.';
@@ -3460,11 +3456,7 @@ app.post('/api/public/verify/location', async (req, res) => {
 app.get('/api/public/missions/:id/image', async (req, res) => {
   try {
     const imageResult = await query(`SELECT image_data, image_mime FROM mission_images WHERE mission_id=$1 AND image_kind='mission' ORDER BY sort_order ASC, id ASC LIMIT 1;`, [req.params.id]);
-    let row = imageResult.rows[0];
-    if (!row) {
-      const legacy = await query(`SELECT mission_image_data AS image_data, mission_image_mime AS image_mime FROM missions WHERE id=$1 LIMIT 1;`, [req.params.id]);
-      row = legacy.rows[0];
-    }
+    const row = imageResult.rows[0];
     if (!row || !row.image_data) return res.status(404).send('mission image not found');
     res.set('Content-Type', row.image_mime || 'image/jpeg');
     res.set('Cache-Control', 'public, max-age=300');
