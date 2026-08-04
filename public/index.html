@@ -394,6 +394,17 @@
             </div>
             <p class="small">미션 안내는 팀 생성 또는 팀 참가 후 이름/닉네임 입력까지 완료되면 카카오톡에 바로 이어서 표시됩니다.</p>
 
+            <label>참가 가능한 팀 없음 카드 제목</label>
+            <input id="msgNoTeamsTitle" placeholder="예: 팀 참가" />
+            <label>생성된 팀이 없을 때 안내 <span class="small">팀 참가 입력 시 표시</span></label>
+            <textarea id="msgNoTeams" rows="4"></textarea>
+            <p id="msgNoTeamsCount" class="small"></p>
+            <div class="message-image-box">
+              <div id="imgNoTeamsStatus" class="small">등록된 이미지 없음</div>
+              <input id="imgNoTeams" type="file" accept="image/*" />
+              <label class="inline-check"><input id="clearImgNoTeams" type="checkbox" /> 이미지 삭제</label>
+            </div>
+
             <label>팀 필요 안내 카드 제목</label>
             <input id="msgNeedTeamTitle" placeholder="예: 참가 안내" />
             <label>팀 없이 다른 말을 입력했을 때 안내</label>
@@ -778,6 +789,7 @@ const messageImageFields = [
   { key:'team_name_saved', input:'imgTeamNameSaved', clear:'clearImgTeamNameSaved', status:'imgTeamNameSavedStatus' },
   { key:'team_created', input:'imgTeamCreated', clear:'clearImgTeamCreated', status:'imgTeamCreatedStatus' },
   { key:'mission_guide', input:'imgMissionGuide', clear:'clearImgMissionGuide', status:'imgMissionGuideStatus' },
+  { key:'no_teams', input:'imgNoTeams', clear:'clearImgNoTeams', status:'imgNoTeamsStatus' },
   { key:'need_team', input:'imgNeedTeam', clear:'clearImgNeedTeam', status:'imgNeedTeamStatus' },
   { key:'finish', input:'imgFinish', clear:'clearImgFinish', status:'imgFinishStatus' },
 ];
@@ -803,6 +815,7 @@ const messageTextFields = [
   { text:'msgTeamNameSaved', title:'msgTeamNameSavedTitle', count:'msgTeamNameSavedCount', titleKey:'team_name_saved_title' },
   { text:'msgTeamCreated', title:'msgTeamCreatedTitle', count:'msgTeamCreatedCount', titleKey:'team_created_title' },
   { text:'msgMissionGuide', title:'msgMissionGuideTitle', count:'msgMissionGuideCount', titleKey:'mission_guide_title' },
+  { text:'msgNoTeams', title:'msgNoTeamsTitle', count:'msgNoTeamsCount', titleKey:'no_teams_title' },
   { text:'msgNeedTeam', title:'msgNeedTeamTitle', count:'msgNeedTeamCount', titleKey:'need_team_title' },
   { text:'msgFinish', title:'msgFinishTitle', count:'msgFinishCount', titleKey:'finish_title' },
 ];
@@ -848,6 +861,7 @@ function fillMessageForm(s = {}, updateImages = true) {
   $('msgTeamNameSaved').value = s.team_name_saved_message || '';
   $('msgTeamCreated').value = s.team_created_message || '';
   $('msgMissionGuide').value = s.mission_guide_message || '';
+  $('msgNoTeams').value = s.no_teams_message || '';
   $('msgNeedTeam').value = s.need_team_message || '';
   $('msgFinish').value = s.finish_message || '';
   messageTextFields.forEach(f => { if ($(f.title)) $(f.title).value = s[f.titleKey] || ''; });
@@ -874,6 +888,7 @@ async function collectMessageForm() {
     team_name_saved_message: $('msgTeamNameSaved').value,
     team_created_message: $('msgTeamCreated').value,
     mission_guide_message: $('msgMissionGuide').value,
+    no_teams_message: $('msgNoTeams').value,
     need_team_message: $('msgNeedTeam').value,
     finish_message: $('msgFinish').value,
     start_title: $('msgStartTitle').value,
@@ -882,6 +897,7 @@ async function collectMessageForm() {
     team_name_saved_title: $('msgTeamNameSavedTitle').value,
     team_created_title: $('msgTeamCreatedTitle').value,
     mission_guide_title: $('msgMissionGuideTitle').value,
+    no_teams_title: $('msgNoTeamsTitle').value,
     need_team_title: $('msgNeedTeamTitle').value,
     finish_title: $('msgFinishTitle').value,
   };

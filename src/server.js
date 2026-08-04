@@ -618,6 +618,7 @@ const MESSAGE_SETTING_DEFINITIONS = [
   { key: 'team_name_saved', textKey: 'team_name_saved_message', titleKey: 'team_name_saved_title', label: '이름/닉네임 입력 안내', title: '팀 생성' },
   { key: 'team_created', textKey: 'team_created_message', titleKey: 'team_created_title', label: '팀 생성 완료', title: '팀 생성 완료' },
   { key: 'mission_guide', textKey: 'mission_guide_message', titleKey: 'mission_guide_title', label: '미션 안내 문구', title: '미션 안내' },
+  { key: 'no_teams', textKey: 'no_teams_message', titleKey: 'no_teams_title', label: '참가 가능한 팀 없음 안내', title: '팀 참가' },
   { key: 'need_team', textKey: 'need_team_message', titleKey: 'need_team_title', label: '팀 필요 안내', title: '참가 안내' },
   { key: 'finish', textKey: 'finish_message', titleKey: 'finish_title', label: '완주 종료 멘트', title: '완주 완료' },
 ];
@@ -637,6 +638,7 @@ const DEFAULT_MESSAGE_SETTINGS = {
   team_name_saved_title: '팀 생성',
   team_created_title: '팀 생성 완료',
   mission_guide_title: '미션 안내',
+  no_teams_title: '팀 참가',
   need_team_title: '참가 안내',
   finish_title: '완주 완료',
   start_message: `{event_name}에 오신 것을 환영합니다!
@@ -662,6 +664,9 @@ const DEFAULT_MESSAGE_SETTINGS = {
 미션 구역과 진행 순서는 현장 안내문 또는 운영진 안내를 확인해주세요.
 
 준비가 되면 현장 QR코드를 스캔해 첫 미션을 시작해주세요.`,
+  no_teams_message: `아직 생성된 팀이 없습니다.
+
+새 팀을 만들려면 "팀 생성"을 입력해주세요.`,
   need_team_message: `먼저 팀을 만들거나 기존 팀에 참가해주세요.`,
   finish_message: `축하합니다! 완주 처리되었습니다.
 
@@ -2124,11 +2129,15 @@ async function handleTeamMembers(team) {
   return kakaoText(`${team.team_name} 팀원 목록\n\n${lines.join('\n')}`, menuQuickReplies);
 }
 
-async function handleJoinTeamList(event, kakaoUserId) {
+async function handleJoinTeamList(req, event, kakaoUserId, messages) {
   const teams = await listJoinableTeams(event.id);
 
   if (!teams.length) {
-    return kakaoText('아직 생성된 팀이 없습니다.\n\n새 팀을 만들려면 "팀 생성"을 입력해주세요.', ['팀 생성', '도움말']);
+    const text = renderTemplate(
+      messages?.no_teams_message || DEFAULT_MESSAGE_SETTINGS.no_teams_message,
+      eventTemplateVars(event)
+    );
+    return kakaoConfiguredMessage(req, messages || DEFAULT_MESSAGE_SETTINGS, 'no_teams', text, ['팀 생성', '도움말'], '팀 참가');
   }
 
   const lines = teams.map((team, index) => `${index + 1}. ${team.team_name} (${team.member_count}명)`);
@@ -2885,7 +2894,7 @@ async function handleKakaoSkill(req, res) {
     }
 
     if (!team && isJoinTeamCommand(utterance)) {
-      const response = await handleJoinTeamList(event, kakaoUserId);
+      const response = await handleJoinTeamList(req, event, kakaoUserId, messages);
       return respondKakao(res, response);
     }
 
