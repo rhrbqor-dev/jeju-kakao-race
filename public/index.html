@@ -1395,7 +1395,9 @@ async function readImageFiles(inputId) {
 }
 function imageListHtml(images, kind) {
   if (!images.length) return kind === 'answer' ? '등록된 정답 설명 이미지 없음' : '등록된 미션 이미지 없음';
-  return images.map((img, idx) => `<div style="margin:6px 0;"><a href="${img.image_url}" target="_blank">${idx + 1}. ${esc(img.file_name || '이미지 보기')}</a> <button class="danger" onclick="deleteMissionImage(${img.id}, '${kind}')">삭제</button></div>`).join('');
+  const targetKind = kind === 'answer' ? 'mission' : 'answer';
+  const moveLabel = kind === 'answer' ? '안내 이미지로 이동' : '정답 이미지로 이동';
+  return images.map((img, idx) => `<div style="margin:6px 0;"><a href="${img.image_url}" target="_blank">${idx + 1}. ${esc(img.file_name || '이미지 보기')}</a> <button class="secondary" onclick="moveMissionImage(${img.id}, '${targetKind}')">${moveLabel}</button> <button class="danger" onclick="deleteMissionImage(${img.id}, '${kind}')">삭제</button></div>`).join('');
 }
 async function loadMissionImagesForForm(missionId, kind) {
   if (!missionId) return;
@@ -1408,6 +1410,17 @@ async function deleteMissionImage(imageId, kind) {
   await api(`/api/admin/mission-images/${imageId}`, { method:'DELETE' });
   const missionId = $('missionId').value;
   await loadMissionImagesForForm(missionId, kind);
+  await loadMissions();
+}
+async function moveMissionImage(imageId, targetKind) {
+  const label = targetKind === 'answer' ? '정답 설명 이미지' : '미션 안내 이미지';
+  if (!confirm(`이 사진을 ${label}로 이동할까요?`)) return;
+  await api(`/api/admin/mission-images/${imageId}/kind`, { method:'PATCH', body:JSON.stringify({ kind:targetKind }) });
+  const missionId = $('missionId').value;
+  await Promise.all([
+    loadMissionImagesForForm(missionId, 'mission'),
+    loadMissionImagesForForm(missionId, 'answer'),
+  ]);
   await loadMissions();
 }
 async function uploadMissionImages(missionId, kind, inputId) {

@@ -1107,7 +1107,12 @@ async function initDb() {
         SELECT 1 FROM information_schema.columns
         WHERE table_name='mission_images' AND column_name='image_type'
       ) THEN
-        EXECUTE 'UPDATE mission_images SET image_kind = CASE WHEN image_type IN (''mission'', ''answer'') THEN image_type ELSE ''mission'' END';
+        -- image_type은 구버전 호환 컬럼입니다. 최신 버전에서 저장한 image_kind를
+        -- 서버 재시작 때마다 구형 값으로 덮어쓰면 answer가 mission으로 되돌아갑니다.
+        -- image_kind가 비어 있거나 손상된 레코드만 구형 값으로 복구합니다.
+        EXECUTE 'UPDATE mission_images
+                 SET image_kind = CASE WHEN image_type IN (''mission'', ''answer'') THEN image_type ELSE ''mission'' END
+                 WHERE image_kind IS NULL OR image_kind NOT IN (''mission'', ''answer'')';
       END IF;
 
       IF EXISTS (
@@ -4372,6 +4377,32 @@ app.post('/api/admin/missions/:id/images', requireAdmin, async (req, res) => {
 app.delete('/api/admin/mission-images/:id', requireAdmin, async (req, res) => {
   await query(`DELETE FROM mission_images WHERE id=$1;`, [req.params.id]);
   res.json({ ok: true });
+});
+
+app.patch('/api/admin/mission-images/:id/kind', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
+  const kind = String(req.body?.kind || '').trim();
+  if (!MISSION_IMAGE_KINDS.has(kind)) {
+    return res.status(400).json({ ok: false, message: '이미지 종류는 mission 또는 answer여야 합니다.' });
+  }
+  const current = (await query(
+    `SELECT mi.id, mi.mission_id
+     FROM mission_images mi
+     JOIN missions m ON m.id=mi.mission_id
+     WHERE mi.id=$1 AND m.event_id=$2
+     LIMIT 1;`,
+    [req.params.id, event.id]
+  )).rows[0];
+  if (!current) return res.status(404).json({ ok: false, message: '이미지를 찾을 수 없습니다.' });
+  const count = await getMissionImageCount(current.mission_id, kind);
+  if (count >= MAX_MISSION_IMAGES_PER_KIND) {
+    return res.status(400).json({ ok: false, message: `${kind === 'answer' ? '정답 설명 이미지' : '미션 안내 이미지'}는 최대 ${MAX_MISSION_IMAGES_PER_KIND}장까지 등록할 수 있습니다.` });
+  }
+  const updated = await query(
+    `UPDATE mission_images SET image_kind=$1, sort_order=$2 WHERE id=$3 RETURNING id, mission_id, image_kind;`,
+    [kind, count, req.params.id]
+  );
+  res.json({ ok: true, image: updated.rows[0] });
 });
 
 app.delete('/api/admin/missions/:id', requireAdmin, async (req, res) => {
