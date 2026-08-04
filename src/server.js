@@ -2263,7 +2263,7 @@ function buildImageCards(title, description, imageUrls = [], buttons = []) {
 }
 
 const startQuickReplies = ['팀 생성', '팀 참가', '도움말'];
-const menuQuickReplies = ['미션 목록', '힌트', '내 점수', '순위', '팀원 목록', '팀명 수정', '이름 수정', '도움말'];
+const menuQuickReplies = ['인증 결과 확인', '미션 목록', '힌트', '내 점수', '순위', '팀원 목록', '팀명 수정', '이름 수정', '도움말'];
 
 function isStartCommand(text) {
   return ['시작', '게임 시작', '참여하기', '참가', 'start'].includes(String(text).trim().toLowerCase());
@@ -2279,6 +2279,10 @@ function isScoreCommand(text) {
 
 function isRankCommand(text) {
   return ['순위', '랭킹', '순위 보기'].includes(String(text).trim().toLowerCase());
+}
+
+function isPhotoResultCommand(text) {
+  return ['인증 결과 확인', '사진 결과 확인', '정답 설명 확인'].includes(String(text).trim());
 }
 
 function isMissionListCommand(text) {
@@ -3215,6 +3219,11 @@ async function handleKakaoSkill(req, res) {
       return respondKakao(res, await handleTeamMembers(team, messages), event, team, kakaoUserId);
     }
 
+    if (isPhotoResultCommand(utterance)) {
+      // respondKakao가 읽지 않은 사진 승인/반려 알림을 이 응답 앞에 붙입니다.
+      return respondKakao(res, kakaoText('새로운 사진 인증 결과를 확인했습니다.', menuQuickReplies), event, team, kakaoUserId);
+    }
+
     if (isMissionListCommand(utterance)) {
       return respondKakao(res, await handleMissionList(req, event, team, messages), event, team, kakaoUserId);
     }
@@ -3638,8 +3647,13 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
       await addTeamNotice(
         event.id,
         team.id,
-        `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} ${gpsFallback ? 'GPS 대체 사진' : '사진'}을 업로드했고 자동 승인되었습니다. 현재 팀 점수는 ${total}점입니다.${nextText}`,
-        actor.actor_kakao_user_id
+        cleanRenderedMessage(renderTemplate(messages.photo_review_approved_message, {
+          team_name: team.team_name, team_code: team.team_code, actor_name: actor.actor_name,
+          mission_code: mission.mission_code, mission_name: mission.mission_name, total,
+          earned_score: mission.score, answer_explanation: mission.answer_explanation || '',
+          next_message: String(nextText || '').trim(), photo_type: gpsFallback ? 'GPS 대체 사진' : '사진',
+        })),
+        ''
       );
       return res.json({
         ok: true,
@@ -4479,14 +4493,14 @@ app.post('/api/admin/submissions/:id/review', requireAdmin, async (req, res) => 
       team_name: team.team_name, team_code: team.team_code, actor_name: actorLabel,
       mission_code: sub.mission_code, mission_name: sub.mission_name, total,
       earned_score: score, answer_explanation: sub.answer_explanation || '', next_message: String(nextText || '').trim(),
-    })), sub.actor_kakao_user_id || '');
+    })), '');
   } else {
     const actorLabel = sub.actor_name || '팀원';
     await addTeamNotice(sub.event_id, team.id, cleanRenderedMessage(renderTemplate(messages.photo_review_rejected_message, {
       team_name: team.team_name, team_code: team.team_code, actor_name: actorLabel,
       mission_code: sub.mission_code, mission_name: sub.mission_name,
       wrong_message: sub.wrong_message || '', review_note: note || '',
-    })), sub.actor_kakao_user_id || '');
+    })), '');
   }
 
   res.json({ ok: true, submission: result.rows[0] });

@@ -13,6 +13,7 @@
     input, textarea { width:100%; padding:12px; border:1px solid #dfe5ef; border-radius:12px; font:inherit; box-sizing:border-box; }
     button { margin-top:16px; width:100%; border:0; background:#2f6df6; color:white; padding:13px; border-radius:12px; font-weight:800; font-size:16px; }
     button:disabled { background:#9aa8c7; cursor:not-allowed; }
+    button.secondary { background:#172033; }
     .msg { margin-top:14px; padding:12px; border-radius:12px; background:#eef4ff; }
   </style>
 </head>
@@ -26,6 +27,8 @@
       <input type="hidden" name="mission_code" id="mission_code" />
       <input type="hidden" name="token" id="token" />
       <input type="hidden" name="actor" id="actor" />
+      <input type="hidden" name="event" id="event" />
+      <input type="hidden" name="fallback" id="fallback" />
       <input type="hidden" name="submission_key" id="submission_key" />
       <label>사진 파일</label>
       <input type="file" name="photo" accept="image/*" capture="environment" required />
@@ -34,6 +37,7 @@
       <button id="submitBtn" type="submit">사진 제출하기</button>
     </form>
     <div id="msg" class="msg" style="display:none"></div>
+    <button id="backToKakao" class="secondary" type="button" style="display:none">카카오톡에서 인증 결과 확인</button>
   </div>
 </main>
 <script>
@@ -42,9 +46,12 @@ document.getElementById('team_code').value = params.get('team') || '';
 document.getElementById('mission_code').value = params.get('mission') || '';
 document.getElementById('token').value = params.get('token') || '';
 document.getElementById('actor').value = params.get('actor') || '';
+document.getElementById('event').value = params.get('event') || params.get('event_id') || params.get('event_code') || '';
+document.getElementById('fallback').value = params.get('fallback') || '';
 const form = document.getElementById('form');
 const submitBtn = document.getElementById('submitBtn');
 const submissionKeyInput = document.getElementById('submission_key');
+const backToKakao = document.getElementById('backToKakao');
 let isSubmitting = false;
 
 function makeSubmissionKey() {
@@ -58,6 +65,12 @@ function makeSubmissionKey() {
 }
 
 submissionKeyInput.value = makeSubmissionKey();
+
+backToKakao.addEventListener('click', () => {
+  // 카카오 인앱 브라우저에서는 뒤로 가면 기존 챗봇 대화방으로 돌아갑니다.
+  if (history.length > 1) history.back();
+  else window.close();
+});
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -82,6 +95,7 @@ form.addEventListener('submit', async (e) => {
 
     if (res.ok && data.ok !== false) {
       submitBtn.textContent = '제출 완료';
+      backToKakao.style.display = 'block';
       return;
     }
 
