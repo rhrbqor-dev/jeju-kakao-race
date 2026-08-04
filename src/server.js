@@ -620,6 +620,7 @@ const MESSAGE_SETTING_DEFINITIONS = [
   { key: 'mission_guide', textKey: 'mission_guide_message', titleKey: 'mission_guide_title', label: '미션 안내 문구', title: '미션 안내' },
   { key: 'no_teams', textKey: 'no_teams_message', titleKey: 'no_teams_title', label: '참가 가능한 팀 없음 안내', title: '팀 참가' },
   { key: 'mission_list', textKey: 'mission_list_message', titleKey: 'mission_list_title', label: '미션 목록 안내', title: '' },
+  { key: 'already_completed', textKey: 'already_completed_message', titleKey: 'already_completed_title', label: '이미 완료한 미션 안내', title: '' },
   { key: 'need_team', textKey: 'need_team_message', titleKey: 'need_team_title', label: '팀 필요 안내', title: '참가 안내' },
   { key: 'finish', textKey: 'finish_message', titleKey: 'finish_title', label: '완주 종료 멘트', title: '완주 완료' },
 ];
@@ -641,6 +642,7 @@ const DEFAULT_MESSAGE_SETTINGS = {
   mission_guide_title: '미션 안내',
   no_teams_title: '팀 참가',
   mission_list_title: '',
+  already_completed_title: '',
   need_team_title: '참가 안내',
   finish_title: '완주 완료',
   start_message: `{event_name}에 오신 것을 환영합니다!
@@ -674,6 +676,9 @@ const DEFAULT_MESSAGE_SETTINGS = {
 {mission_list}
 
 ✅ 표시된 미션은 팀원 중 누가 수행했는지도 함께 표시됩니다.`,
+  already_completed_message: `이미 완료한 미션입니다.
+
+다음 미션으로 이동해주세요.`,
   need_team_message: `먼저 팀을 만들거나 기존 팀에 참가해주세요.`,
   finish_message: `축하합니다! 완주 처리되었습니다.
 
@@ -775,6 +780,23 @@ ${guideText}` : String(baseText || '').trim();
   const cardTitle = messageTitle(settings, guideImage ? 'mission_guide' : baseKey, title);
   if (imageUrl) return kakaoCard(cardTitle, text, [], quickReplies, imageUrl);
   return kakaoText(text, quickReplies);
+}
+
+async function kakaoAlreadyCompletedMissionMessage(req, event, team, mission, actorName = '', settings = DEFAULT_MESSAGE_SETTINGS) {
+  const total = team?.id ? await teamTotalScore(team.id) : '';
+  const template = String(settings?.already_completed_message || DEFAULT_MESSAGE_SETTINGS.already_completed_message || '').trim();
+  const text = renderTemplate(template, {
+    event_name: event?.event_name || '',
+    event_code: event?.event_code || '',
+    team_name: team?.team_name || '',
+    team_code: team?.team_code || '',
+    actor_name: actorName || '',
+    member_name: actorName || '',
+    mission_code: mission?.mission_code || '',
+    mission_name: mission?.mission_name || '',
+    total,
+  }).trim() || DEFAULT_MESSAGE_SETTINGS.already_completed_message;
+  return kakaoConfiguredMessage(req, settings, 'already_completed', text, menuQuickReplies, '');
 }
 
 function renderTemplate(template = '', variables = {}) {
@@ -965,6 +987,19 @@ async function initDb() {
   // 이 자동 복사 로직이 정답 설명 이미지/미션 안내 이미지를 구분하지 못해
   // 업데이트 후 정답 이미지가 질문 안내 이미지 목록에 섞여 보이는 원인이 될 수 있습니다.
   // 앞으로는 mission_images.image_kind='mission' 또는 'answer'로 저장된 이미지만 사용합니다.
+
+  // 정답 설명 이미지가 미션 안내 이미지 쪽에 중복으로 들어간 기존 데이터는
+  // 완전히 같은 이미지 데이터가 answer와 mission 양쪽에 있을 때 mission 쪽 중복본을 정리합니다.
+  await query(`
+    DELETE FROM mission_images mi
+    USING mission_images ai
+    WHERE mi.mission_id = ai.mission_id
+      AND mi.event_id = ai.event_id
+      AND mi.image_kind = 'mission'
+      AND ai.image_kind = 'answer'
+      AND mi.id <> ai.id
+      AND mi.image_data = ai.image_data;
+  `);
 
   await query(`
     CREATE TABLE IF NOT EXISTS teams (
@@ -1303,6 +1338,24 @@ async function addMissionImages(eventId, missionId, kind, images = []) {
     );
     inserted.push(result.rows[0]);
   }
+
+  // 정답 이미지 업로드 중 mission 쪽에 만들어진 동일 이미지 중복본은 질문 이미지 목록에서 제거합니다.
+  if (imageKind === 'answer' && inserted.length) {
+    await query(
+      `DELETE FROM mission_images mi
+       USING mission_images ai
+       WHERE mi.event_id=$1
+         AND mi.mission_id=$2
+         AND mi.image_kind='mission'
+         AND ai.event_id=mi.event_id
+         AND ai.mission_id=mi.mission_id
+         AND ai.image_kind='answer'
+         AND ai.id = ANY($3::int[])
+         AND mi.image_data=ai.image_data;`,
+      [eventId, missionId, inserted.map((img) => img.id)]
+    );
+  }
+
   return inserted;
 }
 
@@ -2270,7 +2323,6 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
   await query(`UPDATE teams SET current_mission_id=$1 WHERE id=$2;`, [mission.id, team.id]);
   const missionImages = await getMissionImages(mission.id, 'mission');
   const imageUrls = missionImageLinks(req, missionImages);
-  if (!imageUrls.length && mission.mission_image_data) imageUrls.push(missionImageUrl(req, mission));
 
   if (mission.mission_type === 'photo') {
     const url = `${baseUrl(req)}/upload?event=${encodeURIComponent(eventQueryValue(event))}&team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}&actor=${encodeURIComponent(kakaoUserId)}`;
@@ -2492,7 +2544,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
 
   const already = await isMissionAlreadyCompleted(team.id, mission.id);
   if (already) {
-    return missionCompletionResponse(req, event, mission, `이미 완료한 미션입니다.\n\n${mission.mission_code} ${mission.mission_name}\n\n다음 미션으로 이동해주세요.`, menuQuickReplies, [], `${mission.mission_code} ${mission.mission_name}`, { team, actorName });
+    return kakaoAlreadyCompletedMissionMessage(req, event, team, mission, actorName, messages);
   }
 
   if (mission.mission_type === 'quiz') {
