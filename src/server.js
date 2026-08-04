@@ -2069,10 +2069,20 @@ async function bestScoresByMission(teamId) {
 }
 
 async function teamTotalScore(teamId) {
-  const map = await bestScoresByMission(teamId);
-  const missionTotal = [...map.values()].reduce((sum, v) => sum + v, 0);
-  const adjustmentTotal = await scoreAdjustmentsTotal(teamId);
-  return missionTotal + adjustmentTotal;
+  const result = await query(
+    `WITH mission_scores AS (
+       SELECT mission_id, MAX(score)::int AS score
+       FROM submissions
+       WHERE team_id=$1 AND status IN ('correct', 'approved')
+       GROUP BY mission_id
+     )
+     SELECT (
+       COALESCE((SELECT SUM(score) FROM mission_scores), 0)
+       + COALESCE((SELECT SUM(score_delta) FROM score_events WHERE team_id=$1), 0)
+     )::int AS total;`,
+    [teamId]
+  );
+  return Number(result.rows[0]?.total || 0);
 }
 
 async function isMissionAlreadyCompleted(teamId, missionId) {
@@ -2086,8 +2096,10 @@ async function isMissionAlreadyCompleted(teamId, missionId) {
 }
 
 async function maybeMarkFinished(team, eventId) {
-  const missions = await getMissions(eventId);
-  const completed = await getCompletedMissionIds(team.id);
+  const [missions, completed] = await Promise.all([
+    getMissions(eventId),
+    getCompletedMissionIds(team.id),
+  ]);
 
   const completeMissionIds = missions
     .filter((m) => m.mission_type === 'complete')
@@ -2124,8 +2136,10 @@ function firstRawAnswer(answer = '완주') {
 async function getReadyCompleteMission(eventId, teamId) {
   if (!eventId || !teamId) return null;
 
-  const missions = await getMissions(eventId);
-  const completed = await getCompletedMissionIds(teamId);
+  const [missions, completed] = await Promise.all([
+    getMissions(eventId),
+    getCompletedMissionIds(teamId),
+  ]);
 
   const requiredNonComplete = missions
     .filter((m) => m.is_required && m.mission_type !== 'complete')
@@ -2215,14 +2229,33 @@ function safeKakaoQuickReplies(quickReplies = []) {
   const requested = Array.isArray(quickReplies) ? quickReplies : [];
   // 스캔/플러그인 되묻기 상태에서 빠져나올 수 있도록 취소 버튼도 항상 고정합니다.
   // 카카오 빠른응답 최대 10개 제한 때문에 나머지 메뉴는 최대 8개만 유지합니다.
-  const values = [QR_SCAN_QUICK_REPLY, CANCEL_QUICK_REPLY, ...requested]
-    .filter((q) => typeof q === 'string' && q.trim() !== '')
-    .filter((q, index, all) => all.findIndex((item) => item.trim() === q.trim()) === index)
-    .slice(0, 10);
-  return values.map((q) => {
-    const label = q.trim().slice(0, 20);
-    return { action: 'message', label, messageText: q.trim() };
-  });
+  const normalized = [QR_SCAN_QUICK_REPLY, CANCEL_QUICK_REPLY, ...requested]
+    .map((item) => {
+      if (typeof item === 'string') {
+        const messageText = item.trim();
+        if (!messageText) return null;
+        return { action: 'message', label: messageText.slice(0, 20), messageText };
+      }
+      if (!item || typeof item !== 'object') return null;
+      const action = item.action === 'block' ? 'block' : 'message';
+      const label = String(item.label || '').trim().slice(0, 20);
+      if (!label) return null;
+      if (action === 'block') {
+        const blockId = String(item.blockId || '').trim();
+        if (!blockId) return null;
+        return { action, label, blockId, messageText: String(item.messageText || label).trim() };
+      }
+      return { action, label, messageText: String(item.messageText || label).trim() };
+    })
+    .filter(Boolean);
+
+  const seen = new Set();
+  return normalized.filter((item) => {
+    const key = `${item.action}:${item.label}:${item.messageText || ''}:${item.blockId || ''}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 10);
 }
 
 function splitKakaoText(text = '', maxLen = KAKAO_TEXT_CHUNK_LIMIT, maxChunks = KAKAO_MAX_OUTPUTS) {
@@ -2723,6 +2756,7 @@ async function missionCompletionResponse(req, event, mission, text, quickReplies
 
   if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(cardTitle, finalText, imageUrls, buttons), quickReplies);
   if (imageUrls.length === 1) return kakaoCard(cardTitle, finalText, buttons, quickReplies, imageUrls[0]);
+  if (buttons.length && options.buttonsAsQuickReplies) return kakaoText(finalText, [...buttons, ...quickReplies]);
   if (buttons.length) return kakaoCard(cardTitle, finalText, buttons, quickReplies);
   return kakaoText(finalText, quickReplies);
 }
@@ -2748,8 +2782,10 @@ async function nextOrCompleteMissionPlainText(eventId, team, mission, variables 
 }
 
 async function afterMissionCompleted(event, team, mission, kakaoUserId, actorName) {
-  await maybeMarkFinished(team, event.id);
-  const total = await teamTotalScore(team.id);
+  const [, total] = await Promise.all([
+    maybeMarkFinished(team, event.id),
+    teamTotalScore(team.id),
+  ]);
   const name = actorName || '팀원';
   await addTeamNotice(
     event.id,
@@ -2820,25 +2856,31 @@ ${inserted ? `힌트 사용 감점: ${penalty}점` : '이 미션의 힌트 감�
 
 async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, messages, imageUrls = []) {
   if (!team) return kakaoConfiguredMessage(req, messages, 'need_team', messages.need_team_message, startQuickReplies, '참가 안내');
-  const teamReload = (await query(`SELECT * FROM teams WHERE id=$1 AND event_id=$2;`, [team.id, event.id])).rows[0];
+  // getTeamByKakaoUser에서 방금 읽은 팀 정보이므로 같은 요청 안에서 다시 조회하지 않습니다.
+  const teamReload = team;
   if (!teamReload?.current_mission_id) return kakaoText('먼저 사진 미션을 시작해주세요.', menuQuickReplies);
   const mission = (await query(`SELECT * FROM missions WHERE id=$1 AND event_id=$2;`, [teamReload.current_mission_id, event.id])).rows[0];
   if (!mission || !['photo', 'gps'].includes(mission.mission_type)) return kakaoText('현재 진행 중인 미션은 사진 인증 미션이 아닙니다.', menuQuickReplies);
 
-  const actor = await resolveActorForTeam(event.id, team.id, kakaoUserId, team.leader_name || '팀원');
-  const existing = (await query(
-    `SELECT * FROM submissions
-     WHERE event_id=$1 AND team_id=$2 AND mission_id=$3
-       AND status IN ('pending','approved','correct') AND COALESCE(image_data, '') <> ''
-     ORDER BY CASE WHEN status IN ('approved','correct') THEN 0 ELSE 1 END, submitted_at DESC
-     LIMIT 1;`,
-    [event.id, team.id, mission.id]
-  )).rows[0];
-  if (!existing && await isMissionAlreadyCompleted(team.id, mission.id)) {
+  const [actor, existingResult, alreadyCompleted, image, photoAutoApproval] = await Promise.all([
+    resolveActorForTeam(event.id, team.id, kakaoUserId, team.leader_name || '팀원'),
+    query(
+      `SELECT * FROM submissions
+       WHERE event_id=$1 AND team_id=$2 AND mission_id=$3
+         AND status IN ('pending','approved','correct') AND COALESCE(image_data, '') <> ''
+       ORDER BY CASE WHEN status IN ('approved','correct') THEN 0 ELSE 1 END, submitted_at DESC
+       LIMIT 1;`,
+      [event.id, team.id, mission.id]
+    ),
+    isMissionAlreadyCompleted(team.id, mission.id),
+    downloadKakaoSecureImage(imageUrls[0]),
+    getPhotoAutoApprovalSettings(event.id),
+  ]);
+  const existing = existingResult.rows[0];
+  if (!existing && alreadyCompleted) {
     return kakaoAlreadyCompletedMissionMessage(req, event, team, mission, actor.actor_name, messages);
   }
 
-  const image = await downloadKakaoSecureImage(imageUrls[0]);
   const photoQuickReplies = ['사진 다시 제출', ...menuQuickReplies];
   if (existing) {
     await query(
@@ -2859,7 +2901,6 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
     return kakaoText(replacedText, photoQuickReplies);
   }
 
-  const photoAutoApproval = await getPhotoAutoApprovalSettings(event.id);
   const autoApprove = isPhotoAutoApprovalActive(photoAutoApproval);
   const status = autoApprove ? 'approved' : 'pending';
   const score = autoApprove ? Number(mission.score || 0) : 0;
@@ -2870,26 +2911,66 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
   );
 
   if (!autoApprove) {
-    await addTeamNotice(event.id, team.id, `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} 사진을 업로드했습니다. 운영자 승인 후 점수가 반영됩니다.`, actor.actor_kakao_user_id);
     const pendingText = cleanRenderedMessage(renderTemplate(messages.photo_upload_pending_message, {
       ...eventTemplateVars(event, team, actor.actor_name), mission_code: mission.mission_code,
       mission_name: mission.mission_name, actor_name: actor.actor_name, photo_type: mission.mission_type === 'gps' ? 'GPS 대체 사진' : '사진',
     }));
+    setImmediate(() => {
+      addTeamNotice(
+        event.id,
+        team.id,
+        `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} 사진을 업로드했습니다. 운영자 승인 후 점수가 반영됩니다.`,
+        actor.actor_kakao_user_id
+      ).catch((error) => console.error('[kakao-secure-image] pending notice failed:', error));
+    });
     return kakaoText(pendingText, photoQuickReplies);
   }
 
-  const total = await afterMissionCompleted(event, team, mission, kakaoUserId, actor.actor_name);
+  const progressionPromise = mission.next_mission_id
+    ? getLinkedNextMission(event.id, mission)
+    : activateCompleteMissionIfReady(event.id, team, mission);
+  const [total, answerImages, progression] = await Promise.all([
+    teamTotalScore(team.id),
+    getMissionImages(mission.id, 'answer'),
+    progressionPromise,
+  ]);
   const approvedText = cleanRenderedMessage(renderTemplate(messages.photo_upload_approved_message, {
     ...eventTemplateVars(event, team, actor.actor_name), mission_code: mission.mission_code,
     mission_name: mission.mission_name, actor_name: actor.actor_name, earned_score: score,
     total, answer_explanation: mission.answer_explanation || '', next_message: '',
     photo_type: mission.mission_type === 'gps' ? 'GPS 대체 사진' : '사진',
   }));
-  const answerImages = await getMissionImages(mission.id, 'answer');
-  const answerImageUrls = missionImageLinks(req, answerImages);
-  return missionCompletionResponse(req, event, mission, approvedText, photoQuickReplies, answerImageUrls, '', {
-    team, actorName: actor.actor_name, total, settings: messages,
+  let buttons = [];
+  let finalText = approvedText;
+  if (mission.next_mission_id && progression) {
+    buttons = linkedNextMissionButton(mission, progression);
+    const nextMessage = buildNextMissionMessage(mission, progression, nextMissionTemplateVariables({
+      event, team, mission, nextMission: progression, actorName: actor.actor_name, total,
+    }));
+    if (nextMessage) finalText = `${approvedText}\n\n${nextMessage}`;
+  } else if (progression?.mission_type === 'complete') {
+    buttons = completeMissionButton(progression);
+    const completeText = completeMissionPromptText(progression);
+    if (completeText) finalText = `${approvedText}\n\n${completeText}`;
+  }
+
+  // 카카오에는 저장 직후 응답하고, 말풍선과 관계없는 운영용 갱신은 응답 이후에 처리합니다.
+  setImmediate(() => {
+    Promise.all([
+      maybeMarkFinished(team, event.id),
+      addTeamNotice(
+        event.id,
+        team.id,
+        `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} 미션을 완료했습니다. 현재 팀 점수는 ${total}점입니다.`,
+        kakaoUserId
+      ),
+    ]).catch((error) => console.error('[kakao-secure-image] completion finalization failed:', error));
   });
+
+  const answerImageUrls = missionImageLinks(req, answerImages);
+  if (answerImageUrls.length > 1) return kakaoCarousel(buildImageCards('', finalText, answerImageUrls, buttons), photoQuickReplies);
+  if (answerImageUrls.length === 1) return kakaoCard('', finalText, buttons, photoQuickReplies, answerImageUrls[0]);
+  return kakaoText(finalText, [...buttons, ...photoQuickReplies]);
 }
 
 async function handleAnswer(req, event, team, utterance, kakaoUserId, messages = DEFAULT_MESSAGE_SETTINGS) {
@@ -3169,6 +3250,10 @@ function requireAdmin(req, res, next) {
 }
 
 async function handleKakaoSkill(req, res) {
+  const skillStartedAt = Date.now();
+  res.once('finish', () => {
+    console.info(`[kakao-skill] ${res.statusCode} ${Date.now() - skillStartedAt}ms`);
+  });
   try {
     if (KAKAO_SKILL_KEY && req.query.key !== KAKAO_SKILL_KEY) {
       return respondKakao(res, kakaoText('스킬 서버 인증키가 올바르지 않습니다. 운영자에게 문의해주세요.'));
@@ -3190,20 +3275,24 @@ async function handleKakaoSkill(req, res) {
     }
 
     const event = await resolveKakaoEvent(req, kakaoUserId);
-    const messages = await getMessageSettings(event.id);
+    const [messages, initialTeam, userState] = await Promise.all([
+      getMessageSettings(event.id),
+      getTeamByKakaoUser(event.id, kakaoUserId),
+      getUserState(event.id, kakaoUserId),
+    ]);
     const normalUtterance = String(req.body?.userRequest?.utterance || '').trim();
     const qrMissionCode = extractMissionCodeFromQr(req.body);
     const explicitEventOnly = Boolean(getEventIdentifierFromRequest(req)) && !qrMissionCode && extractEventIdentifierFromText(normalUtterance);
     const utterance = String(qrMissionCode || (explicitEventOnly ? '게임 시작' : normalUtterance)).trim();
 
-    let team = await getTeamByKakaoUser(event.id, kakaoUserId);
-    const userState = await getUserState(event.id, kakaoUserId);
+    let team = initialTeam;
     const data = stateData(userState);
     const secureImageUrls = extractKakaoSecureImageUrls(req.body);
 
     if (secureImageUrls.length) {
       const response = await handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, messages, secureImageUrls);
-      return respondKakao(res, response, event, team, kakaoUserId);
+      // 사진 처리 함수 안에서 승인/완주/다음 미션 처리가 끝났으므로 공통 DB 후처리를 다시 실행하지 않습니다.
+      return respondKakao(res, response);
     }
 
     if (isCancelCommand(utterance)) {
