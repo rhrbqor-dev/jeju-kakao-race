@@ -10,8 +10,9 @@
     .card { background:white; border:1px solid #dfe5ef; border-radius:18px; padding:22px; box-shadow:0 8px 22px rgba(20,30,60,.07); }
     h1 { margin:0 0 12px; font-size:26px; }
     p { line-height:1.5; }
-    button { margin-top:16px; width:100%; border:0; background:#2f6df6; color:white; padding:14px; border-radius:12px; font-weight:800; font-size:16px; cursor:pointer; }
+    button { margin-top:16px; width:100%; border:0; background:#2f6df6; color:white; padding:14px; border-radius:12px; font-weight:800; font-size:16px; cursor:pointer; white-space:pre-line; line-height:1.5; }
     button:disabled { opacity:.55; cursor:not-allowed; }
+    button.complete { background:#0f7b50; opacity:1; }
     .msg { margin-top:14px; padding:12px; border-radius:12px; background:#eef4ff; white-space:pre-wrap; line-height:1.5; }
     .warn { background:#fff4df; color:#7a4a00; }
     .ok { background:#e7f7ef; color:#0f7b50; }
@@ -39,6 +40,7 @@
   const btn = document.getElementById('gpsBtn');
   const msg = document.getElementById('msg');
   const info = document.getElementById('info');
+  let completed = false;
 
   function setMsg(text, type) {
     msg.textContent = text;
@@ -46,8 +48,21 @@
   }
 
   function setBusy(isBusy) {
+    if (completed) {
+      btn.disabled = true;
+      return;
+    }
     btn.disabled = isBusy;
     btn.textContent = isBusy ? '위치 확인 중...' : '현재 위치로 인증하기';
+  }
+
+  function setCompleted(message) {
+    completed = true;
+    const guide = String(message || 'GPS 인증이 완료되었습니다.\n카카오톡으로 돌아가 "인증완료"라고 입력해주세요.').trim();
+    btn.disabled = true;
+    btn.classList.add('complete');
+    btn.textContent = guide;
+    setMsg(guide, 'ok');
   }
 
   info.textContent = `팀 코드: ${teamCode || '-'} / 미션: ${missionCode || '-'}`;
@@ -85,7 +100,7 @@
       throw new Error(data.message || 'GPS 인증에 실패했습니다.');
     }
 
-    setMsg(data.message || 'GPS 인증 완료!', 'ok');
+    setCompleted(data.next_action_message);
   }
 
   function getLocation(options) {

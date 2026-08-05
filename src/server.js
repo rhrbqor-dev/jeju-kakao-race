@@ -1819,52 +1819,20 @@ function markMissionCompletedResponse(response) {
   return response;
 }
 
-function addButtonsToCard(firstOutput, buttons = []) {
-  if (!buttons.length) return;
-  const card = firstOutput.basicCard || firstOutput.textCard;
-  if (!card) return;
-  card.buttons = [
-    ...(card.buttons || []),
-    ...buttons,
-  ].slice(0, 3);
-}
-
-function appendCompletePromptToResponse(response, promptText, buttons = []) {
+function appendCompletePromptToResponse(response, promptText) {
   if (!promptText) return response;
-  const firstOutput = response?.template?.outputs?.[0];
-  if (!firstOutput) return response;
+  const outputs = response?.template?.outputs;
+  if (!Array.isArray(outputs) || !outputs.length) return response;
 
   const existing = kakaoResponseTextSnapshot(response);
   if (existing.includes(String(promptText).trim())) return response;
-  if (existing.includes('완주 미션:') || existing.includes('완주 처리')) return response;
 
-  if (firstOutput.basicCard) {
-    firstOutput.basicCard.description = `${String(firstOutput.basicCard.description || '').trim()}
-
-${promptText}`.trim();
-    addButtonsToCard(firstOutput, buttons);
-    return response;
-  }
-
-  if (firstOutput.textCard) {
-    firstOutput.textCard.description = `${String(firstOutput.textCard.description || '').trim()}
-
-${promptText}`.trim();
-    addButtonsToCard(firstOutput, buttons);
-    return response;
-  }
-
-  if (firstOutput.simpleText?.text) {
-    firstOutput.textCard = {
-      description: `${String(firstOutput.simpleText.text || '').trim()}
-
-${promptText}`.trim(),
-      buttons,
-    };
-    delete firstOutput.simpleText;
-    return response;
-  }
-
+  // 정답 설명과 완주 미션 안내를 서로 다른 말풍선으로 보여줍니다.
+  // 카카오 최대 출력 수(3개)를 지키면서 완주 안내용 출력 한 칸은 항상 확보합니다.
+  const promptOutputs = splitKakaoText(promptText, KAKAO_TEXT_CHUNK_LIMIT, 2)
+    .map((text) => ({ simpleText: { text } }));
+  const answerOutputLimit = Math.max(1, KAKAO_MAX_OUTPUTS - promptOutputs.length);
+  response.template.outputs = [...outputs.slice(0, answerOutputLimit), ...promptOutputs].slice(0, KAKAO_MAX_OUTPUTS);
   return response;
 }
 
@@ -1873,9 +1841,6 @@ async function addReadyCompleteMissionToResponse(eventId, team, response) {
 
   const freshTeam = (await query(`SELECT * FROM teams WHERE id=$1;`, [team.id])).rows[0];
   if (!freshTeam || freshTeam.status === 'finished') return response;
-
-  const textSnapshot = kakaoResponseTextSnapshot(response);
-  if (textSnapshot.includes('완주 미션:') || textSnapshot.includes('완주 완료')) return response;
 
   let completeMission = null;
   if (freshTeam.current_mission_id) {
@@ -1894,7 +1859,7 @@ async function addReadyCompleteMissionToResponse(eventId, team, response) {
   }
 
   if (!completeMission) return response;
-  return appendCompletePromptToResponse(response, completeMissionPromptText(completeMission), completeMissionButton(completeMission));
+  return appendCompletePromptToResponse(response, completeMissionPromptText(completeMission));
 }
 
 async function syncActiveMissionHintQuickReply(eventId, team, response) {
@@ -1918,9 +1883,14 @@ async function syncActiveMissionHintQuickReply(eventId, team, response) {
   const showHint = Boolean(String(mission?.hint || '').trim())
     && !mission?.completed
     && response.__missionCompletedInCurrentRequest !== true;
-  const replies = Array.isArray(response.template.quickReplies)
+  let replies = Array.isArray(response.template.quickReplies)
     ? response.template.quickReplies.filter((reply) => String(reply?.label || reply?.messageText || '').trim() !== '힌트')
     : [];
+
+  // 현재 미션이 끝나기 전에는 새 QR을 스캔하지 않도록 QR 버튼을 숨깁니다.
+  if (mission && !mission.completed) {
+    replies = replies.filter((reply) => String(reply?.label || reply?.messageText || '').trim() !== QR_SCAN_QUICK_REPLY);
+  }
 
   if (showHint) {
     const hintReply = { action: 'message', label: '힌트', messageText: '힌트' };
@@ -2255,13 +2225,6 @@ async function maybeMarkFinished(team, eventId) {
   }
 }
 
-function firstRawAnswer(answer = '완주') {
-  return String(answer || '완주')
-    .split(/[|,，/]/)
-    .map((item) => String(item || '').trim())
-    .filter(Boolean)[0] || '완주';
-}
-
 async function getReadyCompleteMission(eventId, teamId) {
   if (!eventId || !teamId) return null;
 
@@ -2289,12 +2252,6 @@ function completeMissionPromptText(mission) {
   if (!mission) return '';
   // 관리자가 완주 미션에 작성한 문구 외에는 자동 문장을 붙이지 않습니다.
   return String(mission.question || '').trim();
-}
-
-function completeMissionButton(mission) {
-  if (!mission) return [];
-  const messageText = firstRawAnswer(mission.answer || '완주');
-  return [{ action: 'message', label: String(messageText || '완주').slice(0, 12), messageText }];
 }
 
 async function activateCompleteMissionIfReady(eventId, team, currentMission = null) {
@@ -2365,7 +2322,8 @@ const QR_SCAN_QUICK_REPLY = 'QR코드 스캔';
 
 function safeKakaoQuickReplies(quickReplies = []) {
   const requested = Array.isArray(quickReplies) ? quickReplies : [];
-  // QR 스캔은 상시 노출하고, 취소는 입력 흐름에서 호출자가 명시한 경우에만 노출합니다.
+  // QR 스캔은 기본 메뉴에 넣되, 진행 중인 미션이 있으면 응답 후처리에서 숨깁니다.
+  // 취소는 실제 입력 흐름에서 호출자가 명시한 경우에만 노출합니다.
   const normalized = [QR_SCAN_QUICK_REPLY, ...requested]
     .map((item) => {
       if (typeof item === 'string') {
@@ -2854,10 +2812,9 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
   if (mission.mission_type === 'complete') {
     const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
     const desc = String(mission.question || '').trim();
-    const completeReply = firstRawAnswer(mission.answer || '완주');
-    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, '', imageUrls), [completeReply, ...menuQuickReplies], desc);
-    if (imageUrls.length === 1) return kakaoCard(title, desc, [], [completeReply, ...menuQuickReplies], imageUrls[0]);
-    return kakaoText(desc, [completeReply, ...menuQuickReplies]);
+    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, '', imageUrls), menuQuickReplies, desc);
+    if (imageUrls.length === 1) return kakaoCard(title, desc, [], menuQuickReplies, imageUrls[0]);
+    return kakaoText(desc, menuQuickReplies);
   }
   const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
   const quizType = normalizeQuizType(mission.quiz_type || 'short');
@@ -3051,10 +3008,10 @@ async function missionCompletionResponse(req, event, mission, text, quickReplies
 
   let buttons = [];
   let finalText = text;
+  let completePrompt = '';
 
   if (autoCompleteMission) {
-    buttons = completeMissionButton(autoCompleteMission);
-    finalText = `${text}\n\n${completeMissionPromptText(autoCompleteMission)}`;
+    completePrompt = completeMissionPromptText(autoCompleteMission);
   } else {
     const nextMission = await getLinkedNextMission(event.id, mission);
     buttons = linkedNextMissionButton(mission, nextMission);
@@ -3069,11 +3026,14 @@ async function missionCompletionResponse(req, event, mission, text, quickReplies
     finalText = nextMessage ? `${text}\n\n${nextMessage}` : text;
   }
 
-  if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(cardTitle, '', imageUrls), quickReplies, finalText, buttons);
-  if (imageUrls.length === 1) return kakaoCard(cardTitle, finalText, buttons, quickReplies, imageUrls[0]);
-  if (buttons.length && options.buttonsAsQuickReplies) return kakaoText(finalText, [...buttons, ...quickReplies]);
-  if (buttons.length) return kakaoCard(cardTitle, finalText, buttons, quickReplies);
-  return kakaoText(finalText, quickReplies);
+  let response;
+  if (imageUrls.length > 1) response = kakaoCarousel(buildImageCards(cardTitle, '', imageUrls), quickReplies, finalText, buttons);
+  else if (imageUrls.length === 1) response = kakaoCard(cardTitle, finalText, buttons, quickReplies, imageUrls[0]);
+  else if (buttons.length && options.buttonsAsQuickReplies) response = kakaoText(finalText, [...buttons, ...quickReplies]);
+  else if (buttons.length) response = kakaoCard(cardTitle, finalText, buttons, quickReplies);
+  else response = kakaoText(finalText, quickReplies);
+
+  return completePrompt ? appendCompletePromptToResponse(response, completePrompt) : response;
 }
 
 async function nextMissionPlainText(eventId, mission, variables = {}) {
@@ -3089,10 +3049,9 @@ async function nextMissionPlainText(eventId, mission, variables = {}) {
 
 async function nextOrCompleteMissionPlainText(eventId, team, mission, variables = {}) {
   const autoCompleteMission = await activateCompleteMissionIfReady(eventId, team, mission);
-  if (autoCompleteMission) {
-    const authoredText = completeMissionPromptText(autoCompleteMission);
-    return authoredText ? `\n\n${authoredText}` : '';
-  }
+  // 완주 미션 문구는 다음 카카오 응답에서 별도 말풍선으로 붙입니다.
+  // 팀 알림/웹 응답 본문에 합치면 정답 설명과 한 박스로 섞여 보입니다.
+  if (autoCompleteMission) return '';
   return nextMissionPlainText(eventId, mission, variables);
 }
 
@@ -3519,8 +3478,7 @@ ${hintPrompt}
     const acceptable = splitAnswers(mission.answer || '완주');
     if (!acceptable.includes(normalizeAnswer(utterance))) {
       const authoredMessage = String(mission.wrong_message || mission.question || '').trim();
-      const completeReply = firstRawAnswer(mission.answer || '완주');
-      return kakaoText(authoredMessage, [completeReply, ...menuQuickReplies]);
+      return kakaoText(authoredMessage, menuQuickReplies);
     }
 
     await query(
