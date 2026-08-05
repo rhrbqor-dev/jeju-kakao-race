@@ -681,6 +681,9 @@ const SYSTEM_MESSAGE_SETTING_DEFINITIONS = [
   { textKey: 'edit_member_name_prompt_message', label: '새 이름 입력 안내' },
   { textKey: 'edit_member_name_complete_message', label: '이름 수정 완료 안내' },
   { textKey: 'already_completed_by_member_message', label: '다른 팀원이 완료한 미션 안내' },
+  { textKey: 'gps_web_success_message', label: 'GPS 웹 인증 완료 후 입력 안내' },
+  { textKey: 'gps_result_success_message', label: '인증완료 입력 시 GPS 성공 안내' },
+  { textKey: 'gps_result_not_found_message', label: '인증완료 입력 시 GPS 내역 없음 안내' },
   { textKey: 'photo_mission_guide_message', label: '사진 미션 업로드 안내' },
   { textKey: 'photo_upload_pending_message', label: '사진 접수 대기 안내' },
   { textKey: 'photo_upload_approved_message', label: '사진 자동 승인 안내' },
@@ -752,6 +755,17 @@ const DEFAULT_MESSAGE_SETTINGS = {
   already_completed_by_member_message: `{completed_actor_name} 팀원이 완료한 미션입니다.
 
 다음 미션으로 이동해주세요.`,
+  gps_web_success_message: `GPS 인증이 완료되었습니다.
+카카오톡으로 돌아가 "인증완료"라고 입력해주세요.`,
+  gps_result_success_message: `GPS 인증 완료!
+
+수행자: {actor_name}
+획득 점수: {earned_score}점
+현재 팀 총점: {total}점
+
+{answer_explanation}`,
+  gps_result_not_found_message: `확인할 수 있는 GPS 인증 완료 내역이 없습니다.
+GPS 인증 페이지에서 인증을 완료한 뒤 다시 입력해주세요.`,
   mission_success_message: `정답입니다!
 
 수행자: {actor_name}
@@ -2542,6 +2556,19 @@ function isPhotoResultCommand(text) {
   return ['인증 결과 확인', '사진 결과 확인', '정답 설명 확인'].includes(String(text).trim());
 }
 
+function gpsFallbackPhotoMissionCode(text = '') {
+  const match = String(text || '').trim().match(/^GPS 대체 사진 인증(?:\s+(M\d+))?$/i);
+  return match?.[1] ? match[1].toUpperCase() : '';
+}
+
+function isGpsFallbackPhotoCommand(text) {
+  return /^GPS 대체 사진 인증(?:\s+M\d+)?$/i.test(String(text || '').trim());
+}
+
+function isGpsVerificationResultCommand(text) {
+  return ['인증완료', 'GPS 인증완료', 'GPS인증완료'].includes(String(text || '').trim());
+}
+
 function isMissionListCommand(text) {
   return ['미션 목록', '미션', '다음 미션', '목록'].includes(String(text).trim().toLowerCase());
 }
@@ -2815,7 +2842,11 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
     const desc = `${mission.question}\n\n아래 버튼을 눌러 위치 권한을 허용해주세요.`;
     const buttons = [
       { action: 'webLink', label: 'GPS 인증하기', webLinkUrl: url },
-      secureImagePluginButton('GPS가 안 될 때 사진 인증', 'GPS 대체 사진 인증'),
+      {
+        action: 'message',
+        label: 'GPS가 안 될 때 사진 인증',
+        messageText: `GPS 대체 사진 인증 ${mission.mission_code}`,
+      },
     ];
     if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, '', imageUrls), menuQuickReplies, desc, buttons);
     return kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || '');
@@ -2854,6 +2885,131 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
   if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, '', imageUrls), menuQuickReplies, desc);
   if (imageUrls.length === 1) return kakaoCard(title, desc, [], menuQuickReplies, imageUrls[0]);
   return kakaoText(textWithOptionalTitle(title, desc), menuQuickReplies);
+}
+
+
+async function handleGpsFallbackPhotoRequest(req, event, team, kakaoUserId, messages = DEFAULT_MESSAGE_SETTINGS, utterance = '') {
+  const requestedMissionCode = gpsFallbackPhotoMissionCode(utterance);
+  const freshTeam = (await query(`SELECT * FROM teams WHERE id=$1 AND event_id=$2 LIMIT 1;`, [team.id, event.id])).rows[0] || team;
+  let mission = requestedMissionCode
+    ? await getMissionByCode(event.id, requestedMissionCode)
+    : null;
+
+  if (!mission && freshTeam.current_mission_id) {
+    mission = (await query(
+      `SELECT * FROM missions WHERE id=$1 AND event_id=$2 LIMIT 1;`,
+      [freshTeam.current_mission_id, event.id]
+    )).rows[0];
+  }
+
+  if (!mission || mission.mission_type !== 'gps') {
+    return kakaoText('현재 진행 중인 GPS 미션을 찾을 수 없습니다. 미션 QR을 다시 스캔해주세요.', menuQuickReplies);
+  }
+
+  const [completion, actor] = await Promise.all([
+    getMissionCompletion(freshTeam.id, mission.id),
+    resolveActorForTeam(event.id, freshTeam.id, kakaoUserId, freshTeam.leader_name || '팀원'),
+  ]);
+
+  if (completion) {
+    return kakaoAlreadyCompletedMissionMessage(req, event, freshTeam, mission, {
+      currentActorName: actor.actor_name,
+      currentKakaoUserId: kakaoUserId,
+      settings: messages,
+      completion,
+    });
+  }
+
+  // 사진 플러그인을 곧바로 호출하면 카카오의 필수 파라미터 수집 상태에 갇힙니다.
+  // 먼저 일반 스킬 응답을 반환해 다른 메뉴/메시지로 이동할 수 있게 하고,
+  // 사용자가 실제로 "사진 올리기"를 누른 경우에만 보안 이미지 플러그인을 엽니다.
+  await query(`UPDATE teams SET current_mission_id=$1 WHERE id=$2;`, [mission.id, freshTeam.id]);
+  const prompt = cleanRenderedMessage(renderTemplate(messages.photo_mission_guide_message, {
+    ...eventTemplateVars(event, freshTeam, actor.actor_name),
+    question: mission.question,
+    mission_code: mission.mission_code,
+    mission_name: mission.mission_name,
+    score: mission.score,
+    photo_type: 'GPS 대체 사진',
+  })) || String(mission.question || '').trim();
+
+  return kakaoText(
+    prompt,
+    [secureImagePluginButton('사진 올리기', 'GPS 대체 사진 업로드'), ...menuQuickReplies]
+  );
+}
+
+
+async function handleGpsVerificationResult(req, event, team, messages = DEFAULT_MESSAGE_SETTINGS) {
+  const result = await query(
+    `SELECT m.*,
+            s.id AS submission_id,
+            s.score AS submitted_score,
+            s.actor_kakao_user_id,
+            s.actor_name,
+            s.distance_m,
+            s.submitted_at
+     FROM submissions s
+     JOIN missions m ON m.id=s.mission_id
+     WHERE s.event_id=$1
+       AND s.team_id=$2
+       AND m.mission_type='gps'
+       AND s.status='approved'
+       AND s.gps_lat IS NOT NULL
+       AND s.gps_lng IS NOT NULL
+     ORDER BY s.submitted_at DESC, s.id DESC
+     LIMIT 1;`,
+    [event.id, team.id]
+  );
+  const mission = result.rows[0];
+
+  if (!mission) {
+    const notFoundText = cleanRenderedMessage(renderTemplate(
+      messages.gps_result_not_found_message,
+      eventTemplateVars(event, team)
+    ));
+    return kakaoText(notFoundText, menuQuickReplies);
+  }
+
+  const [total, missionPenalty, wrongCountResult, answerImages] = await Promise.all([
+    teamTotalScore(team.id),
+    missionAdjustmentTotal(team.id, mission.id, ['hint', 'wrong']),
+    query(
+      `SELECT COUNT(*)::int AS count
+       FROM submissions
+       WHERE team_id=$1 AND mission_id=$2 AND status='wrong';`,
+      [team.id, mission.id]
+    ),
+    getMissionImages(mission.id, 'answer'),
+  ]);
+  const actorName = String(mission.actor_name || team.leader_name || '팀원').trim();
+  const earnedScore = Number(mission.submitted_score || 0) + missionPenalty;
+  const successText = cleanRenderedMessage(renderTemplate(messages.gps_result_success_message, {
+    ...eventTemplateVars(event, team, actorName),
+    mission_code: mission.mission_code,
+    mission_name: mission.mission_name,
+    actor_name: actorName,
+    member_name: actorName,
+    base_score: Number(mission.submitted_score || 0),
+    wrong_count: Number(wrongCountResult.rows[0]?.count || 0),
+    penalty_total: missionPenalty,
+    earned_score: earnedScore,
+    distance_m: Math.round(Number(mission.distance_m || 0)),
+    total_score: total,
+    total,
+    answer_explanation: mission.answer_explanation || '',
+  }));
+
+  return missionCompletionResponse(
+    req,
+    event,
+    mission,
+    successText,
+    menuQuickReplies,
+    missionImageLinks(req, answerImages),
+    'GPS 인증 완료',
+    { team, actorName, total, settings: messages }
+  );
 }
 
 
@@ -3664,6 +3820,16 @@ async function handleKakaoSkill(req, res) {
       return respondKakao(res, kakaoText('새로운 사진 인증 결과를 확인했습니다.', menuQuickReplies), event, team, kakaoUserId);
     }
 
+    if (isGpsVerificationResultCommand(utterance)) {
+      const response = await handleGpsVerificationResult(req, event, team, messages);
+      return respondKakao(res, response, event, team, kakaoUserId);
+    }
+
+    if (isGpsFallbackPhotoCommand(utterance)) {
+      const response = await handleGpsFallbackPhotoRequest(req, event, team, kakaoUserId, messages, utterance);
+      return respondKakao(res, response, event, team, kakaoUserId);
+    }
+
     if (isMissionListCommand(utterance)) {
       return respondKakao(res, await handleMissionList(req, event, team, messages), event, team, kakaoUserId);
     }
@@ -4164,7 +4330,18 @@ app.post('/api/public/verify/location', async (req, res) => {
       return res.status(400).json({ ok: false, message: '관리자 페이지에서 이 GPS 미션의 위도/경도를 먼저 설정해주세요.' });
     }
     if (await isMissionAlreadyCompleted(team.id, mission.id)) {
-      return res.json({ ok: true, message: '이미 완료된 GPS 미션입니다.' });
+      const messages = await getMessageSettings(event.id);
+      return res.json({
+        ok: true,
+        already_completed: true,
+        message: '이미 완료된 GPS 미션입니다.',
+        next_action_message: cleanRenderedMessage(renderTemplate(messages.gps_web_success_message, {
+          ...eventTemplateVars(event, team),
+          mission_code: mission.mission_code,
+          mission_name: mission.mission_name,
+        })),
+        chat_command: '인증완료',
+      });
     }
 
     const distance = haversineMeters(userLat, userLng, Number(mission.latitude), Number(mission.longitude));
@@ -4182,15 +4359,45 @@ app.post('/api/public/verify/location', async (req, res) => {
     let nextText = '';
     let earnedScore = Number(mission.score || 0);
     let failureMessage = '';
+    let nextActionMessage = '';
     if (ok) {
       await maybeMarkFinished(team, event.id);
-      const [total, missionPenalty] = await Promise.all([
+      const [total, missionPenalty, messages, wrongCountResult] = await Promise.all([
         teamTotalScore(team.id),
         missionAdjustmentTotal(team.id, mission.id, ['hint', 'wrong']),
+        getMessageSettings(event.id),
+        query(
+          `SELECT COUNT(*)::int AS count
+           FROM submissions
+           WHERE team_id=$1 AND mission_id=$2 AND status='wrong';`,
+          [team.id, mission.id]
+        ),
       ]);
       earnedScore += missionPenalty;
       nextText = await nextOrCompleteMissionPlainText(event.id, team, mission, nextMissionTemplateVariables({ event, team, mission, actorName: actorInfo.actor_name, total }));
-      await addTeamNotice(event.id, team.id, `${actorInfo.actor_name}님이 ${mission.mission_code} ${mission.mission_name} GPS 인증을 완료했습니다. 현재 팀 점수는 ${total}점입니다.${nextText}`, '');
+      const gpsSuccessVariables = {
+        ...eventTemplateVars(event, team, actorInfo.actor_name),
+        mission_code: mission.mission_code,
+        mission_name: mission.mission_name,
+        actor_name: actorInfo.actor_name,
+        member_name: actorInfo.actor_name,
+        base_score: Number(mission.score || 0),
+        wrong_count: Number(wrongCountResult.rows[0]?.count || 0),
+        penalty_total: missionPenalty,
+        earned_score: earnedScore,
+        distance_m: Math.round(distance),
+        total_score: total,
+        total,
+        answer_explanation: mission.answer_explanation || '',
+      };
+      const successNotice = cleanRenderedMessage(renderTemplate(messages.gps_result_success_message, gpsSuccessVariables));
+      nextActionMessage = cleanRenderedMessage(renderTemplate(messages.gps_web_success_message, gpsSuccessVariables));
+      await addTeamNotice(
+        event.id,
+        team.id,
+        cleanRenderedMessage(`${successNotice}${nextText}`),
+        actorInfo.actor_kakao_user_id
+      );
     } else {
       const wrongPenaltyRaw = Number(mission.wrong_penalty ?? -5);
       const wrongPenalty = wrongPenaltyRaw > 0 ? -wrongPenaltyRaw : wrongPenaltyRaw;
@@ -4238,7 +4445,7 @@ app.post('/api/public/verify/location', async (req, res) => {
         event.id,
         team.id,
         `${actorInfo.actor_name}님의 ${mission.mission_code} ${mission.mission_name} GPS 인증이 실패했습니다. ${failureMessage}`,
-        ''
+        actorInfo.actor_kakao_user_id
       );
     }
 
@@ -4248,6 +4455,8 @@ app.post('/api/public/verify/location', async (req, res) => {
       message: ok
         ? `GPS 인증 완료! ${earnedScore}점이 반영되었습니다.${nextText}`
         : failureMessage,
+      next_action_message: ok ? nextActionMessage : '',
+      chat_command: ok ? '인증완료' : '',
     });
   } catch (error) {
     console.error('GPS verify failed:', error);
