@@ -2134,6 +2134,12 @@ async function missionAdjustmentTotal(teamId, missionId, eventTypes = []) {
   return Number(result.rows[0]?.total || 0);
 }
 
+async function missionAvailableScore(teamId, mission) {
+  if (!teamId || !mission?.id) return Number(mission?.score || 0);
+  const penaltyTotal = await missionAdjustmentTotal(teamId, mission.id, ['hint', 'wrong']);
+  return Number(mission.score || 0) + penaltyTotal;
+}
+
 async function getCompletedMissionIds(teamId) {
   const result = await query(
     `SELECT DISTINCT mission_id
@@ -2990,7 +2996,7 @@ ${mission.mission_code} ${mission.mission_name}
     scoreDelta: penalty,
     memo: '힌트 사용',
   });
-  const total = await teamTotalScore(team.id);
+  const availableScore = await missionAvailableScore(team.id, mission);
 
   if (inserted) {
     await addTeamNotice(event.id, team.id, `${actorName}님이 ${mission.mission_code} ${mission.mission_name} 미션에서 힌트를 사용했습니다. 미션 완료 시 획득 점수에 ${penalty}점이 반영됩니다.`, kakaoUserId);
@@ -3000,7 +3006,7 @@ ${mission.mission_code} ${mission.mission_name}
     `${hintText}
 
 ${inserted ? `힌트 사용 감점: ${penalty}점 (미션 완료 시 반영)` : '이 미션의 힌트 감점은 이미 기록되었습니다.'}
-현재 팀 총점: ${total}점`,
+획득가능 점수: ${availableScore}점`,
     menuQuickReplies
   );
 }
@@ -3282,7 +3288,10 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
       return missionCompletionResponse(req, event, mission, successText, menuQuickReplies, finalImageUrls, `${mission.mission_code} ${mission.mission_name} 정답 설명`, { team, actorName, total, settings: messages });
     }
 
-    const totalAfterWrong = await teamTotalScore(team.id);
+    const [totalAfterWrong, availableScore] = await Promise.all([
+      teamTotalScore(team.id),
+      missionAvailableScore(team.id, mission),
+    ]);
     if (quizType === 'sequence') {
       await setUserState(event.id, kakaoUserId, 'WAIT_SEQUENCE_ANSWER', { missionId: mission.id, selected: [] });
     }
@@ -3295,18 +3304,18 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
 입력한 순서: ${selectedSequence.join(' → ')}
 현재 오답 횟수: ${wrongCount + 1}회
 오답 감점: ${wrongPenalty}점 (미션 완료 시 반영)
-현재 팀 총점: ${totalAfterWrong}점
+획득가능 점수: ${availableScore}점
 
 다시 처음부터 순서대로 선택해주세요.`
       : `아쉽습니다. 정답이 아닙니다.
 
 현재 오답 횟수: ${wrongCount + 1}회
 오답 감점: ${wrongPenalty}점 (미션 완료 시 반영)
-현재 팀 총점: ${totalAfterWrong}점
+획득가능 점수: ${availableScore}점
 ${hintPrompt}
 다시 정답을 입력해주세요.`;
     const wrongText = wrongTemplate
-      ? renderTemplate(wrongTemplate, { mission_code: mission.mission_code, mission_name: mission.mission_name, wrong_count: wrongCount + 1, wrong_penalty: wrongPenalty, total_score: totalAfterWrong, hint: mission.hint || '', answer: normalizedUtterance, team_name: team.team_name, actor_name: actorName })
+      ? renderTemplate(wrongTemplate, { mission_code: mission.mission_code, mission_name: mission.mission_name, wrong_count: wrongCount + 1, wrong_penalty: wrongPenalty, total_score: totalAfterWrong, available_score: availableScore, mission_available_score: availableScore, hint: mission.hint || '', answer: normalizedUtterance, team_name: team.team_name, actor_name: actorName })
       : defaultWrongText;
     return kakaoText(wrongText, quizType === 'sequence' ? sequenceQuickReplies(mission, []) : ['다시 입력하기', ...choiceQuickReplies(mission, menuQuickReplies)]);
   }
@@ -3342,8 +3351,10 @@ ${hintPrompt}
     }
 
     const hintText = String(mission.hint || '').trim();
-    const wrongText = String(mission.wrong_message || '').trim()
-      ? renderTemplate(mission.wrong_message, { mission_code: mission.mission_code, mission_name: mission.mission_name, hint: hintText, answer: utterance, team_name: team.team_name, actor_name: actorName })
+    const visitWrongTemplate = String(mission.wrong_message || '').trim();
+    const availableScore = visitWrongTemplate ? await missionAvailableScore(team.id, mission) : Number(mission.score || 0);
+    const wrongText = visitWrongTemplate
+      ? renderTemplate(visitWrongTemplate, { mission_code: mission.mission_code, mission_name: mission.mission_name, available_score: availableScore, mission_available_score: availableScore, hint: hintText, answer: utterance, team_name: team.team_name, actor_name: actorName })
       : '인증 문구가 맞지 않습니다.';
     return kakaoText(wrongText, menuQuickReplies);
   }

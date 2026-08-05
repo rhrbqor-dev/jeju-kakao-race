@@ -182,7 +182,7 @@
           <div id="missionImageStatus" class="small">등록된 미션 이미지 없음</div>
           <p class="small">제한: 미션 이미지 최대 5장, 이미지 1장당 최대 5MB까지 선택할 수 있습니다. 2MB를 넘는 이미지는 업로드 전 자동 최적화됩니다.</p>
           <label id="missionAnswerLabel">정답</label><input id="missionAnswer" placeholder="주관식: 해신사|해 신 사 / 객관식: 1" />
-          <label>오답 시 출력 멘트</label><textarea id="missionWrongMessage" rows="3" placeholder="비워두면 기본 오답 안내가 표시됩니다. 사용 가능: {wrong_count}, {hint}, {mission_name}, {actor_name}"></textarea>
+          <label>오답 시 출력 멘트</label><textarea id="missionWrongMessage" rows="3" placeholder="비워두면 기본 오답 안내가 표시됩니다. 사용 가능: {wrong_count}, {wrong_penalty}, {available_score}, {hint}, {mission_name}, {actor_name}"></textarea>
           <label>정답 설명</label><textarea id="missionAnswerExplanation" rows="4" placeholder="예: 해신사는 바다의 안전과 풍어를 기원하던 장소입니다."></textarea>
           <label>정답 설명 이미지 업로드</label>
           <input id="answerImages" type="file" accept="image/jpeg,image/png,image/webp" multiple />
@@ -190,9 +190,9 @@
           <p class="small">제한: 정답 설명 이미지 최대 5장, 이미지 1장당 최대 5MB까지 선택할 수 있습니다. 2MB를 넘는 이미지는 업로드 전 자동 최적화됩니다.</p>
           <label>정답/완료 점수</label><input id="missionScore" type="number" value="100" />
           <label>오답 1회 감점</label><input id="missionWrongPenalty" type="number" value="-5" />
-          <p class="small">예: -5로 입력하면 오답을 1회 입력할 때마다 팀 점수에서 5점이 차감됩니다.</p>
+          <p class="small">예: -5로 입력하면 오답을 1회 입력할 때마다 해당 미션의 획득가능 점수에서 5점이 차감됩니다.</p>
           <label>힌트 사용 감점</label><input id="missionHintPenalty" type="number" value="-10" />
-          <p class="small">예: -10으로 입력하면 해당 미션에서 힌트를 처음 사용할 때 팀 점수에서 10점이 차감됩니다.</p>
+          <p class="small">예: -10으로 입력하면 해당 미션에서 힌트를 처음 사용할 때 획득가능 점수에서 10점이 차감됩니다.</p>
           <label>힌트</label><input id="missionHint" placeholder="플레이어가 힌트라고 입력하면 표시됩니다." />
           <label>완료 후 바로 연결할 다음 미션</label><select id="missionNextId"><option value="">연결 없음</option></select>
           <label>다음 미션 버튼 문구 <span class="small">최대 12자</span></label><input id="missionNextButtonLabel" maxlength="12" placeholder="예: 다음 미션" value="다음 미션 시작" oninput="updateNextMissionButtonCount()" />
