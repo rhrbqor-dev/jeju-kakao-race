@@ -4172,14 +4172,16 @@ app.post('/api/public/verify/location', async (req, res) => {
 
     const actorInfo = await resolveActorForTeam(event.id, team.id, actor || actor_kakao_user_id, team.leader_name || '팀원');
 
-    await query(
+    const submissionResult = await query(
       `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, gps_lat, gps_lng, distance_m, actor_kakao_user_id, actor_name, status, score)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11);`,
-      [event.id, team.id, mission.id, `GPS ${Math.round(distance)}m`, userLat, userLng, distance, actorInfo.actor_kakao_user_id, actorInfo.actor_name, ok ? 'approved' : 'rejected', ok ? mission.score : 0]
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       RETURNING id;`,
+      [event.id, team.id, mission.id, `GPS ${Math.round(distance)}m`, userLat, userLng, distance, actorInfo.actor_kakao_user_id, actorInfo.actor_name, ok ? 'approved' : 'wrong', ok ? mission.score : 0]
     );
 
     let nextText = '';
     let earnedScore = Number(mission.score || 0);
+    let failureMessage = '';
     if (ok) {
       await maybeMarkFinished(team, event.id);
       const [total, missionPenalty] = await Promise.all([
@@ -4188,7 +4190,56 @@ app.post('/api/public/verify/location', async (req, res) => {
       ]);
       earnedScore += missionPenalty;
       nextText = await nextOrCompleteMissionPlainText(event.id, team, mission, nextMissionTemplateVariables({ event, team, mission, actorName: actorInfo.actor_name, total }));
-      await addTeamNotice(event.id, team.id, `${actorInfo.actor_name}님이 ${mission.mission_code} ${mission.mission_name} GPS 인증을 완료했습니다. 현재 팀 점수는 ${total}점입니다.${nextText}`, actorInfo.actor_kakao_user_id);
+      await addTeamNotice(event.id, team.id, `${actorInfo.actor_name}님이 ${mission.mission_code} ${mission.mission_name} GPS 인증을 완료했습니다. 현재 팀 점수는 ${total}점입니다.${nextText}`, '');
+    } else {
+      const wrongPenaltyRaw = Number(mission.wrong_penalty ?? -5);
+      const wrongPenalty = wrongPenaltyRaw > 0 ? -wrongPenaltyRaw : wrongPenaltyRaw;
+      if (wrongPenalty !== 0) {
+        await addScoreEvent({
+          eventId: event.id,
+          teamId: team.id,
+          missionId: mission.id,
+          kakaoUserId: actorInfo.actor_kakao_user_id,
+          actorName: actorInfo.actor_name,
+          eventType: 'wrong',
+          eventKey: `gps-wrong:${submissionResult.rows[0].id}`,
+          scoreDelta: wrongPenalty,
+          memo: `GPS 위치 오답 (${Math.round(distance)}m)`,
+        });
+      }
+      const [availableScore, wrongCountResult] = await Promise.all([
+        missionAvailableScore(team.id, mission),
+        query(
+          `SELECT COUNT(*)::int AS count
+           FROM submissions
+           WHERE team_id=$1 AND mission_id=$2 AND status='wrong';`,
+          [team.id, mission.id]
+        ),
+      ]);
+      const wrongCount = Number(wrongCountResult.rows[0]?.count || 0);
+      const wrongTemplate = String(mission.wrong_message || '').trim();
+      failureMessage = wrongTemplate
+        ? cleanRenderedMessage(renderTemplate(wrongTemplate, {
+          mission_code: mission.mission_code,
+          mission_name: mission.mission_name,
+          actor_name: actorInfo.actor_name,
+          team_name: team.team_name,
+          distance: Math.round(distance),
+          distance_m: Math.round(distance),
+          radius: Number(mission.radius_m || 80),
+          radius_m: Number(mission.radius_m || 80),
+          wrong_count: wrongCount,
+          wrong_penalty: wrongPenalty,
+          available_score: availableScore,
+          mission_available_score: availableScore,
+        }))
+        : `현재 위치가 미션 장소에서 ${Math.round(distance)}m 떨어져 있습니다.\n오답 감점: ${wrongPenalty}점 (미션 완료 시 반영)\n획득가능 점수: ${availableScore}점\n현장에서 다시 시도해주세요.`;
+      await addTeamNotice(
+        event.id,
+        team.id,
+        `${actorInfo.actor_name}님의 ${mission.mission_code} ${mission.mission_name} GPS 인증이 실패했습니다. ${failureMessage}`,
+        ''
+      );
     }
 
     res.json({
@@ -4196,7 +4247,7 @@ app.post('/api/public/verify/location', async (req, res) => {
       distance_m: Math.round(distance),
       message: ok
         ? `GPS 인증 완료! ${earnedScore}점이 반영되었습니다.${nextText}`
-        : `현재 위치가 미션 장소에서 ${Math.round(distance)}m 떨어져 있습니다. 현장에서 다시 시도해주세요.`,
+        : failureMessage,
     });
   } catch (error) {
     console.error('GPS verify failed:', error);
