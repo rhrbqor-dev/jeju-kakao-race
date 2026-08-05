@@ -425,9 +425,9 @@
             </div>
 
 
-            <label>이미 완료한 미션 안내 카드 제목 <span class="small">비워두면 제목 없이 표시</span></label>
+            <label>본인이 완료한 미션 안내 카드 제목 <span class="small">비워두면 제목 없이 표시</span></label>
             <input id="msgAlreadyCompletedTitle" placeholder="예: 미션 완료 안내" />
-            <label>이미 완료한 미션 안내 문구 <span class="small">완료한 미션에서 다시 정답을 입력했을 때 표시</span></label>
+            <label>본인이 완료한 미션 안내 문구 <span class="small">본인이 완료한 미션 코드를 다시 입력하거나 QR을 다시 스캔했을 때 표시</span></label>
             <textarea id="msgAlreadyCompleted" rows="4" placeholder="예: 이미 완료한 미션입니다.
 
 다음 미션으로 이동해주세요."></textarea>
@@ -495,6 +495,7 @@
             <div style="height:18px"></div>
             <h3>기본·시스템 문구 전체 설정</h3>
             <p class="small">점수, 순위, 팀 참가/수정, 사진 접수·승인·반려처럼 기존에 코드가 자동으로 붙이던 문구입니다. 치환값은 중괄호 그대로 유지하고 나머지 어투를 행사 테마에 맞게 바꿀 수 있습니다.</p>
+            <p class="small">다른 팀원이 완료한 미션 안내에서는 <b>{completed_actor_name}</b>을 완료한 팀원의 이름으로 사용할 수 있습니다.</p>
             <div id="systemMessageFields"></div>
 
             <div style="height:12px"></div>

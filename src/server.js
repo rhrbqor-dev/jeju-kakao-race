@@ -658,7 +658,7 @@ const MESSAGE_SETTING_DEFINITIONS = [
   { key: 'mission_guide', textKey: 'mission_guide_message', titleKey: 'mission_guide_title', label: '미션 안내 문구', title: '미션 안내' },
   { key: 'no_teams', textKey: 'no_teams_message', titleKey: 'no_teams_title', label: '참가 가능한 팀 없음 안내', title: '팀 참가' },
   { key: 'mission_list', textKey: 'mission_list_message', titleKey: 'mission_list_title', label: '미션 목록 안내', title: '' },
-  { key: 'already_completed', textKey: 'already_completed_message', titleKey: 'already_completed_title', label: '이미 완료한 미션 안내', title: '' },
+  { key: 'already_completed', textKey: 'already_completed_message', titleKey: 'already_completed_title', label: '본인이 완료한 미션 안내', title: '' },
   { key: 'mission_success', textKey: 'mission_success_message', titleKey: 'mission_success_title', label: '정답/미션 완료 안내', title: '' },
   { key: 'visit_success', textKey: 'visit_success_message', titleKey: 'visit_success_title', label: '방문 인증 완료 안내', title: '' },
   { key: 'need_team', textKey: 'need_team_message', titleKey: 'need_team_title', label: '팀 필요 안내', title: '참가 안내' },
@@ -680,6 +680,7 @@ const SYSTEM_MESSAGE_SETTING_DEFINITIONS = [
   { textKey: 'edit_team_name_complete_message', label: '팀명 수정 완료 안내' },
   { textKey: 'edit_member_name_prompt_message', label: '새 이름 입력 안내' },
   { textKey: 'edit_member_name_complete_message', label: '이름 수정 완료 안내' },
+  { textKey: 'already_completed_by_member_message', label: '다른 팀원이 완료한 미션 안내' },
   { textKey: 'photo_mission_guide_message', label: '사진 미션 업로드 안내' },
   { textKey: 'photo_upload_pending_message', label: '사진 접수 대기 안내' },
   { textKey: 'photo_upload_approved_message', label: '사진 자동 승인 안내' },
@@ -746,6 +747,9 @@ const DEFAULT_MESSAGE_SETTINGS = {
 
 ✅ 표시된 미션은 팀원 중 누가 수행했는지도 함께 표시됩니다.`,
   already_completed_message: `이미 완료한 미션입니다.
+
+다음 미션으로 이동해주세요.`,
+  already_completed_by_member_message: `{completed_actor_name} 팀원이 완료한 미션입니다.
 
 다음 미션으로 이동해주세요.`,
   mission_success_message: `정답입니다!
@@ -958,9 +962,22 @@ ${guideText}` : String(baseText || '').trim();
   return kakaoText(text, quickReplies);
 }
 
-async function kakaoAlreadyCompletedMissionMessage(req, event, team, mission, actorName = '', settings = DEFAULT_MESSAGE_SETTINGS) {
+async function kakaoAlreadyCompletedMissionMessage(req, event, team, mission, options = {}) {
+  const settings = options.settings || DEFAULT_MESSAGE_SETTINGS;
+  const actorName = String(options.currentActorName || '').trim();
+  const currentKakaoUserId = String(options.currentKakaoUserId || '').trim();
+  const completion = options.completion || await getMissionCompletion(team?.id, mission?.id);
+  const completedActorName = String(completion?.actor_name || '다른').trim();
+  const completedKakaoUserId = String(completion?.actor_kakao_user_id || '').trim();
+  const completedByOther = completedKakaoUserId && currentKakaoUserId
+    ? completedKakaoUserId !== currentKakaoUserId
+    : Boolean(completedActorName && actorName && completedActorName !== actorName);
   const total = team?.id ? await teamTotalScore(team.id) : '';
-  const template = String(settings?.already_completed_message || DEFAULT_MESSAGE_SETTINGS.already_completed_message || '').trim();
+  const template = String(
+    completedByOther
+      ? settings?.already_completed_by_member_message || DEFAULT_MESSAGE_SETTINGS.already_completed_by_member_message
+      : settings?.already_completed_message || DEFAULT_MESSAGE_SETTINGS.already_completed_message
+  ).trim();
   const text = renderTemplate(template, {
     event_name: event?.event_name || '',
     event_code: event?.event_code || '',
@@ -968,6 +985,8 @@ async function kakaoAlreadyCompletedMissionMessage(req, event, team, mission, ac
     team_code: team?.team_code || '',
     actor_name: actorName || '',
     member_name: actorName || '',
+    completed_actor_name: completedActorName,
+    completed_member_name: completedActorName,
     mission_code: mission?.mission_code || '',
     mission_name: mission?.mission_name || '',
     total,
@@ -2049,7 +2068,7 @@ async function getCompletedMissionIds(teamId) {
   const result = await query(
     `SELECT DISTINCT mission_id
      FROM submissions
-     WHERE team_id=$1 AND status IN ('correct', 'approved') AND score > 0;`,
+     WHERE team_id=$1 AND status IN ('correct', 'approved');`,
     [teamId]
   );
   return new Set(result.rows.map((r) => r.mission_id));
@@ -2086,13 +2105,20 @@ async function teamTotalScore(teamId) {
 }
 
 async function isMissionAlreadyCompleted(teamId, missionId) {
+  return Boolean(await getMissionCompletion(teamId, missionId));
+}
+
+async function getMissionCompletion(teamId, missionId) {
+  if (!teamId || !missionId) return null;
   const result = await query(
-    `SELECT id FROM submissions
-     WHERE team_id=$1 AND mission_id=$2 AND status IN ('correct', 'approved') AND score > 0
+    `SELECT id, actor_kakao_user_id, actor_name, status, score, submitted_at
+     FROM submissions
+     WHERE team_id=$1 AND mission_id=$2 AND status IN ('correct', 'approved')
+     ORDER BY score DESC, submitted_at ASC, id ASC
      LIMIT 1;`,
     [teamId, missionId]
   );
-  return Boolean(result.rows.length);
+  return result.rows[0] || null;
 }
 
 async function maybeMarkFinished(team, eventId) {
@@ -2650,10 +2676,23 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
   const mission = await getMissionByCode(event.id, missionCode);
   if (!mission) return kakaoText(`'${missionCode}' 미션을 찾을 수 없습니다. 미션 목록을 확인해주세요.`, menuQuickReplies);
 
+  const [completion, messageSettings] = await Promise.all([
+    getMissionCompletion(team.id, mission.id),
+    getMessageSettings(event.id),
+  ]);
+  if (completion) {
+    const actor = await resolveActorForTeam(event.id, team.id, kakaoUserId, team.leader_name || '팀원');
+    return kakaoAlreadyCompletedMissionMessage(req, event, team, mission, {
+      currentActorName: actor.actor_name,
+      currentKakaoUserId: kakaoUserId,
+      settings: messageSettings,
+      completion,
+    });
+  }
+
   await query(`UPDATE teams SET current_mission_id=$1 WHERE id=$2;`, [mission.id, team.id]);
   const missionImages = await getMissionImages(mission.id, 'mission');
   const imageUrls = missionImageLinks(req, missionImages);
-  const messageSettings = await getMessageSettings(event.id);
 
   if (mission.mission_type === 'photo') {
     const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
@@ -2893,7 +2932,11 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
   ]);
   const existing = existingResult.rows[0];
   if (!existing && alreadyCompleted) {
-    return kakaoAlreadyCompletedMissionMessage(req, event, team, mission, actor.actor_name, messages);
+    return kakaoAlreadyCompletedMissionMessage(req, event, team, mission, {
+      currentActorName: actor.actor_name,
+      currentKakaoUserId: kakaoUserId,
+      settings: messages,
+    });
   }
 
   if (existing) {
@@ -3013,7 +3056,11 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
 
   const already = await isMissionAlreadyCompleted(team.id, mission.id);
   if (already) {
-    return kakaoAlreadyCompletedMissionMessage(req, event, team, mission, actorName, messages);
+    return kakaoAlreadyCompletedMissionMessage(req, event, team, mission, {
+      currentActorName: actorName,
+      currentKakaoUserId: kakaoUserId,
+      settings: messages,
+    });
   }
 
   if (mission.mission_type === 'quiz') {
