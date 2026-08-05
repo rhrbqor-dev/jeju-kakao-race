@@ -2333,6 +2333,22 @@ function kakaoText(text, quickReplies = []) {
   return kakaoResponse(chunks.map((chunk) => ({ simpleText: { text: chunk } })), quickReplies);
 }
 
+function kakaoGuideOutputs(description = '', buttons = [], maxOutputs = KAKAO_MAX_OUTPUTS) {
+  const text = String(description || '').trim();
+  const safeButtons = Array.isArray(buttons) ? buttons.slice(0, 3) : [];
+  if (!safeButtons.length) {
+    if (!text) return [];
+    return splitKakaoText(text, KAKAO_TEXT_CHUNK_LIMIT, maxOutputs).map((chunk) => ({ simpleText: { text: chunk } }));
+  }
+
+  const authoredFallback = String(safeButtons[0]?.label || '').trim();
+  const chunks = text ? splitKakaoText(text, 400, maxOutputs) : [authoredFallback];
+  const cardText = chunks.pop() || authoredFallback;
+  const textCard = { description: cardText, buttons: safeButtons };
+  if (safeButtons.length > 2) textCard.buttonLayout = 'vertical';
+  return [...chunks.map((chunk) => ({ simpleText: { text: chunk } })), { textCard }];
+}
+
 function kakaoCard(title, description, buttons = [], quickReplies = [], imageUrl = '') {
   const safeButtons = Array.isArray(buttons) ? buttons.slice(0, 3) : [];
   const safeTitle = String(title || '').trim().slice(0, 40);
@@ -2342,9 +2358,7 @@ function kakaoCard(title, description, buttons = [], quickReplies = [], imageUrl
   if (imageUrl) {
     const basicCard = { thumbnail: { imageUrl, fixedRatio: true } };
     if (safeTitle) basicCard.title = safeTitle;
-    if (safeButtons.length > 0) basicCard.buttons = safeButtons;
-    const chunks = text ? splitKakaoText(text, KAKAO_TEXT_CHUNK_LIMIT, KAKAO_MAX_OUTPUTS - 1) : [];
-    return kakaoResponse([{ basicCard }, ...chunks.map((chunk) => ({ simpleText: { text: chunk } }))], quickReplies);
+    return kakaoResponse([{ basicCard }, ...kakaoGuideOutputs(text, safeButtons, KAKAO_MAX_OUTPUTS - 1)], quickReplies);
   }
 
   if (safeButtons.length > 0) {
@@ -2361,26 +2375,29 @@ function kakaoCard(title, description, buttons = [], quickReplies = [], imageUrl
   return kakaoText(text || safeTitle, quickReplies);
 }
 
-function kakaoCarousel(cards = [], quickReplies = []) {
+function kakaoCarousel(cards = [], quickReplies = [], description = '', buttons = []) {
   const safeCards = Array.isArray(cards) ? cards.filter(Boolean).slice(0, 10) : [];
   if (!safeCards.length) return kakaoText('표시할 카드가 없습니다.', quickReplies);
-  return kakaoResponse([{ carousel: { type: 'basicCard', items: safeCards } }], quickReplies);
+  return kakaoResponse(
+    [{ carousel: { type: 'basicCard', items: safeCards } }, ...kakaoGuideOutputs(description, buttons, KAKAO_MAX_OUTPUTS - 1)],
+    quickReplies
+  );
 }
 
-function buildImageCards(title, description, imageUrls = [], buttons = []) {
+function buildImageCards(title, _description, imageUrls = [], _buttons = []) {
   const urls = Array.isArray(imageUrls) ? imageUrls.filter(Boolean).slice(0, 10) : [];
   const safeTitle = String(title || '').trim();
   return urls.map((imageUrl, index) => {
-    const card = { description: index === 0 ? String(description || '') : '이미지를 좌우로 넘겨 확인해주세요.', thumbnail: { imageUrl, fixedRatio: true } };
+    const card = { thumbnail: { imageUrl, fixedRatio: true } };
     if (safeTitle) card.title = urls.length === 1 ? safeTitle : `${safeTitle} (${index + 1}/${urls.length})`;
-    const safeButtons = Array.isArray(buttons) ? buttons.slice(0, 3) : [];
-    if (safeButtons.length > 0 && index === 0) card.buttons = safeButtons;
     return card;
   });
 }
 
 const startQuickReplies = ['팀 생성', '팀 참가', '도움말'];
-const menuQuickReplies = ['인증 결과 확인', '미션 목록', '힌트', '내 점수', '순위', '팀원 목록', '팀명 수정', '이름 수정', '도움말'];
+const menuQuickReplies = ['미션 목록', '힌트', '내 점수', '순위', '팀원 목록', '팀명 수정', '이름 수정', '도움말'];
+const approvedPhotoQuickReplies = [secureImagePluginButton('사진 다시 제출', '사진 다시 제출'), ...menuQuickReplies];
+const pendingPhotoQuickReplies = ['인증 결과 확인', secureImagePluginButton('사진 다시 제출', '사진 다시 제출'), ...menuQuickReplies];
 
 function isStartCommand(text) {
   return ['시작', '게임 시작', '참여하기', '참가', 'start'].includes(String(text).trim().toLowerCase());
@@ -2647,7 +2664,7 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
       mission_name: mission.mission_name, score: mission.score,
     });
     const buttons = [secureImagePluginButton('사진 업로드', '사진 인증')];
-    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls, buttons), menuQuickReplies);
+    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, '', imageUrls), menuQuickReplies, desc, buttons);
     return kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || '');
   }
   if (mission.mission_type === 'gps') {
@@ -2658,14 +2675,14 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
       { action: 'webLink', label: 'GPS 인증하기', webLinkUrl: url },
       secureImagePluginButton('GPS가 안 될 때 사진 인증', 'GPS 대체 사진 인증'),
     ];
-    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls, buttons), menuQuickReplies);
+    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, '', imageUrls), menuQuickReplies, desc, buttons);
     return kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || '');
   }
   if (mission.mission_type === 'complete') {
     const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
     const desc = String(mission.question || '').trim();
     const completeReply = firstRawAnswer(mission.answer || '완주');
-    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls), [completeReply, ...menuQuickReplies]);
+    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, '', imageUrls), [completeReply, ...menuQuickReplies], desc);
     if (imageUrls.length === 1) return kakaoCard(title, desc, [], [completeReply, ...menuQuickReplies], imageUrls[0]);
     return kakaoText(desc, [completeReply, ...menuQuickReplies]);
   }
@@ -2677,7 +2694,7 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
     const choiceText = choices.length ? `\n\n${choices.map((choice, index) => `${index + 1}. ${choice}`).join('\n')}` : '';
     const desc = `${mission.question}${choiceText}\n\n아래 보기 버튼을 눌러 정답을 선택해주세요.`;
     const quickReplies = choiceQuickReplies(mission, menuQuickReplies);
-    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls), quickReplies);
+    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, '', imageUrls), quickReplies, desc);
     if (imageUrls.length === 1) return kakaoCard(title, desc, [], quickReplies, imageUrls[0]);
     return kakaoText(textWithOptionalTitle(title, desc), quickReplies);
   }
@@ -2686,13 +2703,13 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
     await setUserState(event.id, kakaoUserId, 'WAIT_SEQUENCE_ANSWER', { missionId: mission.id, selected: [] });
     const desc = sequenceProgressText(mission, []);
     const quickReplies = sequenceQuickReplies(mission, []);
-    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls), quickReplies);
+    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, '', imageUrls), quickReplies, desc);
     if (imageUrls.length === 1) return kakaoCard(title, desc, [], quickReplies, imageUrls[0]);
     return kakaoText(textWithOptionalTitle(title, desc), quickReplies);
   }
 
   const desc = String(mission.question || '').trim();
-  if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, desc, imageUrls), menuQuickReplies);
+  if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, '', imageUrls), menuQuickReplies, desc);
   if (imageUrls.length === 1) return kakaoCard(title, desc, [], menuQuickReplies, imageUrls[0]);
   return kakaoText(textWithOptionalTitle(title, desc), menuQuickReplies);
 }
@@ -2754,7 +2771,7 @@ async function missionCompletionResponse(req, event, mission, text, quickReplies
     finalText = nextMessage ? `${text}\n\n${nextMessage}` : text;
   }
 
-  if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(cardTitle, finalText, imageUrls, buttons), quickReplies);
+  if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(cardTitle, '', imageUrls), quickReplies, finalText, buttons);
   if (imageUrls.length === 1) return kakaoCard(cardTitle, finalText, buttons, quickReplies, imageUrls[0]);
   if (buttons.length && options.buttonsAsQuickReplies) return kakaoText(finalText, [...buttons, ...quickReplies]);
   if (buttons.length) return kakaoCard(cardTitle, finalText, buttons, quickReplies);
@@ -2881,33 +2898,39 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
     return kakaoAlreadyCompletedMissionMessage(req, event, team, mission, actor.actor_name, messages);
   }
 
-  const photoQuickReplies = ['사진 다시 제출', ...menuQuickReplies];
   if (existing) {
-    await query(
-      `UPDATE submissions
-       SET image_data=$1, image_mime=$2, actor_kakao_user_id=$3, actor_name=$4,
-           answer_text=$5, submission_key=$6, submitted_at=NOW()
-       WHERE id=$7;`,
-      [image.image_data, image.image_mime, actor.actor_kakao_user_id, actor.actor_name,
-       mission.mission_type === 'gps' ? '카카오 GPS 대체 사진 재제출' : '카카오 이미지 보안전송 재제출',
-       `secureimage:replace:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`, existing.id]
-    );
     const replacedText = cleanRenderedMessage(renderTemplate(messages.photo_replaced_message, {
       ...eventTemplateVars(event, team, actor.actor_name), mission_code: mission.mission_code,
       mission_name: mission.mission_name, actor_name: actor.actor_name,
       submission_status: existing.status === 'pending' ? '승인 대기' : '승인 완료',
       photo_type: mission.mission_type === 'gps' ? 'GPS 대체 사진' : '사진',
     }));
-    return kakaoText(replacedText, photoQuickReplies);
+    setImmediate(async () => {
+      try {
+        await query(
+          `UPDATE submissions
+           SET image_data=$1, image_mime=$2, actor_kakao_user_id=$3, actor_name=$4,
+               answer_text=$5, submission_key=$6, submitted_at=NOW()
+           WHERE id=$7;`,
+          [image.image_data, image.image_mime, actor.actor_kakao_user_id, actor.actor_name,
+           mission.mission_type === 'gps' ? '카카오 GPS 대체 사진 재제출' : '카카오 이미지 보안전송 재제출',
+           `secureimage:replace:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`, existing.id]
+        );
+      } catch (error) {
+        console.error('[kakao-secure-image] replacement save failed:', error);
+      }
+    });
+    return kakaoText(replacedText, existing.status === 'pending' ? pendingPhotoQuickReplies : approvedPhotoQuickReplies);
   }
 
   const autoApprove = isPhotoAutoApprovalActive(photoAutoApproval);
   const status = autoApprove ? 'approved' : 'pending';
   const score = autoApprove ? Number(mission.score || 0) : 0;
-  await query(
+  const submissionKey = `secureimage:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+  const persistSubmission = () => query(
     `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, image_data, image_mime, actor_kakao_user_id, actor_name, submission_key, status, score, reviewed_at, review_note)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,CASE WHEN $10='approved' THEN NOW() ELSE NULL END,$12);`,
-    [event.id, team.id, mission.id, mission.mission_type === 'gps' ? '카카오 GPS 대체 사진 인증' : '카카오 이미지 보안전송', image.image_data, image.image_mime, actor.actor_kakao_user_id, actor.actor_name, `secureimage:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`, status, score, autoApprove ? '카카오 이미지 보안전송 자동 승인' : '']
+    [event.id, team.id, mission.id, mission.mission_type === 'gps' ? '카카오 GPS 대체 사진 인증' : '카카오 이미지 보안전송', image.image_data, image.image_mime, actor.actor_kakao_user_id, actor.actor_name, submissionKey, status, score, autoApprove ? '카카오 이미지 보안전송 자동 승인' : '']
   );
 
   if (!autoApprove) {
@@ -2915,25 +2938,28 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
       ...eventTemplateVars(event, team, actor.actor_name), mission_code: mission.mission_code,
       mission_name: mission.mission_name, actor_name: actor.actor_name, photo_type: mission.mission_type === 'gps' ? 'GPS 대체 사진' : '사진',
     }));
-    setImmediate(() => {
-      addTeamNotice(
-        event.id,
-        team.id,
-        `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} 사진을 업로드했습니다. 운영자 승인 후 점수가 반영됩니다.`,
-        actor.actor_kakao_user_id
-      ).catch((error) => console.error('[kakao-secure-image] pending notice failed:', error));
+    setImmediate(async () => {
+      try {
+        await persistSubmission();
+        await addTeamNotice(
+          event.id,
+          team.id,
+          `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} 사진을 업로드했습니다. 운영자 승인 후 점수가 반영됩니다.`,
+          actor.actor_kakao_user_id
+        );
+      } catch (error) {
+        console.error('[kakao-secure-image] pending save failed:', error);
+      }
     });
-    return kakaoText(pendingText, photoQuickReplies);
+    return kakaoText(pendingText, pendingPhotoQuickReplies);
   }
 
-  const progressionPromise = mission.next_mission_id
-    ? getLinkedNextMission(event.id, mission)
-    : activateCompleteMissionIfReady(event.id, team, mission);
-  const [total, answerImages, progression] = await Promise.all([
+  const [currentTotal, answerImages, progression] = await Promise.all([
     teamTotalScore(team.id),
     getMissionImages(mission.id, 'answer'),
-    progressionPromise,
+    mission.next_mission_id ? getLinkedNextMission(event.id, mission) : Promise.resolve(null),
   ]);
+  const total = currentTotal + score;
   const approvedText = cleanRenderedMessage(renderTemplate(messages.photo_upload_approved_message, {
     ...eventTemplateVars(event, team, actor.actor_name), mission_code: mission.mission_code,
     mission_name: mission.mission_name, actor_name: actor.actor_name, earned_score: score,
@@ -2948,29 +2974,31 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
       event, team, mission, nextMission: progression, actorName: actor.actor_name, total,
     }));
     if (nextMessage) finalText = `${approvedText}\n\n${nextMessage}`;
-  } else if (progression?.mission_type === 'complete') {
-    buttons = completeMissionButton(progression);
-    const completeText = completeMissionPromptText(progression);
-    if (completeText) finalText = `${approvedText}\n\n${completeText}`;
   }
 
-  // 카카오에는 저장 직후 응답하고, 말풍선과 관계없는 운영용 갱신은 응답 이후에 처리합니다.
-  setImmediate(() => {
-    Promise.all([
-      maybeMarkFinished(team, event.id),
-      addTeamNotice(
-        event.id,
-        team.id,
-        `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} 미션을 완료했습니다. 현재 팀 점수는 ${total}점입니다.`,
-        kakaoUserId
-      ),
-    ]).catch((error) => console.error('[kakao-secure-image] completion finalization failed:', error));
+  // 대용량 이미지 DB 저장을 기다리지 않고 카카오 응답을 먼저 반환합니다.
+  setImmediate(async () => {
+    try {
+      await persistSubmission();
+      if (!mission.next_mission_id) await activateCompleteMissionIfReady(event.id, team, mission);
+      await Promise.all([
+        maybeMarkFinished(team, event.id),
+        addTeamNotice(
+          event.id,
+          team.id,
+          `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} 미션을 완료했습니다. 현재 팀 점수는 ${total}점입니다.`,
+          kakaoUserId
+        ),
+      ]);
+    } catch (error) {
+      console.error('[kakao-secure-image] approved save failed:', error);
+    }
   });
 
   const answerImageUrls = missionImageLinks(req, answerImages);
-  if (answerImageUrls.length > 1) return kakaoCarousel(buildImageCards('', finalText, answerImageUrls, buttons), photoQuickReplies);
-  if (answerImageUrls.length === 1) return kakaoCard('', finalText, buttons, photoQuickReplies, answerImageUrls[0]);
-  return kakaoText(finalText, [...buttons, ...photoQuickReplies]);
+  if (answerImageUrls.length > 1) return kakaoCarousel(buildImageCards('', '', answerImageUrls), approvedPhotoQuickReplies, finalText, buttons);
+  if (answerImageUrls.length === 1) return kakaoCard('', finalText, buttons, approvedPhotoQuickReplies, answerImageUrls[0]);
+  return kakaoText(finalText, [...buttons, ...approvedPhotoQuickReplies]);
 }
 
 async function handleAnswer(req, event, team, utterance, kakaoUserId, messages = DEFAULT_MESSAGE_SETTINGS) {
