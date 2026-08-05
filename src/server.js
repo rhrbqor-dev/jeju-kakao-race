@@ -1795,6 +1795,16 @@ function kakaoResponseTextSnapshot(response) {
   }).join('\n');
 }
 
+function markMissionCompletedResponse(response) {
+  if (response && typeof response === 'object') {
+    Object.defineProperty(response, '__missionCompletedInCurrentRequest', {
+      value: true,
+      enumerable: false,
+    });
+  }
+  return response;
+}
+
 function addButtonsToCard(firstOutput, buttons = []) {
   if (!buttons.length) return;
   const card = firstOutput.basicCard || firstOutput.textCard;
@@ -1891,7 +1901,9 @@ async function syncActiveMissionHintQuickReply(eventId, team, response) {
     [team.id, eventId]
   );
   const mission = result.rows[0];
-  const showHint = Boolean(String(mission?.hint || '').trim()) && !mission?.completed;
+  const showHint = Boolean(String(mission?.hint || '').trim())
+    && !mission?.completed
+    && response.__missionCompletedInCurrentRequest !== true;
   const replies = Array.isArray(response.template.quickReplies)
     ? response.template.quickReplies.filter((reply) => String(reply?.label || reply?.messageText || '').trim() !== '힌트')
     : [];
@@ -2062,7 +2074,21 @@ async function addScoreEvent({ eventId, teamId, missionId = null, kakaoUserId = 
 }
 
 async function scoreAdjustmentsTotal(teamId) {
-  const result = await query(`SELECT COALESCE(SUM(score_delta), 0)::int AS total FROM score_events WHERE team_id=$1;`, [teamId]);
+  const result = await query(
+    `SELECT COALESCE(SUM(se.score_delta), 0)::int AS total
+     FROM score_events se
+     WHERE se.team_id=$1
+       AND (
+         se.event_type NOT IN ('hint', 'wrong')
+         OR EXISTS (
+           SELECT 1
+           FROM submissions s
+           WHERE s.team_id=se.team_id AND s.mission_id=se.mission_id
+             AND s.status IN ('correct', 'approved')
+         )
+       );`,
+    [teamId]
+  );
   return Number(result.rows[0]?.total || 0);
 }
 
@@ -2072,6 +2098,15 @@ async function scoreAdjustmentDetails(teamId) {
      FROM score_events se
      LEFT JOIN missions m ON m.id=se.mission_id
      WHERE se.team_id=$1
+       AND (
+         se.event_type NOT IN ('hint', 'wrong')
+         OR EXISTS (
+           SELECT 1
+           FROM submissions s
+           WHERE s.team_id=se.team_id AND s.mission_id=se.mission_id
+             AND s.status IN ('correct', 'approved')
+         )
+       )
      ORDER BY se.created_at ASC, se.id ASC;`,
     [teamId]
   );
@@ -2132,7 +2167,20 @@ async function teamTotalScore(teamId) {
      )
      SELECT (
        COALESCE((SELECT SUM(score) FROM mission_scores), 0)
-       + COALESCE((SELECT SUM(score_delta) FROM score_events WHERE team_id=$1), 0)
+       + COALESCE((
+         SELECT SUM(se.score_delta)
+         FROM score_events se
+         WHERE se.team_id=$1
+           AND (
+             se.event_type NOT IN ('hint', 'wrong')
+             OR EXISTS (
+               SELECT 1
+               FROM submissions completed
+               WHERE completed.team_id=se.team_id AND completed.mission_id=se.mission_id
+                 AND completed.status IN ('correct', 'approved')
+             )
+           )
+       ), 0)
      )::int AS total;`,
     [teamId]
   );
@@ -2248,10 +2296,20 @@ async function buildRanking(eventId) {
        SELECT team_id, COALESCE(SUM(best_score), 0)::int AS mission_score
        FROM best GROUP BY team_id
      ), adjustments AS (
-       SELECT team_id, COALESCE(SUM(score_delta), 0)::int AS adjustment_score
-       FROM score_events
-       WHERE event_id=$1
-       GROUP BY team_id
+       SELECT se.team_id, COALESCE(SUM(se.score_delta), 0)::int AS adjustment_score
+       FROM score_events se
+       WHERE se.event_id=$1
+         AND (
+           se.event_type NOT IN ('hint', 'wrong')
+           OR EXISTS (
+             SELECT 1
+             FROM submissions completed_submission
+             WHERE completed_submission.team_id=se.team_id
+               AND completed_submission.mission_id=se.mission_id
+               AND completed_submission.status IN ('correct', 'approved')
+           )
+         )
+       GROUP BY se.team_id
      ), completed AS (
        SELECT team_id, COUNT(DISTINCT mission_id)::int AS completed_count
        FROM submissions
@@ -2546,7 +2604,13 @@ async function handleScore(team, messages = DEFAULT_MESSAGE_SETTINGS) {
   const total = await teamTotalScore(team.id);
   const result = await query(
     `SELECT DISTINCT ON (m.id)
-       m.sort_order, m.mission_code, m.mission_name, s.score, s.actor_name
+       m.sort_order, m.mission_code, m.mission_name,
+       (s.score + COALESCE((
+         SELECT SUM(se.score_delta)
+         FROM score_events se
+         WHERE se.team_id=s.team_id AND se.mission_id=s.mission_id
+       ), 0))::int AS score,
+       s.actor_name
      FROM submissions s
      JOIN missions m ON m.id=s.mission_id
      WHERE s.team_id=$1 AND s.status IN ('correct', 'approved') AND s.score > 0
@@ -2929,15 +2993,13 @@ ${mission.mission_code} ${mission.mission_name}
   const total = await teamTotalScore(team.id);
 
   if (inserted) {
-    await addTeamNotice(event.id, team.id, `${actorName}님이 ${mission.mission_code} ${mission.mission_name} 미션에서 힌트를 사용했습니다. ${penalty}점이 반영되었습니다.`, kakaoUserId);
+    await addTeamNotice(event.id, team.id, `${actorName}님이 ${mission.mission_code} ${mission.mission_name} 미션에서 힌트를 사용했습니다. 미션 완료 시 획득 점수에 ${penalty}점이 반영됩니다.`, kakaoUserId);
   }
 
   return kakaoText(
-    `${mission.mission_code} ${mission.mission_name} 힌트
+    `${hintText}
 
-${hintText}
-
-${inserted ? `힌트 사용 감점: ${penalty}점` : '이 미션의 힌트 감점은 이미 반영되었습니다.'}
+${inserted ? `힌트 사용 감점: ${penalty}점 (미션 완료 시 반영)` : '이 미션의 힌트 감점은 이미 기록되었습니다.'}
 현재 팀 총점: ${total}점`,
     menuQuickReplies
   );
@@ -3030,15 +3092,17 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
     return kakaoText(pendingText, pendingPhotoQuickReplies);
   }
 
-  const [currentTotal, answerImages, progression] = await Promise.all([
+  const [currentTotal, missionAdjustment, answerImages, progression] = await Promise.all([
     teamTotalScore(team.id),
+    missionAdjustmentTotal(team.id, mission.id, ['hint', 'wrong']),
     getMissionImages(mission.id, 'answer'),
     mission.next_mission_id ? getLinkedNextMission(event.id, mission) : Promise.resolve(null),
   ]);
-  const total = currentTotal + score;
+  const earnedScore = score + missionAdjustment;
+  const total = currentTotal + earnedScore;
   const approvedText = cleanRenderedMessage(renderTemplate(messages.photo_upload_approved_message, {
     ...eventTemplateVars(event, team, actor.actor_name), mission_code: mission.mission_code,
-    mission_name: mission.mission_name, actor_name: actor.actor_name, earned_score: score,
+    mission_name: mission.mission_name, actor_name: actor.actor_name, earned_score: earnedScore,
     total, answer_explanation: mission.answer_explanation || '', next_message: '',
     photo_type: mission.mission_type === 'gps' ? 'GPS 대체 사진' : '사진',
   }));
@@ -3072,9 +3136,9 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
   });
 
   const answerImageUrls = missionImageLinks(req, answerImages);
-  if (answerImageUrls.length > 1) return kakaoCarousel(buildImageCards('', '', answerImageUrls), approvedPhotoQuickReplies, finalText, buttons);
-  if (answerImageUrls.length === 1) return kakaoCard('', finalText, buttons, approvedPhotoQuickReplies, answerImageUrls[0]);
-  return kakaoText(finalText, [...buttons, ...approvedPhotoQuickReplies]);
+  if (answerImageUrls.length > 1) return markMissionCompletedResponse(kakaoCarousel(buildImageCards('', '', answerImageUrls), approvedPhotoQuickReplies, finalText, buttons));
+  if (answerImageUrls.length === 1) return markMissionCompletedResponse(kakaoCard('', finalText, buttons, approvedPhotoQuickReplies, answerImageUrls[0]));
+  return markMissionCompletedResponse(kakaoText(finalText, [...buttons, ...approvedPhotoQuickReplies]));
 }
 
 async function handleAnswer(req, event, team, utterance, kakaoUserId, messages = DEFAULT_MESSAGE_SETTINGS) {
@@ -3230,14 +3294,14 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
 
 입력한 순서: ${selectedSequence.join(' → ')}
 현재 오답 횟수: ${wrongCount + 1}회
-오답 감점: ${wrongPenalty}점
+오답 감점: ${wrongPenalty}점 (미션 완료 시 반영)
 현재 팀 총점: ${totalAfterWrong}점
 
 다시 처음부터 순서대로 선택해주세요.`
       : `아쉽습니다. 정답이 아닙니다.
 
 현재 오답 횟수: ${wrongCount + 1}회
-오답 감점: ${wrongPenalty}점
+오답 감점: ${wrongPenalty}점 (미션 완료 시 반영)
 현재 팀 총점: ${totalAfterWrong}점
 ${hintPrompt}
 다시 정답을 입력해주세요.`;
@@ -3259,6 +3323,8 @@ ${hintPrompt}
 
     if (ok) {
       const total = await afterMissionCompleted(event, team, mission, kakaoUserId, actorName);
+      const missionPenalty = await missionAdjustmentTotal(team.id, mission.id, ['hint', 'wrong']);
+      const earnedScore = Number(mission.score || 0) + missionPenalty;
       const visitVariables = {
         ...eventTemplateVars(event, team, actorName),
         mission_code: mission.mission_code || '',
@@ -3266,7 +3332,7 @@ ${hintPrompt}
         actor_name: actorName,
         member_name: actorName,
         base_score: Number(mission.score || 0),
-        earned_score: Number(mission.score || 0),
+        earned_score: earnedScore,
         total_score: total,
         total,
       };
@@ -4005,12 +4071,16 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
 
     if (autoApprove) {
       await maybeMarkFinished(team, event.id);
-      const total = await teamTotalScore(team.id);
+      const [total, missionPenalty] = await Promise.all([
+        teamTotalScore(team.id),
+        missionAdjustmentTotal(team.id, mission.id, ['hint', 'wrong']),
+      ]);
+      const earnedScore = Number(mission.score || 0) + missionPenalty;
       const nextText = await nextOrCompleteMissionPlainText(event.id, team, mission, nextMissionTemplateVariables({ event, team, mission, actorName: actor.actor_name, total }));
       const approvedNotice = cleanRenderedMessage(renderTemplate(messages.photo_review_approved_message, {
         team_name: team.team_name, team_code: team.team_code, actor_name: actor.actor_name,
         mission_code: mission.mission_code, mission_name: mission.mission_name, total,
-        earned_score: mission.score, answer_explanation: mission.answer_explanation || '',
+        earned_score: earnedScore, answer_explanation: mission.answer_explanation || '',
         next_message: String(nextText || '').trim(), photo_type: gpsFallback ? 'GPS 대체 사진' : '사진',
       }));
       await addTeamNotice(
@@ -4025,7 +4095,7 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
         message: cleanRenderedMessage(renderTemplate(messages.photo_upload_approved_message, {
           ...eventTemplateVars(event, team, actor.actor_name), mission_code: mission.mission_code,
           mission_name: mission.mission_name, actor_name: actor.actor_name,
-          earned_score: mission.score, total, answer_explanation: mission.answer_explanation || '',
+          earned_score: earnedScore, total, answer_explanation: mission.answer_explanation || '',
           next_message: String(nextText || '').trim(), photo_type: gpsFallback ? 'GPS 대체 사진' : '사진',
         })),
       });
@@ -4098,9 +4168,14 @@ app.post('/api/public/verify/location', async (req, res) => {
     );
 
     let nextText = '';
+    let earnedScore = Number(mission.score || 0);
     if (ok) {
       await maybeMarkFinished(team, event.id);
-      const total = await teamTotalScore(team.id);
+      const [total, missionPenalty] = await Promise.all([
+        teamTotalScore(team.id),
+        missionAdjustmentTotal(team.id, mission.id, ['hint', 'wrong']),
+      ]);
+      earnedScore += missionPenalty;
       nextText = await nextOrCompleteMissionPlainText(event.id, team, mission, nextMissionTemplateVariables({ event, team, mission, actorName: actorInfo.actor_name, total }));
       await addTeamNotice(event.id, team.id, `${actorInfo.actor_name}님이 ${mission.mission_code} ${mission.mission_name} GPS 인증을 완료했습니다. 현재 팀 점수는 ${total}점입니다.${nextText}`, actorInfo.actor_kakao_user_id);
     }
@@ -4109,7 +4184,7 @@ app.post('/api/public/verify/location', async (req, res) => {
       ok,
       distance_m: Math.round(distance),
       message: ok
-        ? `GPS 인증 완료! ${mission.score}점이 반영되었습니다.${nextText}`
+        ? `GPS 인증 완료! ${earnedScore}점이 반영되었습니다.${nextText}`
         : `현재 위치가 미션 장소에서 ${Math.round(distance)}m 떨어져 있습니다. 현장에서 다시 시도해주세요.`,
     });
   } catch (error) {
@@ -4851,13 +4926,17 @@ app.post('/api/admin/submissions/:id/review', requireAdmin, async (req, res) => 
   await maybeMarkFinished(team, sub.event_id);
 
   if (decision === 'approved') {
-    const total = await teamTotalScore(team.id);
+    const [total, missionPenalty] = await Promise.all([
+      teamTotalScore(team.id),
+      missionAdjustmentTotal(team.id, sub.mission_id, ['hint', 'wrong']),
+    ]);
+    const earnedScore = score + missionPenalty;
     const actorLabel = sub.actor_name || '팀원';
     const nextText = await nextOrCompleteMissionPlainText(sub.event_id, team, sub, { team_name: team.team_name || '', team_code: team.team_code || '', actor_name: actorLabel, total_score: total, total });
     const reviewMessage = cleanRenderedMessage(renderTemplate(messages.photo_review_approved_message, {
       team_name: team.team_name, team_code: team.team_code, actor_name: actorLabel,
       mission_code: sub.mission_code, mission_name: sub.mission_name, total,
-      earned_score: score, answer_explanation: sub.answer_explanation || '', next_message: String(nextText || '').trim(),
+      earned_score: earnedScore, answer_explanation: sub.answer_explanation || '', next_message: String(nextText || '').trim(),
     }));
     await addTeamNotice(sub.event_id, team.id, reviewMessage, '');
   } else {
