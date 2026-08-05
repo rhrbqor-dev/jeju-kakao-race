@@ -1873,6 +1873,40 @@ async function addReadyCompleteMissionToResponse(eventId, team, response) {
   return appendCompletePromptToResponse(response, completeMissionPromptText(completeMission), completeMissionButton(completeMission));
 }
 
+async function syncActiveMissionHintQuickReply(eventId, team, response) {
+  if (!eventId || !team?.id || !response?.template) return response;
+
+  const result = await query(
+    `SELECT m.id, m.hint,
+            EXISTS (
+              SELECT 1
+              FROM submissions s
+              WHERE s.team_id=t.id AND s.mission_id=m.id
+                AND s.status IN ('correct', 'approved')
+            ) AS completed
+     FROM teams t
+     JOIN missions m ON m.id=t.current_mission_id
+     WHERE t.id=$1 AND m.event_id=$2
+     LIMIT 1;`,
+    [team.id, eventId]
+  );
+  const mission = result.rows[0];
+  const showHint = Boolean(String(mission?.hint || '').trim()) && !mission?.completed;
+  const replies = Array.isArray(response.template.quickReplies)
+    ? response.template.quickReplies.filter((reply) => String(reply?.label || reply?.messageText || '').trim() !== '힌트')
+    : [];
+
+  if (showHint) {
+    const hintReply = { action: 'message', label: '힌트', messageText: '힌트' };
+    const qrIndex = replies.findIndex((reply) => String(reply?.label || '').trim() === QR_SCAN_QUICK_REPLY);
+    replies.splice(qrIndex >= 0 ? qrIndex + 1 : 0, 0, hintReply);
+  }
+
+  if (replies.length) response.template.quickReplies = replies.slice(0, 10);
+  else delete response.template.quickReplies;
+  return response;
+}
+
 
 function normalizeKakaoResponse(response) {
   if (!response?.template?.outputs || !Array.isArray(response.template.outputs)) return response;
@@ -1966,6 +2000,7 @@ async function respondKakao(res, response, event = null, team = null, kakaoUserI
   if (event && team && kakaoUserId) {
     response = await addUnreadNoticesToResponse(event.id, team, kakaoUserId, response);
     response = await addReadyCompleteMissionToResponse(event.id, team, response);
+    response = await syncActiveMissionHintQuickReply(event.id, team, response);
   }
   response = normalizeKakaoResponse(response);
   return res.status(200).json(response);
@@ -2419,7 +2454,7 @@ function buildImageCards(title, _description, imageUrls = [], _buttons = []) {
 }
 
 const startQuickReplies = ['팀 생성', '팀 참가', '도움말'];
-const menuQuickReplies = ['미션 목록', '힌트', '내 점수', '순위', '팀원 목록', '팀명 수정', '이름 수정', '도움말'];
+const menuQuickReplies = ['미션 목록', '내 점수', '순위', '팀원 목록', '팀명 수정', '이름 수정', '도움말'];
 const approvedPhotoQuickReplies = [secureImagePluginButton('사진 다시 제출', '사진 다시 제출'), ...menuQuickReplies];
 const pendingPhotoQuickReplies = ['인증 결과 확인', secureImagePluginButton('사진 다시 제출', '사진 다시 제출'), ...menuQuickReplies];
 
@@ -3188,6 +3223,8 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
       await setUserState(event.id, kakaoUserId, 'WAIT_SEQUENCE_ANSWER', { missionId: mission.id, selected: [] });
     }
     const wrongTemplate = String(mission.wrong_message || '').trim();
+    const hasHint = Boolean(String(mission.hint || '').trim());
+    const hintPrompt = hasHint ? `\n힌트가 필요하면 "힌트"라고 입력해주세요.` : '';
     const defaultWrongText = quizType === 'sequence'
       ? `아쉽습니다. 순서가 맞지 않습니다.
 
@@ -3202,11 +3239,10 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
 현재 오답 횟수: ${wrongCount + 1}회
 오답 감점: ${wrongPenalty}점
 현재 팀 총점: ${totalAfterWrong}점
-
-힌트가 필요하면 "힌트"라고 입력해주세요.
+${hintPrompt}
 다시 정답을 입력해주세요.`;
     const wrongText = wrongTemplate
-      ? renderTemplate(wrongTemplate, { mission_code: mission.mission_code, mission_name: mission.mission_name, wrong_count: wrongCount + 1, wrong_penalty: wrongPenalty, total_score: totalAfterWrong, hint: mission.hint || '현장 안내문을 다시 확인해보세요.', answer: normalizedUtterance, team_name: team.team_name, actor_name: actorName })
+      ? renderTemplate(wrongTemplate, { mission_code: mission.mission_code, mission_name: mission.mission_name, wrong_count: wrongCount + 1, wrong_penalty: wrongPenalty, total_score: totalAfterWrong, hint: mission.hint || '', answer: normalizedUtterance, team_name: team.team_name, actor_name: actorName })
       : defaultWrongText;
     return kakaoText(wrongText, quizType === 'sequence' ? sequenceQuickReplies(mission, []) : ['다시 입력하기', ...choiceQuickReplies(mission, menuQuickReplies)]);
   }
@@ -3239,11 +3275,10 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
       return missionCompletionResponse(req, event, mission, visitText, menuQuickReplies, visitSettingImageUrl ? [visitSettingImageUrl] : [], `${mission.mission_code} ${mission.mission_name} 완료`, { team, actorName, total, settings: messages });
     }
 
+    const hintText = String(mission.hint || '').trim();
     const wrongText = String(mission.wrong_message || '').trim()
-      ? renderTemplate(mission.wrong_message, { mission_code: mission.mission_code, mission_name: mission.mission_name, hint: mission.hint || '현장 안내판의 인증 문구를 확인해주세요.', answer: utterance, team_name: team.team_name, actor_name: actorName })
-      : `인증 문구가 맞지 않습니다.
-
-힌트: ${mission.hint || '현장 안내판의 인증 문구를 확인해주세요.'}`;
+      ? renderTemplate(mission.wrong_message, { mission_code: mission.mission_code, mission_name: mission.mission_name, hint: hintText, answer: utterance, team_name: team.team_name, actor_name: actorName })
+      : '인증 문구가 맞지 않습니다.';
     return kakaoText(wrongText, menuQuickReplies);
   }
 
