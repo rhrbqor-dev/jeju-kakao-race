@@ -2223,13 +2223,11 @@ const KAKAO_MAX_OUTPUTS = 3;
 const KAKAO_TEXT_CHUNK_LIMIT = 650;
 const KAKAO_CARD_DESC_LIMIT = 180;
 const QR_SCAN_QUICK_REPLY = 'QR코드 스캔';
-const CANCEL_QUICK_REPLY = '취소';
 
 function safeKakaoQuickReplies(quickReplies = []) {
   const requested = Array.isArray(quickReplies) ? quickReplies : [];
-  // 스캔/플러그인 되묻기 상태에서 빠져나올 수 있도록 취소 버튼도 항상 고정합니다.
-  // 카카오 빠른응답 최대 10개 제한 때문에 나머지 메뉴는 최대 8개만 유지합니다.
-  const normalized = [QR_SCAN_QUICK_REPLY, CANCEL_QUICK_REPLY, ...requested]
+  // QR 스캔은 상시 노출하고, 취소는 입력 흐름에서 호출자가 명시한 경우에만 노출합니다.
+  const normalized = [QR_SCAN_QUICK_REPLY, ...requested]
     .map((item) => {
       if (typeof item === 'string') {
         const messageText = item.trim();
