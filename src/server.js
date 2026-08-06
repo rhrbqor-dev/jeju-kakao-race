@@ -1099,6 +1099,61 @@ function validateMissionImagePayload(image = {}) {
   return { image_data: imageData, image_mime: imageMime, file_name: String(image.file_name || image.filename || '').slice(0, 200) };
 }
 
+const APP_RLS_TABLES = [
+  'events',
+  'missions',
+  'mission_images',
+  'teams',
+  'team_members',
+  'user_states',
+  'team_notices',
+  'team_notice_reads',
+  'user_event_sessions',
+  'app_settings',
+  'submissions',
+  'score_events',
+];
+
+async function secureAppTablesWithRls() {
+  const qualifiedTables = APP_RLS_TABLES.map((table) => `public."${table}"`);
+
+  // FORCE RLS는 사용하지 않습니다. Render 서버가 사용하는 테이블 소유자/관리 역할은
+  // 기존처럼 DB에 접근하고, Supabase Data API의 공개 역할만 정책이 없으면 차단됩니다.
+  for (const table of qualifiedTables) {
+    await query(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY;`);
+    // 정책이 전혀 없다는 추가 경고도 남지 않도록 백엔드 전용 명시적 거부 정책을 둡니다.
+    // PUBLIC은 모든 일반 DB 역할을 뜻하지만 테이블 소유자와 BYPASSRLS 역할에는 적용되지 않습니다.
+    await query(`DROP POLICY IF EXISTS "backend_only_no_direct_api" ON ${table};`);
+    await query(`
+      CREATE POLICY "backend_only_no_direct_api"
+      ON ${table}
+      AS RESTRICTIVE
+      FOR ALL
+      TO PUBLIC
+      USING (false)
+      WITH CHECK (false);
+    `);
+  }
+
+  // 로컬 PostgreSQL에는 Supabase 역할이 없을 수 있으므로 존재할 때만 직접 권한을 회수합니다.
+  // RLS와 권한 회수를 함께 적용해 anon/authenticated의 직접 테이블 접근을 이중으로 차단합니다.
+  const tableList = qualifiedTables.join(', ');
+  await query(`
+    DO $security$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN
+        EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE ${tableList} FROM anon';
+      END IF;
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='authenticated') THEN
+        EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE ${tableList} FROM authenticated';
+      END IF;
+    END
+    $security$;
+  `);
+
+  console.log(`[database-security] RLS enabled on ${APP_RLS_TABLES.length} application tables.`);
+}
+
 async function initDb() {
   await query(`
     CREATE TABLE IF NOT EXISTS events (
@@ -1429,6 +1484,8 @@ async function initDb() {
       );
     }
   }
+
+  await secureAppTablesWithRls();
 }
 
 
