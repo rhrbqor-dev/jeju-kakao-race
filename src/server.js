@@ -1866,7 +1866,7 @@ async function syncActiveMissionHintQuickReply(eventId, team, response) {
   if (!eventId || !team?.id || !response?.template) return response;
 
   const result = await query(
-    `SELECT m.id, m.hint,
+    `SELECT m.id, m.hint, m.mission_type, t.status AS team_status,
             EXISTS (
               SELECT 1
               FROM submissions s
@@ -1874,8 +1874,8 @@ async function syncActiveMissionHintQuickReply(eventId, team, response) {
                 AND s.status IN ('correct', 'approved')
             ) AS completed
      FROM teams t
-     JOIN missions m ON m.id=t.current_mission_id
-     WHERE t.id=$1 AND m.event_id=$2
+     LEFT JOIN missions m ON m.id=t.current_mission_id AND m.event_id=$2
+     WHERE t.id=$1
      LIMIT 1;`,
     [team.id, eventId]
   );
@@ -1887,8 +1887,12 @@ async function syncActiveMissionHintQuickReply(eventId, team, response) {
     ? response.template.quickReplies.filter((reply) => String(reply?.label || reply?.messageText || '').trim() !== '힌트')
     : [];
 
-  // 현재 미션이 끝나기 전에는 새 QR을 스캔하지 않도록 QR 버튼을 숨깁니다.
-  if (mission && !mission.completed) {
+  // 진행 중인 미션에서는 QR을 숨깁니다. 완주 미션이 시작된 뒤에는
+  // 완주 전·후와 관계없이 모든 미션이 끝난 상태이므로 다시 노출하지 않습니다.
+  const hideQrScan = mission?.team_status === 'finished' || (
+    Boolean(mission?.id) && (!mission.completed || mission.mission_type === 'complete')
+  );
+  if (hideQrScan) {
     replies = replies.filter((reply) => String(reply?.label || reply?.messageText || '').trim() !== QR_SCAN_QUICK_REPLY);
   }
 
