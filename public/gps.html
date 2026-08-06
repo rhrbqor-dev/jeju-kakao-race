@@ -58,7 +58,7 @@
 
   function setCompleted(message) {
     completed = true;
-    const guide = String(message || 'GPS 인증이 완료되었습니다.\n카카오톡으로 돌아가 "인증완료"라고 입력해주세요.').trim();
+    const guide = String(message || 'GPS 인증이 완료되었습니다.\n카카오톡으로 돌아가 "GPS 인증 결과 확인" 버튼을 눌러주세요.').trim();
     btn.disabled = true;
     btn.classList.add('complete');
     btn.textContent = guide;

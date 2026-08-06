@@ -979,9 +979,9 @@ const SYSTEM_MESSAGE_SETTING_DEFINITIONS = [
   { textKey: 'edit_member_name_prompt_message', label: '새 이름 입력 안내' },
   { textKey: 'edit_member_name_complete_message', label: '이름 수정 완료 안내' },
   { textKey: 'already_completed_by_member_message', label: '다른 팀원이 완료한 미션 안내' },
-  { textKey: 'gps_web_success_message', label: 'GPS 웹 인증 완료 후 입력 안내' },
-  { textKey: 'gps_result_success_message', label: '인증완료 입력 시 GPS 성공 안내' },
-  { textKey: 'gps_result_not_found_message', label: '인증완료 입력 시 GPS 내역 없음 안내' },
+  { textKey: 'gps_web_success_message', label: 'GPS 웹 인증 완료 후 버튼 안내' },
+  { textKey: 'gps_result_success_message', label: 'GPS 인증 결과 확인 성공 안내' },
+  { textKey: 'gps_result_not_found_message', label: 'GPS 인증 전 결과 확인 안내' },
   { textKey: 'photo_mission_guide_message', label: '사진 미션 업로드 안내' },
   { textKey: 'photo_upload_pending_message', label: '사진 접수 대기 안내' },
   { textKey: 'photo_upload_approved_message', label: '사진 자동 승인 안내' },
@@ -1000,6 +1000,10 @@ const MESSAGE_IMAGE_KEYS = new Set(MESSAGE_SETTING_DEFINITIONS.map((item) => ite
 const LEGACY_START_MESSAGE = `제주 AI 탐험대에 오신 것을 환영합니다!
 
 새 팀을 만들거나 기존 팀에 참가해주세요.`;
+const LEGACY_GPS_WEB_SUCCESS_MESSAGE = `GPS 인증이 완료되었습니다.
+카카오톡으로 돌아가 "인증완료"라고 입력해주세요.`;
+const LEGACY_GPS_RESULT_NOT_FOUND_MESSAGE = `확인할 수 있는 GPS 인증 완료 내역이 없습니다.
+GPS 인증 페이지에서 인증을 완료한 뒤 다시 입력해주세요.`;
 
 const DEFAULT_MESSAGE_SETTINGS = {
   show_card_titles: false,
@@ -1054,7 +1058,7 @@ const DEFAULT_MESSAGE_SETTINGS = {
 
 다음 미션으로 이동해주세요.`,
   gps_web_success_message: `GPS 인증이 완료되었습니다.
-카카오톡으로 돌아가 "인증완료"라고 입력해주세요.`,
+카카오톡으로 돌아가 "GPS 인증 결과 확인" 버튼을 눌러주세요.`,
   gps_result_success_message: `GPS 인증 완료!
 
 수행자: {actor_name}
@@ -1062,8 +1066,8 @@ const DEFAULT_MESSAGE_SETTINGS = {
 현재 팀 총점: {total}점
 
 {answer_explanation}`,
-  gps_result_not_found_message: `확인할 수 있는 GPS 인증 완료 내역이 없습니다.
-GPS 인증 페이지에서 인증을 완료한 뒤 다시 입력해주세요.`,
+  gps_result_not_found_message: `GPS 인증을 먼저 진행해주세요.
+인증이 끝나면 "GPS 인증 결과 확인" 버튼을 눌러주세요.`,
   mission_success_message: `정답입니다!
 
 수행자: {actor_name}
@@ -1167,6 +1171,12 @@ function normalizeMessageSettings(value = {}, existing = {}) {
   for (const key of MESSAGE_TEXT_KEYS) {
     let text = String(incoming[key] ?? previous[key] ?? DEFAULT_MESSAGE_SETTINGS[key] ?? '').trim();
     if (key === 'start_message' && text === LEGACY_START_MESSAGE) text = DEFAULT_MESSAGE_SETTINGS.start_message;
+    if (key === 'gps_web_success_message' && text === LEGACY_GPS_WEB_SUCCESS_MESSAGE) {
+      text = DEFAULT_MESSAGE_SETTINGS.gps_web_success_message;
+    }
+    if (key === 'gps_result_not_found_message' && text === LEGACY_GPS_RESULT_NOT_FOUND_MESSAGE) {
+      text = DEFAULT_MESSAGE_SETTINGS.gps_result_not_found_message;
+    }
     out[key] = text || DEFAULT_MESSAGE_SETTINGS[key] || '';
   }
 
@@ -2908,8 +2918,34 @@ function isGpsFallbackPhotoCommand(text) {
   return /^GPS 대체 사진 인증(?:\s+M\d+)?$/i.test(String(text || '').trim());
 }
 
+function parseGpsVerificationResultCommand(text) {
+  const match = String(text || '').trim().match(
+    /^(?:인증\s*완료|GPS\s*인증\s*완료|GPS\s*인증\s*결과\s*확인)(?:\s+(M\d+))?$/i
+  );
+  if (!match) return null;
+  return { missionCode: match[1] ? match[1].toUpperCase() : '' };
+}
+
 function isGpsVerificationResultCommand(text) {
-  return ['인증완료', 'GPS 인증완료', 'GPS인증완료'].includes(String(text || '').trim());
+  return Boolean(parseGpsVerificationResultCommand(text));
+}
+
+function gpsMissionActionButtons(req, event, team, mission, kakaoUserId = '') {
+  if (!mission || mission.mission_type !== 'gps') return [];
+  const url = `${baseUrl(req)}/gps?event=${encodeURIComponent(eventQueryValue(event))}&team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}&actor=${encodeURIComponent(kakaoUserId)}`;
+  return [
+    { action: 'webLink', label: 'GPS 인증하기', webLinkUrl: url },
+    {
+      action: 'message',
+      label: 'GPS 인증 결과 확인',
+      messageText: `GPS 인증 결과 확인 ${mission.mission_code}`,
+    },
+    {
+      action: 'message',
+      label: 'GPS가 안 될 때 사진 인증',
+      messageText: `GPS 대체 사진 인증 ${mission.mission_code}`,
+    },
+  ];
 }
 
 function isMissionListCommand(text) {
@@ -3180,17 +3216,9 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
     return kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || '');
   }
   if (mission.mission_type === 'gps') {
-    const url = `${baseUrl(req)}/gps?event=${encodeURIComponent(eventQueryValue(event))}&team=${encodeURIComponent(team.team_code)}&mission=${encodeURIComponent(mission.mission_code)}&token=${encodeURIComponent(team.public_token)}&actor=${encodeURIComponent(kakaoUserId)}`;
     const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
     const desc = `${mission.question}\n\n아래 버튼을 눌러 위치 권한을 허용해주세요.`;
-    const buttons = [
-      { action: 'webLink', label: 'GPS 인증하기', webLinkUrl: url },
-      {
-        action: 'message',
-        label: 'GPS가 안 될 때 사진 인증',
-        messageText: `GPS 대체 사진 인증 ${mission.mission_code}`,
-      },
-    ];
+    const buttons = gpsMissionActionButtons(req, event, team, mission, kakaoUserId);
     if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, '', imageUrls), menuQuickReplies, desc, buttons);
     return kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || '');
   }
@@ -3282,7 +3310,16 @@ async function handleGpsFallbackPhotoRequest(req, event, team, kakaoUserId, mess
 }
 
 
-async function handleGpsVerificationResult(req, event, team, messages = DEFAULT_MESSAGE_SETTINGS) {
+async function handleGpsVerificationResult(req, event, team, messages = DEFAULT_MESSAGE_SETTINGS, utterance = '', kakaoUserId = '') {
+  const requestedMissionCode = parseGpsVerificationResultCommand(utterance)?.missionCode || '';
+  const targetMission = requestedMissionCode
+    ? await getMissionByCode(event.id, requestedMissionCode)
+    : team.current_mission_id
+      ? (await query(
+          `SELECT * FROM missions WHERE event_id=$1 AND id=$2 LIMIT 1;`,
+          [event.id, team.current_mission_id]
+        )).rows[0]
+      : null;
   const result = await query(
     `SELECT m.*,
             s.id AS submission_id,
@@ -3295,22 +3332,30 @@ async function handleGpsVerificationResult(req, event, team, messages = DEFAULT_
      JOIN missions m ON m.id=s.mission_id
      WHERE s.event_id=$1
        AND s.team_id=$2
+       AND s.mission_id=$3
        AND m.mission_type='gps'
        AND s.status='approved'
        AND s.gps_lat IS NOT NULL
        AND s.gps_lng IS NOT NULL
      ORDER BY s.submitted_at DESC, s.id DESC
      LIMIT 1;`,
-    [event.id, team.id]
+    [event.id, team.id, targetMission?.id || 0]
   );
   const mission = result.rows[0];
 
   if (!mission) {
     const notFoundText = cleanRenderedMessage(renderTemplate(
       messages.gps_result_not_found_message,
-      eventTemplateVars(event, team)
+      {
+        ...eventTemplateVars(event, team),
+        mission_code: targetMission?.mission_code || requestedMissionCode,
+        mission_name: targetMission?.mission_name || '',
+      }
     ));
-    return kakaoText(notFoundText, menuQuickReplies);
+    const buttons = gpsMissionActionButtons(req, event, team, targetMission, kakaoUserId);
+    return buttons.length
+      ? kakaoCard('', notFoundText, buttons, menuQuickReplies)
+      : kakaoText(notFoundText, menuQuickReplies);
   }
 
   const [total, missionPenalty, wrongCountResult, answerImages] = await Promise.all([
@@ -4230,7 +4275,7 @@ async function handleKakaoSkill(req, res) {
     }
 
     if (isGpsVerificationResultCommand(utterance)) {
-      const response = await handleGpsVerificationResult(req, event, team, messages);
+      const response = await handleGpsVerificationResult(req, event, team, messages, utterance, kakaoUserId);
       return respondKakao(res, response, event, team, kakaoUserId);
     }
 
@@ -4756,7 +4801,7 @@ app.post('/api/public/verify/location', async (req, res) => {
           mission_code: mission.mission_code,
           mission_name: mission.mission_name,
         })),
-        chat_command: '인증완료',
+        chat_command: `GPS 인증 결과 확인 ${mission.mission_code}`,
       });
     }
 
@@ -4872,7 +4917,7 @@ app.post('/api/public/verify/location', async (req, res) => {
         ? `GPS 인증 완료! ${earnedScore}점이 반영되었습니다.${nextText}`
         : failureMessage,
       next_action_message: ok ? nextActionMessage : '',
-      chat_command: ok ? '인증완료' : '',
+      chat_command: ok ? `GPS 인증 결과 확인 ${mission.mission_code}` : '',
     });
   } catch (error) {
     console.error('GPS verify failed:', error);
