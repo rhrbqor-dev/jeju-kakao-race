@@ -2180,6 +2180,17 @@ function markMissionCompletedResponse(response) {
   return response;
 }
 
+function markTeamFinishedResponse(response) {
+  markMissionCompletedResponse(response);
+  if (response && typeof response === 'object') {
+    Object.defineProperty(response, '__teamFinishedInCurrentRequest', {
+      value: true,
+      enumerable: false,
+    });
+  }
+  return response;
+}
+
 function appendCompletePromptToResponse(response, promptText) {
   if (!promptText) return response;
   const outputs = response?.template?.outputs;
@@ -2358,7 +2369,10 @@ function normalizeKakaoResponse(response) {
 }
 
 async function respondKakao(res, response, event = null, team = null, kakaoUserId = '') {
-  if (event && team && kakaoUserId) {
+  // 완주 응답은 필요한 점수/순위와 버튼을 이미 모두 구성했습니다.
+  // 여기서 팀 알림·다음 미션·힌트 확인 쿼리를 다시 실행하면 카카오 응답 제한시간을
+  // 넘길 수 있으므로 완료 응답은 바로 정규화해서 반환합니다.
+  if (event && team && kakaoUserId && response?.__teamFinishedInCurrentRequest !== true) {
     response = await addUnreadNoticesToResponse(event.id, team, kakaoUserId, response);
     response = await addReadyCompleteMissionToResponse(event.id, team, response);
     response = await syncActiveMissionHintQuickReply(event.id, team, response);
@@ -3441,6 +3455,37 @@ async function afterMissionCompleted(event, team, mission, kakaoUserId, actorNam
   return total;
 }
 
+async function buildFinishMissionResponse(req, event, team, actorName, messages = DEFAULT_MESSAGE_SETTINGS) {
+  const [ranking, certificateSettings] = await Promise.all([
+    buildRanking(event.id),
+    getCertificateSettings(event.id),
+  ]);
+  const rankingRow = ranking.find((row) => Number(row.id) === Number(team.id));
+  const total = rankingRow ? Number(rankingRow.total_score || 0) : await teamTotalScore(team.id);
+  const rank = rankingRow?.rank || '-';
+  const finishText = renderTemplate(messages.finish_message, {
+    ...eventTemplateVars(event, team, actorName),
+    actor_name: actorName,
+    total,
+    rank,
+  });
+  const certificateButton = certificateSettings.enabled
+    ? [{ action: 'webLink', label: '수료증 보기', webLinkUrl: certificateUrl(req, event, team, actorName) }]
+    : [];
+  const finishImageUrl = messageImageUrl(req, messages, 'finish');
+  const response = certificateButton.length || finishImageUrl
+    ? kakaoCard(visibleMessageTitle(messages, 'finish', '완주 완료'), finishText, certificateButton, ['순위', '내 점수'], finishImageUrl)
+    : kakaoText(finishText, ['순위', '내 점수']);
+  const finishReplies = Array.isArray(response?.template?.quickReplies)
+    ? response.template.quickReplies.filter(
+        (reply) => String(reply?.label || reply?.messageText || '').trim() !== QR_SCAN_QUICK_REPLY
+      )
+    : [];
+  if (finishReplies.length) response.template.quickReplies = finishReplies;
+  else if (response?.template) delete response.template.quickReplies;
+  return markTeamFinishedResponse(response);
+}
+
 
 async function handleHintRequest(event, team, kakaoUserId) {
   const teamReload = (await query(`SELECT * FROM teams WHERE id=$1;`, [team.id])).rows[0];
@@ -3660,12 +3705,30 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
   const mission = (await query(`SELECT * FROM missions WHERE id=$1;`, [teamReload.current_mission_id])).rows[0];
   if (!mission) return kakaoText('진행 중인 미션 정보를 찾을 수 없습니다. 미션 목록에서 다시 선택해주세요.', menuQuickReplies);
 
-  const already = await isMissionAlreadyCompleted(team.id, mission.id);
-  if (already) {
+  const completion = await getMissionCompletion(team.id, mission.id);
+  if (completion) {
+    // 완주 처리 직후 카카오 응답이 유실되더라도 같은 정답을 다시 입력하면
+    // 일반 중복 안내 대신 완주 점수/순위 응답을 복구해서 보여줍니다.
+    if (mission.mission_type === 'complete') {
+      await query(
+        `UPDATE teams
+         SET status='finished', finish_time=COALESCE(finish_time, NOW())
+         WHERE id=$1 AND (status <> 'finished' OR finish_time IS NULL);`,
+        [team.id]
+      );
+      return buildFinishMissionResponse(
+        req,
+        event,
+        team,
+        String(completion.actor_name || actorName).trim() || actorName,
+        messages
+      );
+    }
     return kakaoAlreadyCompletedMissionMessage(req, event, team, mission, {
       currentActorName: actorName,
       currentKakaoUserId: kakaoUserId,
       settings: messages,
+      completion,
     });
   }
 
@@ -3867,32 +3930,34 @@ ${hintPrompt}
       return kakaoText(authoredMessage, menuQuickReplies);
     }
 
+    // 완주 기록 저장과 팀 종료를 한 번의 DB 왕복으로 처리하여 카카오 응답 시간을 줄입니다.
     await query(
-      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, actor_kakao_user_id, actor_name, status, score)
-       VALUES ($1,$2,$3,$4,$5,$6,'approved',$7);`,
-      [event.id, team.id, mission.id, utterance, kakaoUserId, actorName, mission.score]
+      `WITH inserted AS (
+         INSERT INTO submissions(event_id, team_id, mission_id, answer_text, actor_kakao_user_id, actor_name, status, score)
+         VALUES ($1,$2,$3,$4,$5,$6,'approved',$7)
+         RETURNING id
+       )
+       UPDATE teams
+       SET status='finished', finish_time=COALESCE(finish_time, NOW())
+       WHERE id=$8 AND EXISTS (SELECT 1 FROM inserted);`,
+      [event.id, team.id, mission.id, utterance, kakaoUserId, actorName, mission.score, team.id]
     );
 
-    const total = await afterMissionCompleted(event, team, mission, kakaoUserId, actorName);
-    const ranking = await buildRanking(event.id);
-    const myRank = ranking.find((r) => r.id === team.id)?.rank || '-';
-
-    const finishText = renderTemplate(messages.finish_message, {
-      team_name: team.team_name,
-      team_code: team.team_code,
-      actor_name: actorName,
-      total,
-      rank: myRank,
+    const response = await buildFinishMissionResponse(req, event, team, actorName, messages);
+    setImmediate(async () => {
+      try {
+        const total = await teamTotalScore(team.id);
+        await addTeamNotice(
+          event.id,
+          team.id,
+          `${actorName}님이 ${mission.mission_code} ${mission.mission_name} 미션을 완료했습니다. 현재 팀 점수는 ${total}점입니다.`,
+          kakaoUserId
+        );
+      } catch (error) {
+        console.error('[complete-mission notice error]', error);
+      }
     });
-    const certificateSettings = await getCertificateSettings(event.id);
-    const certificateButton = certificateSettings.enabled
-      ? [{ action: 'webLink', label: '수료증 보기', webLinkUrl: certificateUrl(req, event, team, actorName) }]
-      : [];
-    const finishImageUrl = messageImageUrl(req, messages, 'finish');
-    if (certificateButton.length || finishImageUrl) {
-      return kakaoCard(visibleMessageTitle(messages, 'finish', '완주 완료'), finishText, certificateButton, ['순위', '내 점수'], finishImageUrl);
-    }
-    return kakaoText(finishText, ['순위', '내 점수']);
+    return response;
   }
 
   if (mission.mission_type === 'photo' || mission.mission_type === 'gps') {
