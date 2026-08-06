@@ -2687,9 +2687,15 @@ const QR_SCAN_QUICK_REPLY = 'QR코드 스캔';
 
 function safeKakaoQuickReplies(quickReplies = []) {
   const requested = Array.isArray(quickReplies) ? quickReplies : [];
-  // QR 스캔은 기본 메뉴에 넣되, 진행 중인 미션이 있으면 응답 후처리에서 숨깁니다.
-  // 취소는 실제 입력 흐름에서 호출자가 명시한 경우에만 노출합니다.
-  const normalized = [QR_SCAN_QUICK_REPLY, ...requested]
+  const hasCancelAction = requested.some((item) => {
+    if (typeof item === 'string') return item.trim() === '취소';
+    if (!item || typeof item !== 'object') return false;
+    return [item.label, item.messageText].some((value) => String(value || '').trim() === '취소');
+  });
+  // QR 스캔은 기본 메뉴에 넣되, 사용자가 팀/닉네임 등을 입력하는 동안에는
+  // 실제 입력 흐름을 끝내는 취소 버튼만 보여줍니다.
+  // 진행 중인 미션의 QR 버튼은 응답 후처리에서 추가로 숨깁니다.
+  const normalized = [...(hasCancelAction ? [] : [QR_SCAN_QUICK_REPLY]), ...requested]
     .map((item) => {
       if (typeof item === 'string') {
         const messageText = item.trim();
