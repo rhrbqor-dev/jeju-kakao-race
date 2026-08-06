@@ -1,8 +1,12 @@
+import 'dotenv/config';
 import express from 'express';
 import { Pool } from 'pg';
 import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { randomUUID } from 'crypto';
+import sharp from 'sharp';
+import { createClient } from '@supabase/supabase-js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,6 +18,18 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin1234';
 const KAKAO_SKILL_KEY = process.env.KAKAO_SKILL_KEY || '';
 const KAKAO_SECURE_IMAGE_BLOCK_ID = String(process.env.KAKAO_SECURE_IMAGE_BLOCK_ID || '').trim();
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
+const SUPABASE_URL = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+const SUPABASE_SERVICE_ROLE_KEY = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+const SUPABASE_STORAGE_BUCKET = String(process.env.SUPABASE_STORAGE_BUCKET || 'mission-submissions').trim();
+const SUBMISSION_PREVIEW_TARGET_BYTES = Math.min(
+  1024 * 1024,
+  Math.max(300 * 1024, Number(process.env.SUBMISSION_PREVIEW_TARGET_BYTES || 900 * 1024))
+);
+const SUBMISSION_PREVIEW_MAX_DIMENSION = Math.min(
+  2500,
+  Math.max(1280, Number(process.env.SUBMISSION_PREVIEW_MAX_DIMENSION || 2048))
+);
+const SUBMISSION_IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 let dbReady = false;
 let dbInitError = '';
@@ -33,6 +49,16 @@ const pool = new Pool({
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
 });
+
+const supabaseAdmin = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    })
+  : null;
+
+if (!supabaseAdmin) {
+  console.warn('WARNING: SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY is not set. New submission photos will use legacy DB storage until configured.');
+}
 
 const app = express();
 app.set('trust proxy', 1);
@@ -189,12 +215,284 @@ async function downloadKakaoSecureImage(imageUrl) {
   const response = await fetch(imageUrl, { signal: AbortSignal.timeout(10000) });
   if (!response.ok) throw new Error('카카오에서 전송한 사진을 내려받지 못했습니다. 다시 제출해주세요.');
   const mime = String(response.headers.get('content-type') || 'image/jpeg').split(';')[0].trim().toLowerCase();
-  if (!ALLOWED_MISSION_IMAGE_MIMES.has(mime)) throw new Error('JPG, PNG, WEBP 사진만 제출할 수 있습니다.');
+  if (!SUBMISSION_IMAGE_MIMES.has(mime)) throw new Error('JPG, PNG, WEBP 사진만 제출할 수 있습니다.');
   const declaredBytes = Number(response.headers.get('content-length') || 0);
   if (declaredBytes > 8 * 1024 * 1024) throw new Error('사진 용량은 최대 8MB까지 제출할 수 있습니다.');
   const bytes = Buffer.from(await response.arrayBuffer());
   if (bytes.length > 8 * 1024 * 1024) throw new Error('사진 용량은 최대 8MB까지 제출할 수 있습니다.');
-  return { image_data: bytes.toString('base64'), image_mime: mime };
+  return {
+    buffer: bytes,
+    image_mime: mime,
+    file_name: `kakao-photo-${Date.now()}.${submissionImageExtension(mime)}`,
+  };
+}
+
+function submissionImageExtension(mime = '') {
+  if (mime === 'image/png') return 'png';
+  if (mime === 'image/webp') return 'webp';
+  return 'jpg';
+}
+
+function safeDownloadFileName(value = '', fallback = 'submission-photo.jpg') {
+  const normalized = String(value || '').trim().replace(/[\r\n"\\/]/g, '_').slice(0, 180);
+  return normalized || fallback;
+}
+
+function normalizeSubmissionImageInput(input = {}) {
+  let mime = String(input.image_mime || input.mime || 'image/jpeg').split(';')[0].trim().toLowerCase();
+  let bytes = Buffer.isBuffer(input.buffer) ? input.buffer : null;
+
+  if (!bytes) {
+    let base64 = String(input.image_data || input.data || '').trim();
+    const dataUrlMatch = base64.match(/^data:([^;]+);base64,([\s\S]+)$/i);
+    if (dataUrlMatch) {
+      mime = String(dataUrlMatch[1] || mime).trim().toLowerCase();
+      base64 = dataUrlMatch[2];
+    }
+    if (base64) bytes = Buffer.from(base64.replace(/\s/g, ''), 'base64');
+  }
+
+  if (!bytes?.length) throw new Error('사진 파일이 필요합니다.');
+  if (!SUBMISSION_IMAGE_MIMES.has(mime)) throw new Error('JPG, PNG, WEBP 사진만 제출할 수 있습니다.');
+  if (bytes.length > 8 * 1024 * 1024) throw new Error('사진 용량은 최대 8MB까지 제출할 수 있습니다.');
+
+  return {
+    buffer: bytes,
+    image_mime: mime,
+    file_name: safeDownloadFileName(input.file_name || input.filename, `submission-photo.${submissionImageExtension(mime)}`),
+  };
+}
+
+let submissionBucketReadyPromise = null;
+
+async function ensureSubmissionStorageBucket() {
+  if (!supabaseAdmin) return false;
+  if (submissionBucketReadyPromise) return submissionBucketReadyPromise;
+
+  submissionBucketReadyPromise = (async () => {
+    const { error: getError } = await supabaseAdmin.storage.getBucket(SUPABASE_STORAGE_BUCKET);
+    if (!getError) return true;
+
+    const { error: createError } = await supabaseAdmin.storage.createBucket(SUPABASE_STORAGE_BUCKET, {
+      public: false,
+      fileSizeLimit: 8 * 1024 * 1024,
+      allowedMimeTypes: [...SUBMISSION_IMAGE_MIMES],
+    });
+    if (createError && !/already exists|duplicate/i.test(String(createError.message || ''))) {
+      throw new Error(`Supabase Storage 버킷 생성 실패: ${createError.message}`);
+    }
+    return true;
+  })().catch((error) => {
+    submissionBucketReadyPromise = null;
+    throw error;
+  });
+
+  return submissionBucketReadyPromise;
+}
+
+async function createSubmissionPreview(originalBytes) {
+  let maxDimension = SUBMISSION_PREVIEW_MAX_DIMENSION;
+  let quality = 86;
+  let output = null;
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    output = await sharp(originalBytes, { failOn: 'none', limitInputPixels: 50_000_000 })
+      .rotate()
+      .flatten({ background: '#ffffff' })
+      .resize({
+        width: maxDimension,
+        height: maxDimension,
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
+      .jpeg({ quality, mozjpeg: true, progressive: true })
+      .toBuffer();
+
+    if (output.length <= SUBMISSION_PREVIEW_TARGET_BYTES) break;
+    if (quality > 62) {
+      quality -= 6;
+    } else {
+      maxDimension = Math.max(1024, Math.round(maxDimension * 0.82));
+      quality = 78;
+    }
+  }
+
+  return output;
+}
+
+function legacySubmissionImageAsset(image) {
+  return {
+    image_data: image.buffer.toString('base64'),
+    image_mime: image.image_mime,
+    image_original_path: '',
+    image_preview_path: '',
+    image_original_name: image.file_name,
+    image_original_size: image.buffer.length,
+    image_preview_size: image.buffer.length,
+    image_preview_mime: image.image_mime,
+  };
+}
+
+async function storeSubmissionImageAssets({ eventId, teamId, missionId, image }) {
+  const normalized = normalizeSubmissionImageInput(image);
+  if (!supabaseAdmin) return legacySubmissionImageAsset(normalized);
+
+  await ensureSubmissionStorageBucket();
+  const objectId = randomUUID();
+  const prefix = `events/${Number(eventId)}/teams/${Number(teamId)}/missions/${Number(missionId)}/${objectId}`;
+  const originalPath = `${prefix}/original.${submissionImageExtension(normalized.image_mime)}`;
+  const previewPath = `${prefix}/preview.jpg`;
+  const preview = await createSubmissionPreview(normalized.buffer);
+  const uploadedPaths = [];
+
+  try {
+    const { error: originalError } = await supabaseAdmin.storage
+      .from(SUPABASE_STORAGE_BUCKET)
+      .upload(originalPath, normalized.buffer, {
+        contentType: normalized.image_mime,
+        cacheControl: '3600',
+        upsert: false,
+      });
+    if (originalError) throw originalError;
+    uploadedPaths.push(originalPath);
+
+    const { error: previewError } = await supabaseAdmin.storage
+      .from(SUPABASE_STORAGE_BUCKET)
+      .upload(previewPath, preview, {
+        contentType: 'image/jpeg',
+        cacheControl: '3600',
+        upsert: false,
+      });
+    if (previewError) throw previewError;
+    uploadedPaths.push(previewPath);
+  } catch (error) {
+    if (uploadedPaths.length) {
+      await supabaseAdmin.storage.from(SUPABASE_STORAGE_BUCKET).remove(uploadedPaths).catch(() => {});
+    }
+    throw new Error(`사진 Storage 저장 실패: ${error.message || error}`);
+  }
+
+  return {
+    image_data: null,
+    image_mime: normalized.image_mime,
+    image_original_path: originalPath,
+    image_preview_path: previewPath,
+    image_original_name: normalized.file_name,
+    image_original_size: normalized.buffer.length,
+    image_preview_size: preview.length,
+    image_preview_mime: 'image/jpeg',
+  };
+}
+
+function submissionStoragePaths(row = {}, { originalsOnly = false } = {}) {
+  const paths = [String(row.image_original_path || '').trim()];
+  if (!originalsOnly) paths.push(String(row.image_preview_path || '').trim());
+  return paths.filter(Boolean);
+}
+
+async function removeSubmissionStoragePaths(paths = []) {
+  const unique = [...new Set(paths.map((value) => String(value || '').trim()).filter(Boolean))];
+  if (!unique.length) return;
+  if (!supabaseAdmin) {
+    throw new Error('Storage 사진을 삭제하려면 SUPABASE_URL과 SUPABASE_SERVICE_ROLE_KEY가 필요합니다.');
+  }
+  await ensureSubmissionStorageBucket();
+
+  for (let index = 0; index < unique.length; index += 100) {
+    const batch = unique.slice(index, index + 100);
+    const { error } = await supabaseAdmin.storage.from(SUPABASE_STORAGE_BUCKET).remove(batch);
+    if (error) throw new Error(`Storage 사진 삭제 실패: ${error.message}`);
+  }
+}
+
+async function downloadSubmissionStorageObject(objectPath) {
+  if (!objectPath) return null;
+  if (!supabaseAdmin) {
+    throw new Error('Storage 사진을 내려받으려면 SUPABASE_URL과 SUPABASE_SERVICE_ROLE_KEY가 필요합니다.');
+  }
+  await ensureSubmissionStorageBucket();
+  const { data, error } = await supabaseAdmin.storage.from(SUPABASE_STORAGE_BUCKET).download(objectPath);
+  if (error) throw new Error(`Storage 사진 다운로드 실패: ${error.message}`);
+  return Buffer.from(await data.arrayBuffer());
+}
+
+async function insertPhotoSubmissionWithAssets({
+  eventId,
+  teamId,
+  missionId,
+  answerText = '',
+  image,
+  actorKakaoUserId = '',
+  actorName = '',
+  submissionKey = '',
+  status = 'pending',
+  score = 0,
+  reviewNote = '',
+}) {
+  const assets = await storeSubmissionImageAssets({ eventId, teamId, missionId, image });
+  try {
+    const result = await query(
+      `INSERT INTO submissions(
+         event_id, team_id, mission_id, answer_text,
+         image_data, image_mime, image_original_path, image_preview_path,
+         image_original_name, image_original_size, image_preview_size, image_preview_mime,
+         actor_kakao_user_id, actor_name, submission_key, status, score, reviewed_at, review_note
+       )
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+               CASE WHEN $16='approved' THEN NOW() ELSE NULL END,$18)
+       ON CONFLICT DO NOTHING
+       RETURNING id, status;`,
+      [
+        eventId, teamId, missionId, answerText,
+        assets.image_data, assets.image_mime, assets.image_original_path, assets.image_preview_path,
+        assets.image_original_name, assets.image_original_size, assets.image_preview_size, assets.image_preview_mime,
+        actorKakaoUserId, actorName, submissionKey, status, score, reviewNote,
+      ]
+    );
+    if (!result.rows.length) await removeSubmissionStoragePaths(submissionStoragePaths(assets));
+    return result;
+  } catch (error) {
+    await removeSubmissionStoragePaths(submissionStoragePaths(assets)).catch(() => {});
+    throw error;
+  }
+}
+
+async function replacePhotoSubmissionAssets({
+  submission,
+  eventId,
+  teamId,
+  missionId,
+  image,
+  actorKakaoUserId = '',
+  actorName = '',
+  answerText = '',
+  submissionKey = '',
+}) {
+  if (submissionStoragePaths(submission).length && !supabaseAdmin) {
+    throw new Error('기존 Storage 사진을 교체하려면 Supabase Storage 환경변수가 필요합니다.');
+  }
+  const assets = await storeSubmissionImageAssets({ eventId, teamId, missionId, image });
+  try {
+    await query(
+      `UPDATE submissions
+       SET image_data=$1, image_mime=$2, image_original_path=$3, image_preview_path=$4,
+           image_original_name=$5, image_original_size=$6, image_preview_size=$7, image_preview_mime=$8,
+           actor_kakao_user_id=$9, actor_name=$10, answer_text=$11, submission_key=$12, submitted_at=NOW()
+       WHERE id=$13;`,
+      [
+        assets.image_data, assets.image_mime, assets.image_original_path, assets.image_preview_path,
+        assets.image_original_name, assets.image_original_size, assets.image_preview_size, assets.image_preview_mime,
+        actorKakaoUserId, actorName, answerText, submissionKey, submission.id,
+      ]
+    );
+  } catch (error) {
+    await removeSubmissionStoragePaths(submissionStoragePaths(assets)).catch(() => {});
+    throw error;
+  }
+
+  await removeSubmissionStoragePaths(submissionStoragePaths(submission)).catch((error) => {
+    console.error('[submission-storage] old replacement files cleanup failed:', error);
+  });
 }
 
 function extractEventIdentifierFromText(value = '') {
@@ -1441,6 +1739,12 @@ async function initDb() {
   await query(`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS actor_kakao_user_id TEXT NOT NULL DEFAULT '';`);
   await query(`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS actor_name TEXT NOT NULL DEFAULT '';`);
   await query(`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS submission_key TEXT NOT NULL DEFAULT '';`);
+  await query(`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS image_original_path TEXT NOT NULL DEFAULT '';`);
+  await query(`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS image_preview_path TEXT NOT NULL DEFAULT '';`);
+  await query(`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS image_original_name TEXT NOT NULL DEFAULT '';`);
+  await query(`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS image_original_size BIGINT;`);
+  await query(`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS image_preview_size BIGINT;`);
+  await query(`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS image_preview_mime TEXT NOT NULL DEFAULT 'image/jpeg';`);
   await query(`CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions(status);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_submissions_actor ON submissions(actor_kakao_user_id);`);
   await query(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_photo_submission_key ON submissions(event_id, team_id, mission_id, submission_key) WHERE submission_key <> '';`);
@@ -3200,7 +3504,12 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
     query(
       `SELECT * FROM submissions
        WHERE event_id=$1 AND team_id=$2 AND mission_id=$3
-         AND status IN ('pending','approved','correct') AND COALESCE(image_data, '') <> ''
+         AND status IN ('pending','approved','correct')
+         AND (
+           COALESCE(image_data, '') <> '' OR
+           COALESCE(image_original_path, '') <> '' OR
+           COALESCE(image_preview_path, '') <> ''
+         )
        ORDER BY CASE WHEN status IN ('approved','correct') THEN 0 ELSE 1 END, submitted_at DESC
        LIMIT 1;`,
       [event.id, team.id, mission.id]
@@ -3227,15 +3536,17 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
     }));
     setImmediate(async () => {
       try {
-        await query(
-          `UPDATE submissions
-           SET image_data=$1, image_mime=$2, actor_kakao_user_id=$3, actor_name=$4,
-               answer_text=$5, submission_key=$6, submitted_at=NOW()
-           WHERE id=$7;`,
-          [image.image_data, image.image_mime, actor.actor_kakao_user_id, actor.actor_name,
-           mission.mission_type === 'gps' ? '카카오 GPS 대체 사진 재제출' : '카카오 이미지 보안전송 재제출',
-           `secureimage:replace:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`, existing.id]
-        );
+        await replacePhotoSubmissionAssets({
+          submission: existing,
+          eventId: event.id,
+          teamId: team.id,
+          missionId: mission.id,
+          image,
+          actorKakaoUserId: actor.actor_kakao_user_id,
+          actorName: actor.actor_name,
+          answerText: mission.mission_type === 'gps' ? '카카오 GPS 대체 사진 재제출' : '카카오 이미지 보안전송 재제출',
+          submissionKey: `secureimage:replace:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`,
+        });
       } catch (error) {
         console.error('[kakao-secure-image] replacement save failed:', error);
       }
@@ -3247,11 +3558,19 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
   const status = autoApprove ? 'approved' : 'pending';
   const score = autoApprove ? Number(mission.score || 0) : 0;
   const submissionKey = `secureimage:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
-  const persistSubmission = () => query(
-    `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, image_data, image_mime, actor_kakao_user_id, actor_name, submission_key, status, score, reviewed_at, review_note)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,CASE WHEN $10='approved' THEN NOW() ELSE NULL END,$12);`,
-    [event.id, team.id, mission.id, mission.mission_type === 'gps' ? '카카오 GPS 대체 사진 인증' : '카카오 이미지 보안전송', image.image_data, image.image_mime, actor.actor_kakao_user_id, actor.actor_name, submissionKey, status, score, autoApprove ? '카카오 이미지 보안전송 자동 승인' : '']
-  );
+  const persistSubmission = () => insertPhotoSubmissionWithAssets({
+    eventId: event.id,
+    teamId: team.id,
+    missionId: mission.id,
+    answerText: mission.mission_type === 'gps' ? '카카오 GPS 대체 사진 인증' : '카카오 이미지 보안전송',
+    image,
+    actorKakaoUserId: actor.actor_kakao_user_id,
+    actorName: actor.actor_name,
+    submissionKey,
+    status,
+    score,
+    reviewNote: autoApprove ? '카카오 이미지 보안전송 자동 승인' : '',
+  });
 
   if (!autoApprove) {
     const pendingText = cleanRenderedMessage(renderTemplate(messages.photo_upload_pending_message, {
@@ -4088,12 +4407,26 @@ app.get(['/', '/admin', '/admin.html'], (req, res) => {
 
 app.get('/health', async (req, res) => {
   if (!DATABASE_URL) {
-    return res.status(200).json({ ok: true, server: 'running', db_ready: false, db_error: 'DATABASE_URL is not set', time: nowIso() });
+    return res.status(200).json({
+      ok: true,
+      server: 'running',
+      db_ready: false,
+      db_error: 'DATABASE_URL is not set',
+      submission_storage_configured: Boolean(supabaseAdmin),
+      time: nowIso(),
+    });
   }
 
   try {
     await query('SELECT 1;');
-    res.status(200).json({ ok: true, server: 'running', db_ready: dbReady, time: nowIso() });
+    res.status(200).json({
+      ok: true,
+      server: 'running',
+      db_ready: dbReady,
+      submission_storage_configured: Boolean(supabaseAdmin),
+      submission_storage_bucket: supabaseAdmin ? SUPABASE_STORAGE_BUCKET : '',
+      time: nowIso(),
+    });
   } catch (error) {
     res.status(200).json({ ok: true, server: 'running', db_ready: false, db_error: error.message, time: nowIso() });
   }
@@ -4181,8 +4514,9 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
     const comment = body.comment || '';
     const gpsFallback = String(body.fallback || req.query?.fallback || '').toLowerCase() === 'gps';
     const submissionKey = String(body.submission_key || body.upload_id || '').trim().slice(0, 120);
-    const image_data = body.image_data || (req.file ? req.file.buffer.toString('base64') : '');
-    const image_mime = body.image_mime || (req.file ? req.file.mimetype : 'image/jpeg');
+    const imageInput = req.file
+      ? { buffer: req.file.buffer, image_mime: req.file.mimetype, file_name: req.file.originalname }
+      : { image_data: body.image_data || '', image_mime: body.image_mime || 'image/jpeg', file_name: body.file_name || '' };
     let team = await getTeamByCodeAndToken(event.id, team_code, token);
     if (!team && team_code && token) {
       const anyTeam = await getTeamByCodeAndTokenAnyEvent(team_code, token);
@@ -4197,8 +4531,7 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
     if (!team || !mission || !(mission.mission_type === 'photo' || (gpsFallback && mission.mission_type === 'gps'))) {
       return res.status(400).json({ ok: false, message: '팀/미션 인증 정보가 올바르지 않습니다.' });
     }
-    if (!image_data) return res.status(400).json({ ok: false, message: '사진 파일이 필요합니다.' });
-    if (String(image_data).length > 8 * 1024 * 1024) return res.status(400).json({ ok: false, message: '사진 용량이 너무 큽니다.' });
+    const image = normalizeSubmissionImageInput(imageInput);
     if (await isMissionAlreadyCompleted(team.id, mission.id)) return res.json({ ok: true, message: '이미 완료된 미션입니다.' });
 
     const actor = await resolveActorForTeam(event.id, team.id, actorId, team.leader_name || '팀원');
@@ -4235,26 +4568,19 @@ app.post('/api/public/upload/photo', upload.single('photo'), async (req, res) =>
       });
     }
 
-    const insertResult = await query(
-      `INSERT INTO submissions(event_id, team_id, mission_id, answer_text, image_data, image_mime, actor_kakao_user_id, actor_name, submission_key, status, score, reviewed_at, review_note)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,CASE WHEN $10='approved' THEN NOW() ELSE NULL END,$12)
-       ON CONFLICT DO NOTHING
-       RETURNING id, status;`,
-      [
-        event.id,
-        team.id,
-        mission.id,
-        gpsFallback ? `GPS 대체 사진 인증${comment ? ` - ${comment}` : ''}` : comment,
-        String(image_data),
-        String(image_mime || 'image/jpeg'),
-        actor.actor_kakao_user_id,
-        actor.actor_name,
-        submissionKey,
-        finalStatus,
-        finalScore,
-        autoApprove ? (gpsFallback ? 'GPS 대체 사진 자동 승인' : '사진 자동 승인') : '',
-      ]
-    );
+    const insertResult = await insertPhotoSubmissionWithAssets({
+      eventId: event.id,
+      teamId: team.id,
+      missionId: mission.id,
+      answerText: gpsFallback ? `GPS 대체 사진 인증${comment ? ` - ${comment}` : ''}` : comment,
+      image,
+      actorKakaoUserId: actor.actor_kakao_user_id,
+      actorName: actor.actor_name,
+      submissionKey,
+      status: finalStatus,
+      score: finalScore,
+      reviewNote: autoApprove ? (gpsFallback ? 'GPS 대체 사진 자동 승인' : '사진 자동 승인') : '',
+    });
 
     if (!insertResult.rows.length) {
       return res.json({
@@ -5151,6 +5477,16 @@ app.patch('/api/admin/mission-images/:id/kind', requireAdmin, async (req, res) =
 
 app.delete('/api/admin/missions/:id', requireAdmin, async (req, res) => {
   const event = await getActiveEvent(req);
+  const storedPhotos = (await query(
+    `SELECT image_original_path, image_preview_path
+     FROM submissions WHERE event_id=$1 AND mission_id=$2;`,
+    [event.id, req.params.id]
+  )).rows;
+  try {
+    await removeSubmissionStoragePaths(storedPhotos.flatMap((row) => submissionStoragePaths(row)));
+  } catch (error) {
+    return res.status(400).json({ ok: false, message: error.message });
+  }
   await query(`UPDATE missions SET next_mission_id=NULL WHERE event_id=$1 AND next_mission_id=$2;`, [event.id, req.params.id]);
   await query(`DELETE FROM missions WHERE id=$1 AND event_id=$2;`, [req.params.id, event.id]);
   res.json({ ok: true });
@@ -5169,7 +5505,10 @@ app.get('/api/admin/submissions', requireAdmin, async (req, res) => {
 
   const result = await query(
     `SELECT s.id, s.answer_text, s.status, s.score, s.submitted_at, s.reviewed_at, s.review_note,
-            s.image_mime, CASE WHEN s.image_data IS NULL THEN false ELSE true END AS has_image,
+            s.image_mime, s.image_original_size, s.image_preview_size,
+            CASE WHEN COALESCE(s.image_data, '') <> '' OR COALESCE(s.image_original_path, '') <> '' OR COALESCE(s.image_preview_path, '') <> '' THEN true ELSE false END AS has_image,
+            CASE WHEN COALESCE(s.image_data, '') <> '' OR COALESCE(s.image_original_path, '') <> '' THEN true ELSE false END AS has_original,
+            CASE WHEN COALESCE(s.image_original_path, '') <> '' OR COALESCE(s.image_preview_path, '') <> '' THEN true ELSE false END AS storage_backed,
             s.gps_lat, s.gps_lng, s.distance_m,
             s.actor_kakao_user_id, s.actor_name,
             t.team_code, t.team_name,
@@ -5186,11 +5525,76 @@ app.get('/api/admin/submissions', requireAdmin, async (req, res) => {
 });
 
 app.get('/api/admin/submissions/:id/image', requireAdmin, async (req, res) => {
-  const result = await query(`SELECT image_data, image_mime FROM submissions WHERE id=$1;`, [req.params.id]);
+  const result = await query(
+    `SELECT image_data, image_mime, image_preview_path, image_preview_mime, image_original_path
+     FROM submissions WHERE id=$1;`,
+    [req.params.id]
+  );
   const row = result.rows[0];
-  if (!row || !row.image_data) return res.status(404).send('image not found');
+  if (!row) return res.status(404).send('image not found');
+
+  const storagePath = row.image_preview_path || row.image_original_path;
+  if (storagePath) {
+    const bytes = await downloadSubmissionStorageObject(storagePath);
+    res.set('Content-Type', row.image_preview_path ? (row.image_preview_mime || 'image/jpeg') : (row.image_mime || 'image/jpeg'));
+    return res.send(bytes);
+  }
+
+  if (!row.image_data) return res.status(404).send('image not found');
   res.set('Content-Type', row.image_mime || 'image/jpeg');
-  res.send(Buffer.from(row.image_data, 'base64'));
+  return res.send(Buffer.from(row.image_data, 'base64'));
+});
+
+app.get('/api/admin/submissions/:id/original', requireAdmin, async (req, res) => {
+  const result = await query(
+    `SELECT image_data, image_mime, image_original_path, image_original_name
+     FROM submissions WHERE id=$1;`,
+    [req.params.id]
+  );
+  const row = result.rows[0];
+  if (!row) return res.status(404).send('original image not found');
+
+  const fileName = safeDownloadFileName(row.image_original_name, `submission-${req.params.id}.${submissionImageExtension(row.image_mime)}`);
+  res.set('Content-Type', row.image_mime || 'application/octet-stream');
+  res.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+
+  if (row.image_original_path) {
+    const bytes = await downloadSubmissionStorageObject(row.image_original_path);
+    return res.send(bytes);
+  }
+  if (!row.image_data) return res.status(404).send('original image not found');
+  return res.send(Buffer.from(row.image_data, 'base64'));
+});
+
+app.get('/api/admin/submissions/:id/file-url', requireAdmin, async (req, res) => {
+  const variant = String(req.query.variant || 'preview') === 'original' ? 'original' : 'preview';
+  const row = (await query(
+    `SELECT image_data, image_mime, image_original_path, image_preview_path, image_original_name
+     FROM submissions WHERE id=$1;`,
+    [req.params.id]
+  )).rows[0];
+  if (!row) return res.status(404).json({ ok: false, message: '사진을 찾을 수 없습니다.' });
+
+  const objectPath = variant === 'original'
+    ? row.image_original_path
+    : (row.image_preview_path || row.image_original_path);
+  if (objectPath && !supabaseAdmin) {
+    return res.status(503).json({ ok: false, message: 'Supabase Storage 서버 환경변수가 설정되지 않았습니다.' });
+  }
+  if (objectPath && supabaseAdmin) {
+    await ensureSubmissionStorageBucket();
+    const options = variant === 'original'
+      ? { download: safeDownloadFileName(row.image_original_name, `submission-${req.params.id}.${submissionImageExtension(row.image_mime)}`) }
+      : undefined;
+    const { data, error } = await supabaseAdmin.storage
+      .from(SUPABASE_STORAGE_BUCKET)
+      .createSignedUrl(objectPath, 300, options);
+    if (error) return res.status(500).json({ ok: false, message: error.message });
+    return res.json({ ok: true, url: data.signedUrl, expires_in: 300, variant });
+  }
+
+  if (row.image_data) return res.json({ ok: true, legacy: true, variant });
+  return res.status(404).json({ ok: false, message: variant === 'original' ? '원본 사진이 삭제되었거나 없습니다.' : '확인용 사진이 없습니다.' });
 });
 
 app.post('/api/admin/submissions/:id/review', requireAdmin, async (req, res) => {
@@ -5242,6 +5646,91 @@ app.post('/api/admin/submissions/:id/review', requireAdmin, async (req, res) => 
   res.json({ ok: true, submission: result.rows[0] });
 });
 
+app.post('/api/admin/submission-images/migrate', requireAdmin, async (req, res) => {
+  if (!supabaseAdmin) {
+    return res.status(400).json({
+      ok: false,
+      message: 'SUPABASE_URL과 SUPABASE_SERVICE_ROLE_KEY를 먼저 설정해주세요.',
+    });
+  }
+
+  const event = await getActiveEvent(req);
+  const rows = (await query(
+    `SELECT id, event_id, team_id, mission_id, image_data, image_mime, image_original_name
+     FROM submissions
+     WHERE event_id=$1
+       AND COALESCE(image_data, '') <> ''
+       AND COALESCE(image_original_path, '') = ''
+       AND COALESCE(image_preview_path, '') = ''
+     ORDER BY id ASC
+     LIMIT 10;`,
+    [event.id]
+  )).rows;
+
+  let migrated = 0;
+  const errors = [];
+  for (const row of rows) {
+    let assets = null;
+    try {
+      assets = await storeSubmissionImageAssets({
+        eventId: row.event_id,
+        teamId: row.team_id,
+        missionId: row.mission_id,
+        image: {
+          image_data: row.image_data,
+          image_mime: row.image_mime || 'image/jpeg',
+          file_name: row.image_original_name || `legacy-submission-${row.id}.${submissionImageExtension(row.image_mime)}`,
+        },
+      });
+      await query(
+        `UPDATE submissions
+         SET image_data=NULL, image_mime=$1, image_original_path=$2, image_preview_path=$3,
+             image_original_name=$4, image_original_size=$5, image_preview_size=$6, image_preview_mime=$7
+         WHERE id=$8 AND event_id=$9;`,
+        [
+          assets.image_mime, assets.image_original_path, assets.image_preview_path,
+          assets.image_original_name, assets.image_original_size, assets.image_preview_size,
+          assets.image_preview_mime, row.id, event.id,
+        ]
+      );
+      migrated += 1;
+    } catch (error) {
+      if (assets) await removeSubmissionStoragePaths(submissionStoragePaths(assets)).catch(() => {});
+      errors.push({ id: row.id, message: error.message || String(error) });
+    }
+  }
+
+  const remaining = Number((await query(
+    `SELECT COUNT(*)::int AS count FROM submissions
+     WHERE event_id=$1 AND COALESCE(image_data, '') <> ''
+       AND COALESCE(image_original_path, '') = '' AND COALESCE(image_preview_path, '') = '';`,
+    [event.id]
+  )).rows[0]?.count || 0);
+
+  return res.json({ ok: true, migrated, remaining, errors });
+});
+
+app.delete('/api/admin/submission-images/originals', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
+  const rows = (await query(
+    `SELECT id, image_original_path FROM submissions
+     WHERE event_id=$1 AND COALESCE(image_original_path, '') <> '';`,
+    [event.id]
+  )).rows;
+  try {
+    await removeSubmissionStoragePaths(rows.flatMap((row) => submissionStoragePaths(row, { originalsOnly: true })));
+  } catch (error) {
+    return res.status(400).json({ ok: false, message: error.message });
+  }
+  await query(
+    `UPDATE submissions
+     SET image_original_path='', image_original_size=NULL
+     WHERE event_id=$1 AND COALESCE(image_original_path, '') <> '';`,
+    [event.id]
+  );
+  return res.json({ ok: true, deleted: rows.length });
+});
+
 app.get('/api/admin/export/rankings.csv', requireAdmin, async (req, res) => {
   const event = await getActiveEvent(req);
   const ranking = await buildRanking(event.id);
@@ -5255,6 +5744,15 @@ app.get('/api/admin/export/rankings.csv', requireAdmin, async (req, res) => {
 
 app.post('/api/admin/reset-event', requireAdmin, async (req, res) => {
   const event = await getActiveEvent(req);
+  const storedPhotos = (await query(
+    `SELECT image_original_path, image_preview_path FROM submissions WHERE event_id=$1;`,
+    [event.id]
+  )).rows;
+  try {
+    await removeSubmissionStoragePaths(storedPhotos.flatMap((row) => submissionStoragePaths(row)));
+  } catch (error) {
+    return res.status(400).json({ ok: false, message: error.message });
+  }
   await query(`DELETE FROM team_notice_reads WHERE notice_id IN (SELECT id FROM team_notices WHERE event_id=$1);`, [event.id]);
   await query(`DELETE FROM team_notices WHERE event_id=$1;`, [event.id]);
   await query(`DELETE FROM user_states WHERE event_id=$1;`, [event.id]);
@@ -5271,7 +5769,7 @@ app.use((err, _req, res, _next) => {
 
 // 중요: Render 배포 실패를 막기 위해 DB 초기화보다 먼저 포트를 엽니다.
 // Render Web Service는 반드시 process.env.PORT로 0.0.0.0에 바인딩되어야 합니다.
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`Jeju Kakao Race server running on 0.0.0.0:${PORT}`);
 
   initDb()
@@ -5287,3 +5785,5 @@ app.listen(PORT, '0.0.0.0', () => {
       // process.exit(1)을 하지 않습니다. 그래야 Render가 포트 감지에 성공합니다.
     });
 });
+
+export { app, server, pool, createSubmissionPreview, normalizeSubmissionImageInput };

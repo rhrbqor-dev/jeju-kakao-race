@@ -29,6 +29,9 @@ git push -u origin main
 5. Start Command: `npm start`
 6. Environment Variables 등록
    - `DATABASE_URL`
+   - `SUPABASE_URL` (Supabase Project URL)
+   - `SUPABASE_SERVICE_ROLE_KEY` (서버 전용 service_role 키)
+   - `SUPABASE_STORAGE_BUCKET=mission-submissions`
    - `ADMIN_PASSWORD`
    - `KAKAO_SKILL_KEY`
    - `KAKAO_SECURE_IMAGE_BLOCK_ID` (이미지 보안전송 플러그인 블록 ID)
@@ -68,6 +71,10 @@ git push -u origin main
 6. 생성한 이미지 보안전송 블록의 ID를 Render 환경변수 `KAKAO_SECURE_IMAGE_BLOCK_ID`에 등록하고 서버를 재배포합니다.
 
 사용자가 사진을 전송하면 카카오가 자동으로 완료 발화를 만들고 `secureimage` 파라미터의 임시 URL을 스킬 서버에 전달합니다. 서버는 URL 유효시간 안에 사진을 내려받아 제출 기록에 저장하고 자동 승인 또는 관리자 승인 대기 결과를 같은 대화에서 응답합니다.
+
+서버는 받은 최고 화질 파일을 비공개 Storage에 원본으로 보관하고, 긴 변 최대 2048px·약 900KB의 확인용 JPEG를 별도로 생성합니다. 관리자 페이지는 확인용 이미지를 표시하며 `원본 다운로드`는 5분간 유효한 서명 URL을 사용합니다. Storage 버킷은 최초 사진 제출 시 서버가 자동 생성합니다.
+
+이전 배포에서 DB에 Base64로 저장한 사진이 있다면 관리자 제출내역의 `기존 DB 사진을 Storage로 이전` 버튼을 사용하세요. 행사 종료 후 원본을 백업한 다음 `선택 행사 원본 사진 일괄 삭제`로 원본만 삭제하고 확인용 이미지는 유지할 수 있습니다.
 
 `KAKAO_SECURE_IMAGE_BLOCK_ID`가 등록되면 사진 업로드 버튼이 해당 블록을 직접 호출하므로 `사진 인증` 발화의 인식 여부와 관계없이 플러그인이 열립니다. 값이 없으면 기존 메시지 발화 방식으로 동작합니다.
 
