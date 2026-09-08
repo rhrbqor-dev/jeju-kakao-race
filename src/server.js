@@ -665,6 +665,7 @@ async function copyEventContent(sourceEventId, targetEventId) {
      DO UPDATE SET setting_value=EXCLUDED.setting_value, updated_at=NOW();`,
     [targetEventId, sourceEventId]
   );
+  messageSettingsCache.delete(Number(targetEventId));
 }
 
 async function ensureAppSettingsTable() {
@@ -680,6 +681,8 @@ async function ensureAppSettingsTable() {
   `);
   await query(`CREATE INDEX IF NOT EXISTS idx_app_settings_event_key ON app_settings(event_id, setting_key);`);
 }
+
+const messageSettingsCache = new Map();
 
 async function getSetting(eventId, settingKey, defaultValue = {}) {
   // app_settings는 서버 시작 시 initDb에서 생성합니다. 매 챗봇 요청마다
@@ -708,6 +711,7 @@ async function setSetting(eventId, settingKey, settingValue = {}) {
      DO UPDATE SET setting_value=$3, updated_at=NOW();`,
     [eventId, settingKey, JSON.stringify(settingValue || {})]
   );
+  if (settingKey === 'chatbot_messages') messageSettingsCache.delete(Number(eventId));
 }
 
 
@@ -1222,8 +1226,17 @@ function publicMessageSettings(settings = {}, req = null) {
 }
 
 async function getMessageSettings(eventId) {
+  const cacheKey = Number(eventId);
+  if (messageSettingsCache.has(cacheKey)) return messageSettingsCache.get(cacheKey);
   const saved = await getSetting(eventId, 'chatbot_messages', DEFAULT_MESSAGE_SETTINGS);
-  return normalizeMessageSettings(saved, DEFAULT_MESSAGE_SETTINGS);
+  const settings = normalizeMessageSettings(saved, DEFAULT_MESSAGE_SETTINGS);
+  messageSettingsCache.set(cacheKey, settings);
+  return settings;
+}
+
+function rememberMessageSettings(eventId, settings) {
+  messageSettingsCache.set(Number(eventId), settings);
+  return settings;
 }
 
 function hasMessageImage(settings = {}, key = '') {
@@ -1317,7 +1330,7 @@ async function kakaoAlreadyCompletedMissionMessage(req, event, team, mission, op
   const completedByOther = completedKakaoUserId && currentKakaoUserId
     ? completedKakaoUserId !== currentKakaoUserId
     : Boolean(completedActorName && actorName && completedActorName !== actorName);
-  const total = team?.id ? await teamTotalScore(team.id) : '';
+  const total = options.total ?? (team?.id ? await teamTotalScore(team.id) : '');
   const template = String(
     completedByOther
       ? settings?.already_completed_by_member_message || DEFAULT_MESSAGE_SETTINGS.already_completed_by_member_message
@@ -1823,6 +1836,19 @@ async function initDb() {
   }
 
   await secureAppTablesWithRls();
+
+  // 카카오 요청이 들어온 뒤 큰 이미지 데이터가 포함된 문구 설정을 처음 읽으면
+  // 제한시간을 넘길 수 있어, 기본 행사 설정을 서버 준비 단계에서 한 번 올려둡니다.
+  const settingsEvents = await query(`
+    SELECT id
+    FROM events
+    ORDER BY
+      CASE WHEN COALESCE(is_default, false) THEN 0 ELSE 1 END,
+      CASE WHEN status='active' THEN 0 WHEN status='paused' THEN 1 ELSE 2 END,
+      id DESC
+    LIMIT 1;
+  `);
+  await Promise.all(settingsEvents.rows.map((row) => getMessageSettings(row.id)));
 }
 
 
@@ -3247,27 +3273,83 @@ function normalizeSubmissionUtteranceForDisplay(utterance) {
   return String(utterance || '').trim();
 }
 
-async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '') {
-  const mission = await getMissionByCode(event.id, missionCode);
-  if (!mission) return kakaoText(`'${missionCode}' 미션을 찾을 수 없습니다. 미션 목록을 확인해주세요.`, menuQuickReplies);
+function finalizeMissionStartResponse(response, mission, options = {}) {
+  const completed = options.completed === true;
+  const currentMissionId = Number(options.currentMissionId || 0);
+  const scannedMissionId = Number(mission?.id || 0);
+  let replies = Array.isArray(response?.template?.quickReplies)
+    ? response.template.quickReplies.filter((reply) => {
+        const label = String(reply?.label || reply?.messageText || '').trim();
+        return label !== '힌트';
+      })
+    : [];
 
-  const [completion, messageSettings] = await Promise.all([
+  const hideQrScan = options.teamStatus === 'finished'
+    || mission?.mission_type === 'complete'
+    || !completed
+    || Boolean(currentMissionId && currentMissionId !== scannedMissionId);
+  if (hideQrScan) {
+    replies = replies.filter((reply) => String(reply?.label || reply?.messageText || '').trim() !== QR_SCAN_QUICK_REPLY);
+  }
+
+  if (!completed && String(mission?.hint || '').trim()) {
+    replies.unshift({ action: 'message', label: '힌트', messageText: '힌트' });
+  }
+
+  if (response?.template) {
+    if (replies.length) response.template.quickReplies = replies.slice(0, 10);
+    else delete response.template.quickReplies;
+  }
+  // 미션 시작에 필요한 QR/힌트 상태는 위에서 이미 반영했습니다. 공통 후처리의
+  // 여러 DB 재조회를 생략해 카카오 스킬 제한시간 안에 응답합니다.
+  return skipKakaoCommonPostProcessing(response);
+}
+
+async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '', providedMessages = null) {
+  const mission = await getMissionByCode(event.id, missionCode);
+  if (!mission) {
+    return skipKakaoCommonPostProcessing(kakaoText(`'${missionCode}' 미션을 찾을 수 없습니다. 미션 목록을 확인해주세요.`, menuQuickReplies));
+  }
+
+  const messageSettings = providedMessages || await getMessageSettings(event.id);
+  const [completion, missionImages] = await Promise.all([
     getMissionCompletion(team.id, mission.id),
-    getMessageSettings(event.id),
+    getMissionImages(mission.id, 'mission'),
   ]);
   if (completion) {
-    const actor = await resolveActorForTeam(event.id, team.id, kakaoUserId, team.leader_name || '팀원');
-    return kakaoAlreadyCompletedMissionMessage(req, event, team, mission, {
+    const [actor, total] = await Promise.all([
+      resolveActorForTeam(event.id, team.id, kakaoUserId, team.leader_name || '팀원'),
+      teamTotalScore(team.id),
+    ]);
+    const response = await kakaoAlreadyCompletedMissionMessage(req, event, team, mission, {
       currentActorName: actor.actor_name,
       currentKakaoUserId: kakaoUserId,
       settings: messageSettings,
       completion,
+      total,
+    });
+    return finalizeMissionStartResponse(response, mission, {
+      completed: true,
+      currentMissionId: team.current_mission_id,
+      teamStatus: team.status,
     });
   }
 
-  await query(`UPDATE teams SET current_mission_id=$1 WHERE id=$2;`, [mission.id, team.id]);
-  const missionImages = await getMissionImages(mission.id, 'mission');
+  const startMissionUpdates = [
+    query(`UPDATE teams SET current_mission_id=$1 WHERE id=$2;`, [mission.id, team.id]),
+  ];
+  const quizType = normalizeQuizType(mission.quiz_type || 'short');
+  if (mission.mission_type === 'quiz' && quizType === 'sequence') {
+    startMissionUpdates.push(setUserState(event.id, kakaoUserId, 'WAIT_SEQUENCE_ANSWER', { missionId: mission.id, selected: [] }));
+  }
+  await Promise.all(startMissionUpdates);
+
   const imageUrls = missionImageLinks(req, missionImages);
+  const startedResponse = (response) => finalizeMissionStartResponse(response, mission, {
+    completed: false,
+    currentMissionId: mission.id,
+    teamStatus: team.status,
+  });
 
   if (mission.mission_type === 'photo') {
     const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
@@ -3276,49 +3358,47 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
       mission_name: mission.mission_name, score: mission.score,
     });
     const buttons = [secureImagePluginButton('사진 업로드', '사진 인증')];
-    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, '', imageUrls), menuQuickReplies, desc, buttons);
-    return kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || '');
+    if (imageUrls.length > 1) return startedResponse(kakaoCarousel(buildImageCards(title, '', imageUrls), menuQuickReplies, desc, buttons));
+    return startedResponse(kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || ''));
   }
   if (mission.mission_type === 'gps') {
     const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
     const desc = `${mission.question}\n\n아래 버튼을 눌러 위치 권한을 허용해주세요.`;
     const buttons = gpsMissionActionButtons(req, event, team, mission, kakaoUserId);
-    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, '', imageUrls), menuQuickReplies, desc, buttons);
-    return kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || '');
+    if (imageUrls.length > 1) return startedResponse(kakaoCarousel(buildImageCards(title, '', imageUrls), menuQuickReplies, desc, buttons));
+    return startedResponse(kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || ''));
   }
   if (mission.mission_type === 'complete') {
     const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
     const desc = String(mission.question || '').trim();
-    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, '', imageUrls), menuQuickReplies, desc);
-    if (imageUrls.length === 1) return kakaoCard(title, desc, [], menuQuickReplies, imageUrls[0]);
-    return kakaoText(desc, menuQuickReplies);
+    if (imageUrls.length > 1) return startedResponse(kakaoCarousel(buildImageCards(title, '', imageUrls), menuQuickReplies, desc));
+    if (imageUrls.length === 1) return startedResponse(kakaoCard(title, desc, [], menuQuickReplies, imageUrls[0]));
+    return startedResponse(kakaoText(desc, menuQuickReplies));
   }
   const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
-  const quizType = normalizeQuizType(mission.quiz_type || 'short');
 
   if (mission.mission_type === 'quiz' && quizType === 'choice') {
     const choices = parseMissionChoices(mission.choices || '');
     const choiceText = choices.length ? `\n\n${choices.map((choice, index) => `${index + 1}. ${choice}`).join('\n')}` : '';
     const desc = `${mission.question}${choiceText}\n\n아래 보기 버튼을 눌러 정답을 선택해주세요.`;
     const quickReplies = choiceQuickReplies(mission, menuQuickReplies);
-    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, '', imageUrls), quickReplies, desc);
-    if (imageUrls.length === 1) return kakaoCard(title, desc, [], quickReplies, imageUrls[0]);
-    return kakaoText(textWithOptionalTitle(title, desc), quickReplies);
+    if (imageUrls.length > 1) return startedResponse(kakaoCarousel(buildImageCards(title, '', imageUrls), quickReplies, desc));
+    if (imageUrls.length === 1) return startedResponse(kakaoCard(title, desc, [], quickReplies, imageUrls[0]));
+    return startedResponse(kakaoText(textWithOptionalTitle(title, desc), quickReplies));
   }
 
   if (mission.mission_type === 'quiz' && quizType === 'sequence') {
-    await setUserState(event.id, kakaoUserId, 'WAIT_SEQUENCE_ANSWER', { missionId: mission.id, selected: [] });
     const desc = sequenceProgressText(mission, []);
     const quickReplies = sequenceQuickReplies(mission, []);
-    if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, '', imageUrls), quickReplies, desc);
-    if (imageUrls.length === 1) return kakaoCard(title, desc, [], quickReplies, imageUrls[0]);
-    return kakaoText(textWithOptionalTitle(title, desc), quickReplies);
+    if (imageUrls.length > 1) return startedResponse(kakaoCarousel(buildImageCards(title, '', imageUrls), quickReplies, desc));
+    if (imageUrls.length === 1) return startedResponse(kakaoCard(title, desc, [], quickReplies, imageUrls[0]));
+    return startedResponse(kakaoText(textWithOptionalTitle(title, desc), quickReplies));
   }
 
   const desc = String(mission.question || '').trim();
-  if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(title, '', imageUrls), menuQuickReplies, desc);
-  if (imageUrls.length === 1) return kakaoCard(title, desc, [], menuQuickReplies, imageUrls[0]);
-  return kakaoText(textWithOptionalTitle(title, desc), menuQuickReplies);
+  if (imageUrls.length > 1) return startedResponse(kakaoCarousel(buildImageCards(title, '', imageUrls), menuQuickReplies, desc));
+  if (imageUrls.length === 1) return startedResponse(kakaoCard(title, desc, [], menuQuickReplies, imageUrls[0]));
+  return startedResponse(kakaoText(textWithOptionalTitle(title, desc), menuQuickReplies));
 }
 
 
@@ -4075,7 +4155,7 @@ ${hintPrompt}
   }
 
   if (mission.mission_type === 'photo' || mission.mission_type === 'gps') {
-    return handleMissionStart(req, event, team, mission.mission_code, kakaoUserId);
+    return handleMissionStart(req, event, team, mission.mission_code, kakaoUserId, messages);
   }
 
   return kakaoText('처리할 수 없는 미션 유형입니다. 운영자에게 문의해주세요.', menuQuickReplies);
@@ -4392,7 +4472,10 @@ async function handleKakaoSkill(req, res) {
     }
 
     if (isMissionCode(utterance)) {
-      return respondKakao(res, await handleMissionStart(req, event, team, utterance.toUpperCase(), kakaoUserId), event, team, kakaoUserId);
+      const missionCode = utterance.toUpperCase();
+      const response = await handleMissionStart(req, event, team, missionCode, kakaoUserId, messages);
+      console.info(`[kakao-skill] ${qrMissionCode ? 'qr' : 'code'} ${missionCode} response-ready ${Date.now() - skillStartedAt}ms`);
+      return respondKakao(res, response, event, team, kakaoUserId);
     }
 
     return respondKakao(res, await handleAnswer(req, event, team, utterance, kakaoUserId, messages), event, team, kakaoUserId);
@@ -5517,6 +5600,7 @@ app.patch('/api/admin/settings/messages', requireAdmin, async (req, res) => {
   const current = await getMessageSettings(event.id);
   const settings = normalizeMessageSettings(req.body || {}, current);
   await setSetting(event.id, 'chatbot_messages', settings);
+  rememberMessageSettings(event.id, settings);
   res.json({
     ok: true,
     settings: publicMessageSettings(settings, req),
@@ -5567,6 +5651,7 @@ app.patch('/api/admin/chatbot-messages', requireAdmin, async (req, res) => {
   const current = await getMessageSettings(event.id);
   const settings = normalizeMessageSettings(req.body || {}, current);
   await setSetting(event.id, 'chatbot_messages', settings);
+  rememberMessageSettings(event.id, settings);
   res.json({ ok: true, settings: publicMessageSettings(settings, req), defaults: publicMessageSettings(DEFAULT_MESSAGE_SETTINGS, req), message_items: MESSAGE_SETTING_DEFINITIONS.map(({ key, textKey, label }) => ({ key, textKey, label })), system_message_items: SYSTEM_MESSAGE_SETTING_DEFINITIONS });
 });
 
