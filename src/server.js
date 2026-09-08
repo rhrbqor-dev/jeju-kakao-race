@@ -682,7 +682,9 @@ async function ensureAppSettingsTable() {
 }
 
 async function getSetting(eventId, settingKey, defaultValue = {}) {
-  await ensureAppSettingsTable();
+  // app_settings는 서버 시작 시 initDb에서 생성합니다. 매 챗봇 요청마다
+  // CREATE TABLE/INDEX를 다시 실행하면 원격 DB 지연과 잠금 때문에 카카오의
+  // 스킬 응답 제한시간을 넘길 수 있습니다.
   const result = await query(
     `SELECT setting_value FROM app_settings WHERE event_id=$1 AND setting_key=$2 LIMIT 1;`,
     [eventId, settingKey]
@@ -699,7 +701,6 @@ async function getSetting(eventId, settingKey, defaultValue = {}) {
 }
 
 async function setSetting(eventId, settingKey, settingValue = {}) {
-  await ensureAppSettingsTable();
   await query(
     `INSERT INTO app_settings(event_id, setting_key, setting_value, updated_at)
      VALUES ($1,$2,$3,NOW())
@@ -2003,26 +2004,48 @@ async function generateTeamCode(eventId) {
 }
 
 async function createTeam(eventId, kakaoUserId, teamName, memberName = '팀장') {
-  const code = await generateTeamCode(eventId);
-  const token = teamToken();
-  const result = await query(
-    `INSERT INTO teams(event_id, team_code, team_name, leader_name, kakao_user_id, public_token)
-     VALUES ($1,$2,$3,$4,$5,$6)
-     RETURNING *;`,
-    [eventId, code, teamName, memberName || '팀장', kakaoUserId, token]
-  );
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // 행사 현장에서 여러 팀이 동시에 생성되어도 같은 T번호가 발급되지 않도록
+    // 해당 행사의 팀 코드 생성 구간만 짧게 직렬화합니다.
+    await client.query(`SELECT pg_advisory_xact_lock($1, $2);`, [20260908, Number(eventId)]);
+    const nextResult = await client.query(
+      `SELECT COALESCE(MAX(CASE WHEN team_code ~ '^T[0-9]+$' THEN SUBSTRING(team_code FROM 2)::INTEGER ELSE 0 END), 0) + 1 AS next_num
+       FROM teams
+       WHERE event_id=$1;`,
+      [eventId]
+    );
+    const code = `T${String(Number(nextResult.rows[0]?.next_num || 1)).padStart(3, '0')}`;
+    const token = teamToken();
+    const result = await client.query(
+      `INSERT INTO teams(event_id, team_code, team_name, leader_name, kakao_user_id, public_token)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       RETURNING *;`,
+      [eventId, code, teamName, memberName || '팀장', kakaoUserId, token]
+    );
+    const team = result.rows[0];
 
-  const team = result.rows[0];
-
-  await query(
-    `INSERT INTO team_members(event_id, team_id, kakao_user_id, member_name, role)
-     VALUES ($1,$2,$3,$4,'leader')
-     ON CONFLICT(event_id, kakao_user_id)
-     DO UPDATE SET team_id=$2, member_name=$4, role='leader', joined_at=NOW();`,
-    [eventId, team.id, kakaoUserId, memberName || '팀장']
-  );
-
-  return team;
+    await client.query(
+      `INSERT INTO team_members(event_id, team_id, kakao_user_id, member_name, role)
+       VALUES ($1,$2,$3,$4,'leader')
+       ON CONFLICT(event_id, kakao_user_id)
+       DO UPDATE SET team_id=$2, member_name=$4, role='leader', joined_at=NOW();`,
+      [eventId, team.id, kakaoUserId, memberName || '팀장']
+    );
+    // 팀/팀원 생성과 입력 상태 해제를 함께 확정해 중간 상태가 남지 않게 합니다.
+    await client.query(
+      `DELETE FROM user_states WHERE event_id=$1 AND kakao_user_id=$2;`,
+      [eventId, kakaoUserId]
+    );
+    await client.query('COMMIT');
+    return team;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function listJoinableTeams(eventId) {
@@ -2190,8 +2213,19 @@ function markMissionCompletedResponse(response) {
   return response;
 }
 
+function skipKakaoCommonPostProcessing(response) {
+  if (response && typeof response === 'object') {
+    Object.defineProperty(response, '__skipCommonPostProcessing', {
+      value: true,
+      enumerable: false,
+    });
+  }
+  return response;
+}
+
 function markTeamFinishedResponse(response) {
   markMissionCompletedResponse(response);
+  skipKakaoCommonPostProcessing(response);
   if (response && typeof response === 'object') {
     Object.defineProperty(response, '__teamFinishedInCurrentRequest', {
       value: true,
@@ -2382,7 +2416,7 @@ async function respondKakao(res, response, event = null, team = null, kakaoUserI
   // 완주 응답은 필요한 점수/순위와 버튼을 이미 모두 구성했습니다.
   // 여기서 팀 알림·다음 미션·힌트 확인 쿼리를 다시 실행하면 카카오 응답 제한시간을
   // 넘길 수 있으므로 완료 응답은 바로 정규화해서 반환합니다.
-  if (event && team && kakaoUserId && response?.__teamFinishedInCurrentRequest !== true) {
+  if (event && team && kakaoUserId && response?.__skipCommonPostProcessing !== true) {
     response = await addUnreadNoticesToResponse(event.id, team, kakaoUserId, response);
     response = await addReadyCompleteMissionToResponse(event.id, team, response);
     response = await syncActiveMissionHintQuickReply(event.id, team, response);
@@ -3739,12 +3773,17 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
 }
 
 async function handleAnswer(req, event, team, utterance, kakaoUserId, messages = DEFAULT_MESSAGE_SETTINGS) {
-  const teamReload = (await query(`SELECT * FROM teams WHERE id=$1;`, [team.id])).rows[0];
-  const member = await getTeamMember(event.id, kakaoUserId);
+  const [teamReloadResult, member] = await Promise.all([
+    query(`SELECT * FROM teams WHERE id=$1;`, [team.id]),
+    getTeamMember(event.id, kakaoUserId),
+  ]);
+  const teamReload = teamReloadResult.rows[0];
   const actorName = member?.member_name || '팀원';
 
   if (!teamReload.current_mission_id) {
-    return kakaoText('먼저 QR코드를 스캔해주세요.', ['미션 목록', ...menuQuickReplies]);
+    return skipKakaoCommonPostProcessing(
+      kakaoText('먼저 QR코드를 스캔해주세요.', ['미션 목록', ...menuQuickReplies])
+    );
   }
 
   const mission = (await query(`SELECT * FROM missions WHERE id=$1;`, [teamReload.current_mission_id])).rows[0];
@@ -4124,7 +4163,6 @@ async function handleKakaoSkill(req, res) {
       }
 
       team = await createTeam(event.id, kakaoUserId, teamName, memberName);
-      await clearUserState(event.id, kakaoUserId);
 
       const teamReadyVars = {
         event_name: event.event_name,
@@ -4137,7 +4175,7 @@ async function handleKakaoSkill(req, res) {
 
       return respondKakao(
         res,
-        kakaoTeamReadyMessage(
+        skipKakaoCommonPostProcessing(kakaoTeamReadyMessage(
           req,
           messages,
           'team_created',
@@ -4145,10 +4183,7 @@ async function handleKakaoSkill(req, res) {
           teamReadyVars,
           ['미션 목록', '팀원 목록', '도움말'],
           '팀 생성 완료'
-        ),
-        event,
-        team,
-        kakaoUserId
+        ))
       );
     }
 
@@ -4199,30 +4234,52 @@ async function handleKakaoSkill(req, res) {
     if (team && userState?.state === 'WAIT_EDIT_TEAM_NAME') {
       const teamName = utterance.replace(/^(팀명|팀이름|팀 이름)[:：]?/i, '').trim();
       if (!teamName || teamName.length < 2) {
-        return respondKakao(res, kakaoText('팀 이름은 2글자 이상으로 입력해주세요.\n예: 한라탐험대', ['취소']), event, team, kakaoUserId);
+        return respondKakao(res, kakaoText('팀 이름은 2글자 이상으로 입력해주세요.\n예: 한라탐험대', ['취소']));
       }
       if (teamName.length > 30 || isBlockedTeamName(teamName)) {
-        return respondKakao(res, kakaoText('사용할 수 없는 팀 이름입니다. 다른 팀 이름을 입력해주세요.', ['취소']), event, team, kakaoUserId);
+        return respondKakao(res, kakaoText('사용할 수 없는 팀 이름입니다. 다른 팀 이름을 입력해주세요.', ['취소']));
       }
-      await query(`UPDATE teams SET team_name=$1 WHERE id=$2;`, [teamName.slice(0, 30), team.id]);
-      await clearUserState(event.id, kakaoUserId);
-      team = await getTeamByKakaoUser(event.id, kakaoUserId);
-      await addTeamNotice(event.id, team.id, `팀명이 '${team.team_name}'(으)로 변경되었습니다.`, kakaoUserId);
-      return respondKakao(res, kakaoText(renderTemplate(messages.edit_team_name_complete_message, eventTemplateVars(event, team)), menuQuickReplies), event, team, kakaoUserId);
+      const updatedTeamName = teamName.slice(0, 30);
+      await query(
+        `WITH updated AS (
+           UPDATE teams SET team_name=$1 WHERE id=$2 RETURNING id
+         )
+         DELETE FROM user_states
+         WHERE event_id=$3 AND kakao_user_id=$4;`,
+        [updatedTeamName, team.id, event.id, kakaoUserId]
+      );
+      team = { ...team, team_name: updatedTeamName };
+      setImmediate(() => {
+        addTeamNotice(event.id, team.id, `팀명이 '${updatedTeamName}'(으)로 변경되었습니다.`, kakaoUserId)
+          .catch((error) => console.error('[team-name notice error]', error));
+      });
+      return respondKakao(res, skipKakaoCommonPostProcessing(kakaoText(
+        renderTemplate(messages.edit_team_name_complete_message, eventTemplateVars(event, team)),
+        menuQuickReplies
+      )));
     }
 
     if (team && userState?.state === 'WAIT_EDIT_MEMBER_NAME') {
       const memberName = cleanName(utterance);
       if (memberName.length < 2) {
-        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동', ['취소']), event, team, kakaoUserId);
+        return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동', ['취소']));
       }
       await query(
-        `UPDATE team_members SET member_name=$1 WHERE event_id=$2 AND kakao_user_id=$3;`,
+        `WITH updated AS (
+           UPDATE team_members SET member_name=$1 WHERE event_id=$2 AND kakao_user_id=$3 RETURNING id
+         )
+         DELETE FROM user_states
+         WHERE event_id=$2 AND kakao_user_id=$3;`,
         [memberName, event.id, kakaoUserId]
       );
-      await clearUserState(event.id, kakaoUserId);
-      await addTeamNotice(event.id, team.id, `${memberName}님이 이름/닉네임을 수정했습니다.`, kakaoUserId);
-      return respondKakao(res, kakaoText(renderTemplate(messages.edit_member_name_complete_message, { ...eventTemplateVars(event, team, memberName), member_name: memberName }), menuQuickReplies), event, team, kakaoUserId);
+      setImmediate(() => {
+        addTeamNotice(event.id, team.id, `${memberName}님이 이름/닉네임을 수정했습니다.`, kakaoUserId)
+          .catch((error) => console.error('[member-name notice error]', error));
+      });
+      return respondKakao(res, skipKakaoCommonPostProcessing(kakaoText(
+        renderTemplate(messages.edit_member_name_complete_message, { ...eventTemplateVars(event, team, memberName), member_name: memberName }),
+        menuQuickReplies
+      )));
     }
 
     if (isStartCommand(utterance) || isHelpCommand(utterance)) {
@@ -4257,12 +4314,12 @@ async function handleKakaoSkill(req, res) {
 
     if (isTeamNameEditCommand(utterance)) {
       await setUserState(event.id, kakaoUserId, 'WAIT_EDIT_TEAM_NAME', {});
-      return respondKakao(res, kakaoText(renderTemplate(messages.edit_team_name_prompt_message, eventTemplateVars(event, team)), ['취소']), event, team, kakaoUserId);
+      return respondKakao(res, kakaoText(renderTemplate(messages.edit_team_name_prompt_message, eventTemplateVars(event, team)), ['취소']));
     }
 
     if (isMemberNameEditCommand(utterance)) {
       await setUserState(event.id, kakaoUserId, 'WAIT_EDIT_MEMBER_NAME', {});
-      return respondKakao(res, kakaoText(renderTemplate(messages.edit_member_name_prompt_message, eventTemplateVars(event, team)), ['취소']), event, team, kakaoUserId);
+      return respondKakao(res, kakaoText(renderTemplate(messages.edit_member_name_prompt_message, eventTemplateVars(event, team)), ['취소']));
     }
 
     if (isTeamMembersCommand(utterance)) {
