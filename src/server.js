@@ -1285,6 +1285,28 @@ ${guideText}` : String(baseText || '').trim();
   return kakaoText(text, quickReplies);
 }
 
+function teamCreatedResponse(req, event, team, memberName, messages = DEFAULT_MESSAGE_SETTINGS) {
+  const cleanMemberName = String(memberName || team?.leader_name || '').trim();
+  const variables = {
+    event_name: event?.event_name || '',
+    event_code: event?.event_code || '',
+    team_name: team?.team_name || '',
+    team_code: team?.team_code || '',
+    member_name: cleanMemberName,
+    actor_name: cleanMemberName,
+  };
+
+  return skipKakaoCommonPostProcessing(kakaoTeamReadyMessage(
+    req,
+    messages,
+    'team_created',
+    renderTemplate(messages.team_created_message, variables),
+    variables,
+    ['미션 목록', '팀원 목록', '도움말'],
+    '팀 생성 완료'
+  ));
+}
+
 async function kakaoAlreadyCompletedMissionMessage(req, event, team, mission, options = {}) {
   const settings = options.settings || DEFAULT_MESSAGE_SETTINGS;
   const actorName = String(options.currentActorName || '').trim();
@@ -2033,10 +2055,18 @@ async function createTeam(eventId, kakaoUserId, teamName, memberName = '팀장')
        DO UPDATE SET team_id=$2, member_name=$4, role='leader', joined_at=NOW();`,
       [eventId, team.id, kakaoUserId, memberName || '팀장']
     );
-    // 팀/팀원 생성과 입력 상태 해제를 함께 확정해 중간 상태가 남지 않게 합니다.
+    // 카카오가 제한시간 안에 응답을 받지 못하더라도 같은 닉네임을 다시 입력하면
+    // 팀 생성 완료 응답을 재전송할 수 있도록 짧은 복구 상태를 남깁니다.
     await client.query(
-      `DELETE FROM user_states WHERE event_id=$1 AND kakao_user_id=$2;`,
-      [eventId, kakaoUserId]
+      `INSERT INTO user_states(event_id, kakao_user_id, state, data, updated_at)
+       VALUES ($1,$2,'TEAM_CREATED_RECENT',$3,NOW())
+       ON CONFLICT(event_id, kakao_user_id)
+       DO UPDATE SET state='TEAM_CREATED_RECENT', data=$3, updated_at=NOW();`,
+      [eventId, kakaoUserId, JSON.stringify({
+        teamName,
+        memberName: memberName || '팀장',
+        createdAt: nowIso(),
+      })]
     );
     await client.query('COMMIT');
     return team;
@@ -4129,6 +4159,31 @@ async function handleKakaoSkill(req, res) {
       return respondKakao(res, response);
     }
 
+    if (team && userState?.state === 'TEAM_CREATED_RECENT') {
+      const savedMemberName = String(data.memberName || team.leader_name || '').trim();
+      const savedAt = new Date(userState.updated_at || data.createdAt || 0).getTime();
+      const isRecent = Number.isFinite(savedAt) && Date.now() - savedAt <= 30 * 60 * 1000;
+      const isSameNickname = normalizeAnswer(cleanName(utterance)) === normalizeAnswer(savedMemberName);
+
+      // 복구 상태는 다음 메시지에서 반드시 해제해 일반 명령 처리를 방해하지 않게 합니다.
+      await clearUserState(event.id, kakaoUserId);
+      if (isRecent && isSameNickname) {
+        return respondKakao(res, teamCreatedResponse(req, event, team, savedMemberName, messages));
+      }
+    }
+
+    // 이전 배포 버전에서 팀 생성은 저장됐지만 복구 상태가 삭제된 이용자도
+    // 현재 미션 시작 전 자신의 닉네임을 다시 입력하면 완료 응답을 받을 수 있습니다.
+    if (
+      team
+      && !userState
+      && team.status === 'playing'
+      && !team.current_mission_id
+      && normalizeAnswer(cleanName(utterance)) === normalizeAnswer(team.leader_name)
+    ) {
+      return respondKakao(res, teamCreatedResponse(req, event, team, team.leader_name, messages));
+    }
+
     if (isCancelCommand(utterance)) {
       await clearUserState(event.id, kakaoUserId);
       return respondKakao(res, kakaoText('진행 중인 입력을 취소했습니다.', team ? menuQuickReplies : startQuickReplies), event, team, kakaoUserId);
@@ -4163,28 +4218,7 @@ async function handleKakaoSkill(req, res) {
       }
 
       team = await createTeam(event.id, kakaoUserId, teamName, memberName);
-
-      const teamReadyVars = {
-        event_name: event.event_name,
-        event_code: event.event_code,
-        team_name: team.team_name,
-        team_code: team.team_code,
-        member_name: memberName,
-        actor_name: memberName,
-      };
-
-      return respondKakao(
-        res,
-        skipKakaoCommonPostProcessing(kakaoTeamReadyMessage(
-          req,
-          messages,
-          'team_created',
-          renderTemplate(messages.team_created_message, teamReadyVars),
-          teamReadyVars,
-          ['미션 목록', '팀원 목록', '도움말'],
-          '팀 생성 완료'
-        ))
-      );
+      return respondKakao(res, teamCreatedResponse(req, event, team, memberName, messages));
     }
 
     if (!team && userState?.state === 'WAIT_SELECT_JOIN_TEAM') {
