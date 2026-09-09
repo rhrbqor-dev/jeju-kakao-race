@@ -4,7 +4,7 @@ import { Pool } from 'pg';
 import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import sharp from 'sharp';
 import { createClient } from '@supabase/supabase-js';
 
@@ -131,6 +131,175 @@ function splitAnswers(answer = '') {
     .split(/[|,，/]/)
     .map((item) => normalizeAnswer(item))
     .filter(Boolean);
+}
+
+const DEFAULT_CROSSWORD_DATA = Object.freeze({ rows: 8, cols: 8, entries: [] });
+const CROSSWORD_DIRECTIONS = new Set(['across', 'down']);
+
+function crosswordDirectionLabel(direction = '') {
+  return direction === 'down' ? '세로' : '가로';
+}
+
+function normalizeCrosswordWord(value = '') {
+  return String(value || '')
+    .normalize('NFC')
+    .trim()
+    .replace(/[^\p{L}\p{N}]/gu, '');
+}
+
+function crosswordBoundedInteger(value, fallback, min, max) {
+  const parsed = Number(value);
+  const safeValue = Number.isFinite(parsed) ? Math.floor(parsed) : fallback;
+  return Math.min(max, Math.max(min, safeValue));
+}
+
+function normalizeCrosswordData(value = {}) {
+  let source = value;
+  if (typeof source === 'string') {
+    try {
+      source = JSON.parse(source);
+    } catch {
+      source = {};
+    }
+  }
+  if (!source || typeof source !== 'object' || Array.isArray(source)) source = {};
+  const rows = crosswordBoundedInteger(source.rows, DEFAULT_CROSSWORD_DATA.rows, 3, 20);
+  const cols = crosswordBoundedInteger(source.cols, DEFAULT_CROSSWORD_DATA.cols, 3, 20);
+  const sourceEntries = Array.isArray(source.entries) ? source.entries.slice(0, 99) : [];
+  const usedIds = new Set();
+  const entries = sourceEntries.map((raw, index) => {
+    const direction = CROSSWORD_DIRECTIONS.has(String(raw?.direction || '').toLowerCase())
+      ? String(raw.direction).toLowerCase()
+      : 'across';
+    const number = crosswordBoundedInteger(raw?.number, index + 1, 1, 99);
+    const row = crosswordBoundedInteger(raw?.row, 1, 1, rows);
+    const col = crosswordBoundedInteger(raw?.col, 1, 1, cols);
+    const answer = normalizeCrosswordWord(raw?.answer || '').slice(0, 20);
+    const clue = String(raw?.clue || '').trim().slice(0, 500);
+    const idSeed = String(raw?.id || `${direction}-${number}-${row}-${col}`).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80) || `entry-${index + 1}`;
+    let id = idSeed;
+    let suffix = 2;
+    while (usedIds.has(id)) id = `${idSeed}-${suffix++}`;
+    usedIds.add(id);
+    return { id, number, direction, row, col, answer, clue };
+  });
+  return { rows, cols, entries };
+}
+
+function crosswordEntriesInPlayOrder(value = {}) {
+  const data = normalizeCrosswordData(value);
+  return [...data.entries].sort((a, b) => {
+    const directionOrder = (a.direction === 'across' ? 0 : 1) - (b.direction === 'across' ? 0 : 1);
+    if (directionOrder) return directionOrder;
+    return a.number - b.number || a.row - b.row || a.col - b.col;
+  });
+}
+
+function validateCrosswordData(value = {}) {
+  const data = normalizeCrosswordData(value);
+  if (!data.entries.length) throw new Error('십자말풀이 문제를 1개 이상 추가해주세요.');
+  const directionNumbers = new Set();
+  const cells = new Map();
+
+  for (const entry of data.entries) {
+    if (!entry.answer) throw new Error(`${crosswordDirectionLabel(entry.direction)} ${entry.number}번 정답을 입력해주세요.`);
+    if (!entry.clue) throw new Error(`${crosswordDirectionLabel(entry.direction)} ${entry.number}번 문제 문구를 입력해주세요.`);
+    const directionNumberKey = `${entry.direction}:${entry.number}`;
+    if (directionNumbers.has(directionNumberKey)) {
+      throw new Error(`${crosswordDirectionLabel(entry.direction)} ${entry.number}번 문제가 중복되었습니다.`);
+    }
+    directionNumbers.add(directionNumberKey);
+
+    const letters = [...entry.answer];
+    const endRow = entry.row + (entry.direction === 'down' ? letters.length - 1 : 0);
+    const endCol = entry.col + (entry.direction === 'across' ? letters.length - 1 : 0);
+    if (endRow > data.rows || endCol > data.cols) {
+      throw new Error(`${crosswordDirectionLabel(entry.direction)} ${entry.number}번 정답이 문제판 범위를 벗어납니다.`);
+    }
+
+    letters.forEach((letter, offset) => {
+      const row = entry.row + (entry.direction === 'down' ? offset : 0);
+      const col = entry.col + (entry.direction === 'across' ? offset : 0);
+      const key = `${row}:${col}`;
+      const current = cells.get(key);
+      if (current?.letter && current.letter !== letter) {
+        throw new Error(`${row}행 ${col}열에서 '${current.letter}'와 '${letter}'가 겹칩니다.`);
+      }
+      if (current?.directions?.has(entry.direction)) {
+        throw new Error(`${row}행 ${col}열에서 같은 방향의 정답이 겹칩니다.`);
+      }
+      const directions = current?.directions || new Set();
+      directions.add(entry.direction);
+      cells.set(key, { letter, directions });
+    });
+  }
+  return data;
+}
+
+function crosswordEntryKey(entry = {}) {
+  return String(entry.id || `${entry.direction}-${entry.number}-${entry.row}-${entry.col}`);
+}
+
+function parseCrosswordSelection(text = '', entries = []) {
+  const normalized = String(text || '').trim().replace(/\s+/g, ' ');
+  const match = normalized.match(/^(가로|세로)\s*(\d{1,2})\s*(?:번|번\s*문제|문제)?$/u);
+  if (!match) return null;
+  const direction = match[1] === '세로' ? 'down' : 'across';
+  const number = Number(match[2]);
+  return entries.find((entry) => entry.direction === direction && Number(entry.number) === number) || null;
+}
+
+function crosswordCellMap(value = {}) {
+  const data = validateCrosswordData(value);
+  const cells = new Map();
+  for (const entry of data.entries) {
+    [...entry.answer].forEach((letter, offset) => {
+      const row = entry.row + (entry.direction === 'down' ? offset : 0);
+      const col = entry.col + (entry.direction === 'across' ? offset : 0);
+      const key = `${row}:${col}`;
+      const current = cells.get(key) || { letter, numbers: [] };
+      current.letter = letter;
+      if (offset === 0 && !current.numbers.includes(entry.number)) current.numbers.push(entry.number);
+      cells.set(key, current);
+    });
+  }
+  return { data, cells };
+}
+
+function escapeSvgText(value = '') {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+async function renderCrosswordBoardPng(value = {}) {
+  const { data, cells } = crosswordCellMap(value);
+  const cellSize = Math.max(48, Math.min(100, Math.floor(1120 / Math.max(data.rows, data.cols))));
+  const margin = Math.max(24, Math.round(cellSize * 0.45));
+  const width = data.cols * cellSize + margin * 2;
+  const height = data.rows * cellSize + margin * 2;
+  const numberSize = Math.max(12, Math.round(cellSize * 0.19));
+  const grid = [];
+  for (let row = 1; row <= data.rows; row += 1) {
+    for (let col = 1; col <= data.cols; col += 1) {
+      const cell = cells.get(`${row}:${col}`);
+      const x = margin + (col - 1) * cellSize;
+      const y = margin + (row - 1) * cellSize;
+      grid.push(`<rect x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" fill="${cell ? '#fffdf6' : '#f2b544'}" stroke="#392a1c" stroke-width="2"/>`);
+      if (cell?.numbers?.length) {
+        const numberText = [...cell.numbers].sort((a, b) => a - b).join('·');
+        grid.push(`<text x="${x + Math.max(5, cellSize * 0.08)}" y="${y + Math.max(16, cellSize * 0.23)}" font-family="Arial, sans-serif" font-size="${numberSize}" font-weight="700" fill="#2b2118">${escapeSvgText(numberText)}</text>`);
+      }
+    }
+  }
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+    <rect width="100%" height="100%" fill="#6b3d22"/>
+    ${grid.join('\n')}
+  </svg>`;
+  return sharp(Buffer.from(svg)).png({ compressionLevel: 9 }).toBuffer();
 }
 
 function escapeCsv(value) {
@@ -683,10 +852,10 @@ async function copyEventContent(sourceEventId, targetEventId) {
   );
   for (const m of missions.rows) {
     const inserted = await query(
-      `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, quiz_type, choices, sequence_answer, question, answer, answer_explanation, wrong_message, wrong_penalty, hint_penalty, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required, next_mission_button_label, next_mission_message_template)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+      `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, quiz_type, choices, sequence_answer, crossword_data, question, answer, answer_explanation, wrong_message, wrong_penalty, hint_penalty, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required, next_mission_button_label, next_mission_message_template)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
        RETURNING id;`,
-      [targetEventId, m.mission_code, m.mission_name, m.mission_type, normalizeQuizType(m.quiz_type || 'short'), String(m.choices || ''), String(m.sequence_answer || ''), m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty ?? -5), Number(m.hint_penalty ?? -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude, m.longitude, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, String(m.next_mission_button_label || ''), String(m.next_mission_message_template || '')]
+      [targetEventId, m.mission_code, m.mission_name, m.mission_type, normalizeQuizType(m.quiz_type || 'short'), String(m.choices || ''), String(m.sequence_answer || ''), normalizeCrosswordData(m.crossword_data), m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty ?? -5), Number(m.hint_penalty ?? -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude, m.longitude, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, String(m.next_mission_button_label || ''), String(m.next_mission_message_template || '')]
     );
     missionMap.set(Number(m.id), Number(inserted.rows[0].id));
   }
@@ -1108,6 +1277,11 @@ const SYSTEM_MESSAGE_SETTING_DEFINITIONS = [
   { textKey: 'photo_replaced_message', label: '사진 다시 제출 완료 안내' },
   { textKey: 'photo_review_approved_message', label: '사진 수동 승인 알림' },
   { textKey: 'photo_review_rejected_message', label: '사진 반려 알림' },
+  { textKey: 'crossword_question_message', label: '십자말풀이 문제 안내' },
+  { textKey: 'crossword_correct_message', label: '십자말풀이 중간 정답/다음 문제 안내' },
+  { textKey: 'crossword_wrong_message', label: '십자말풀이 오답 안내' },
+  { textKey: 'crossword_already_solved_message', label: '십자말풀이 이미 맞힌 문제 안내' },
+  { textKey: 'crossword_selection_not_found_message', label: '십자말풀이 없는 문제 번호 안내' },
   { textKey: 'skill_timeout_message', label: '응답 지연 시 재입력 안내' },
 ];
 
@@ -1291,6 +1465,40 @@ const DEFAULT_MESSAGE_SETTINGS = {
 
 {wrong_message}
 {review_note}`,
+  crossword_question_message: `{mission_question}
+
+{direction_label} {clue_number}번
+{clue}
+
+정답을 입력해주세요. ({solved_count}/{clue_count} 완료)
+다른 문제로 이동하려면 "가로 2번" 또는 "세로 5번"처럼 입력해주세요.`,
+  crossword_correct_message: `{answered_direction_label} {answered_clue_number}번 정답입니다.
+진행: {solved_count}/{clue_count}
+
+{direction_label} {clue_number}번
+{clue}
+
+정답을 입력해주세요.`,
+  crossword_wrong_message: `아쉽습니다. 정답이 아닙니다.
+
+{direction_label} {clue_number}번
+{clue}
+
+현재 오답 횟수: {wrong_count}회
+오답 감점: {wrong_penalty}점 (미션 완료 시 반영)
+획득가능 점수: {available_score}점`,
+  crossword_already_solved_message: `{answered_direction_label} {answered_clue_number}번은 이미 맞힌 문제입니다.
+
+{direction_label} {clue_number}번
+{clue}
+
+정답을 입력해주세요. ({solved_count}/{clue_count} 완료)`,
+  crossword_selection_not_found_message: `{requested_problem} 문제는 등록되어 있지 않습니다.
+
+{direction_label} {clue_number}번
+{clue}
+
+정답을 입력해주세요. ({solved_count}/{clue_count} 완료)`,
   skill_timeout_message: `처리를 완료하는 데 시간이 조금 더 걸리고 있습니다.
 잠시 후 방금 입력한 내용을 한 번 더 보내주세요.`,
 };
@@ -1697,7 +1905,7 @@ async function initDb() {
       event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
       mission_code TEXT NOT NULL,
       mission_name TEXT NOT NULL,
-      mission_type TEXT NOT NULL CHECK (mission_type IN ('quiz', 'photo', 'gps', 'visit', 'complete')),
+      mission_type TEXT NOT NULL CHECK (mission_type IN ('quiz', 'crossword', 'photo', 'gps', 'visit', 'complete')),
       question TEXT NOT NULL DEFAULT '',
       answer TEXT NOT NULL DEFAULT '',
       score INTEGER NOT NULL DEFAULT 0,
@@ -1725,6 +1933,31 @@ async function initDb() {
   await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS quiz_type TEXT NOT NULL DEFAULT 'short';`);
   await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS choices TEXT NOT NULL DEFAULT '';`);
   await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS sequence_answer TEXT NOT NULL DEFAULT '';`);
+  await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS crossword_data JSONB NOT NULL DEFAULT '{"rows":8,"cols":8,"entries":[]}'::jsonb;`);
+  await query(`
+    DO $$
+    DECLARE
+      old_constraint RECORD;
+    BEGIN
+      FOR old_constraint IN
+        SELECT conname
+        FROM pg_constraint
+        WHERE conrelid='missions'::regclass
+          AND contype='c'
+          AND pg_get_constraintdef(oid) ILIKE '%mission_type%'
+          AND pg_get_constraintdef(oid) NOT ILIKE '%crossword%'
+      LOOP
+        EXECUTE format('ALTER TABLE missions DROP CONSTRAINT %I', old_constraint.conname);
+      END LOOP;
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid='missions'::regclass AND conname='missions_mission_type_check'
+      ) THEN
+        ALTER TABLE missions ADD CONSTRAINT missions_mission_type_check
+          CHECK (mission_type IN ('quiz', 'crossword', 'photo', 'gps', 'visit', 'complete'));
+      END IF;
+    END $$;
+  `);
   await query(`UPDATE missions SET quiz_type='short' WHERE quiz_type IS NULL OR quiz_type NOT IN ('short','choice','sequence');`);
   await query(`CREATE INDEX IF NOT EXISTS idx_missions_next_mission_id ON missions(next_mission_id);`);
   await query(`CREATE INDEX IF NOT EXISTS idx_missions_event_code_upper ON missions(event_id, UPPER(mission_code));`);
@@ -2056,7 +2289,7 @@ async function getMissions(eventId) {
   const result = await query(
     `SELECT
        m.id, m.event_id, m.mission_code, m.mission_name, m.mission_type, m.question, m.answer,
-       m.quiz_type, m.choices, m.sequence_answer,
+       m.quiz_type, m.choices, m.sequence_answer, m.crossword_data,
        m.answer_explanation, m.wrong_message, m.wrong_penalty, m.hint_penalty, m.score, m.hint, m.location_name, m.latitude, m.longitude,
        m.radius_m, m.sort_order, m.is_required, m.created_at,
        m.next_mission_id, m.next_mission_button_label, m.next_mission_message_template,
@@ -3625,6 +3858,88 @@ function sequenceQuickReplies(mission, selectedNumbers = []) {
   return [...buttons, '처음부터 다시', ...menuQuickReplies].slice(0, 10);
 }
 
+function crosswordBoardUrl(req, event, mission) {
+  const version = createHash('sha1')
+    .update(JSON.stringify(normalizeCrosswordData(mission?.crossword_data)))
+    .digest('hex')
+    .slice(0, 12);
+  const pathValue = urlWithEvent(`/api/public/missions/${Number(mission?.id || 0)}/crossword.png?v=${version}`, event);
+  return `${baseUrl(req)}${pathValue}`;
+}
+
+function crosswordState(value = {}, mission = null) {
+  const data = value && typeof value === 'object' ? value : {};
+  const missionId = Number(mission?.id || data.missionId || 0);
+  const solved = Array.isArray(data.solved)
+    ? [...new Set(data.solved.map((item) => String(item || '').trim()).filter(Boolean))]
+    : [];
+  return {
+    missionId,
+    solved,
+    currentEntryId: String(data.currentEntryId || '').trim(),
+  };
+}
+
+function crosswordPromptVariables(event, team, mission, entry, solvedIds = [], actorName = '', extra = {}) {
+  const entries = crosswordEntriesInPlayOrder(mission?.crossword_data);
+  const solved = new Set(solvedIds.map(String));
+  return {
+    ...eventTemplateVars(event, team, actorName),
+    mission_code: mission?.mission_code || '',
+    mission_name: mission?.mission_name || '',
+    mission_question: String(mission?.question || '').trim(),
+    direction_label: crosswordDirectionLabel(entry?.direction),
+    clue_number: Number(entry?.number || 0),
+    clue: String(entry?.clue || '').trim(),
+    solved_count: entries.filter((item) => solved.has(crosswordEntryKey(item))).length,
+    remaining_count: entries.filter((item) => !solved.has(crosswordEntryKey(item))).length,
+    clue_count: entries.length,
+    ...extra,
+  };
+}
+
+function crosswordQuickReplies(entries = [], solvedIds = [], currentEntryId = '') {
+  const solved = new Set(solvedIds.map(String));
+  const remaining = entries.filter((entry) => !solved.has(crosswordEntryKey(entry)));
+  if (!remaining.length) return menuQuickReplies;
+  const currentIndex = Math.max(0, remaining.findIndex((entry) => crosswordEntryKey(entry) === String(currentEntryId || '')));
+  let shown = remaining;
+  if (remaining.length > 8) {
+    const start = Math.max(0, Math.min(remaining.length - 6, currentIndex - 2));
+    shown = remaining.slice(start, start + 6);
+  }
+  const selectors = shown.map((entry) => `${crosswordDirectionLabel(entry.direction)} ${entry.number}번`);
+  if (remaining.length > 8) return ['이전 문제', '다음 문제', ...selectors, '미션 목록'].slice(0, 9);
+  return [...selectors, '미션 목록'].slice(0, 9);
+}
+
+function crosswordRelativeEntry(entries = [], solvedIds = [], currentEntryId = '', offset = 1) {
+  const solved = new Set(solvedIds.map(String));
+  if (!entries.some((entry) => !solved.has(crosswordEntryKey(entry)))) return null;
+  const currentIndex = entries.findIndex((entry) => crosswordEntryKey(entry) === String(currentEntryId || ''));
+  const baseIndex = currentIndex >= 0 ? currentIndex : (offset < 0 ? 0 : entries.length - 1);
+  for (let step = 1; step <= entries.length; step += 1) {
+    const candidateIndex = (baseIndex + offset * step + entries.length * 2) % entries.length;
+    const candidate = entries[candidateIndex];
+    if (!solved.has(crosswordEntryKey(candidate))) return candidate;
+  }
+  return null;
+}
+
+function crosswordQuestionResponse(req, event, team, mission, entry, solvedIds, actorName, messages, templateKey = 'crossword_question_message', extra = {}) {
+  const entries = crosswordEntriesInPlayOrder(mission.crossword_data);
+  const variables = crosswordPromptVariables(event, team, mission, entry, solvedIds, actorName, extra);
+  const template = String(messages?.[templateKey] || DEFAULT_MESSAGE_SETTINGS[templateKey] || '').trim();
+  const text = cleanRenderedMessage(renderTemplate(template, variables));
+  return kakaoCard(
+    visibleRawTitle(messages, `${mission.mission_code} ${mission.mission_name}`),
+    text,
+    [],
+    crosswordQuickReplies(entries, solvedIds, crosswordEntryKey(entry)),
+    crosswordBoardUrl(req, event, mission)
+  );
+}
+
 function normalizeSubmissionUtteranceForDisplay(utterance) {
   return String(utterance || '').trim();
 }
@@ -3661,7 +3976,7 @@ function finalizeMissionStartResponse(response, mission, options = {}) {
   return skipKakaoCommonPostProcessing(response);
 }
 
-async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '', providedMessages = null) {
+async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '', providedMessages = null, providedUserState = null) {
   const mission = await getMissionByCode(event.id, missionCode);
   if (!mission) {
     return skipKakaoCommonPostProcessing(kakaoText(`'${missionCode}' 미션을 찾을 수 없습니다. 미션 목록을 확인해주세요.`, menuQuickReplies));
@@ -3670,7 +3985,7 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
   const messageSettings = providedMessages || await getMessageSettings(event.id);
   const [completion, missionImages] = await Promise.all([
     getMissionCompletion(team.id, mission.id),
-    getMissionImages(mission.id, 'mission'),
+    mission.mission_type === 'crossword' ? Promise.resolve([]) : getMissionImages(mission.id, 'mission'),
   ]);
   if (completion) {
     const [actor, total] = await Promise.all([
@@ -3691,12 +4006,41 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
     });
   }
 
+  const quizType = normalizeQuizType(mission.quiz_type || 'short');
+  let crosswordEntries = [];
+  let crosswordProgress = { missionId: mission.id, solved: [], currentEntryId: '' };
+  if (mission.mission_type === 'crossword') {
+    try {
+      mission.crossword_data = validateCrosswordData(mission.crossword_data);
+      crosswordEntries = crosswordEntriesInPlayOrder(mission.crossword_data);
+    } catch (error) {
+      return finalizeMissionStartResponse(kakaoText(`십자말풀이 설정을 확인해주세요.\n\n${error.message}`, menuQuickReplies), mission, {
+        currentMissionId: team.current_mission_id,
+        teamStatus: team.status,
+      });
+    }
+    const savedState = providedUserState || await getUserState(event.id, kakaoUserId);
+    const savedData = crosswordState(stateData(savedState), mission);
+    const validIds = new Set(crosswordEntries.map(crosswordEntryKey));
+    const canResume = savedState?.state === 'WAIT_CROSSWORD_ANSWER' && Number(savedData.missionId) === Number(mission.id);
+    const solved = canResume ? savedData.solved.filter((id) => validIds.has(id)) : [];
+    const firstUnsolved = crosswordEntries.find((entry) => !solved.includes(crosswordEntryKey(entry))) || crosswordEntries[0];
+    const savedCurrent = crosswordEntries.find((entry) => crosswordEntryKey(entry) === savedData.currentEntryId && !solved.includes(crosswordEntryKey(entry)));
+    crosswordProgress = {
+      missionId: mission.id,
+      solved,
+      currentEntryId: crosswordEntryKey(savedCurrent || firstUnsolved),
+    };
+  }
+
   const startMissionUpdates = [
     query(`UPDATE teams SET current_mission_id=$1 WHERE id=$2;`, [mission.id, team.id]),
   ];
-  const quizType = normalizeQuizType(mission.quiz_type || 'short');
   if (mission.mission_type === 'quiz' && quizType === 'sequence') {
     startMissionUpdates.push(setUserState(event.id, kakaoUserId, 'WAIT_SEQUENCE_ANSWER', { missionId: mission.id, selected: [] }));
+  }
+  if (mission.mission_type === 'crossword') {
+    startMissionUpdates.push(setUserState(event.id, kakaoUserId, 'WAIT_CROSSWORD_ANSWER', crosswordProgress));
   }
   await Promise.all(startMissionUpdates);
 
@@ -3730,6 +4074,22 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
     if (imageUrls.length > 1) return startedResponse(kakaoCarousel(buildImageCards(title, '', imageUrls), menuQuickReplies, desc));
     if (imageUrls.length === 1) return startedResponse(kakaoCard(title, desc, [], menuQuickReplies, imageUrls[0]));
     return startedResponse(kakaoText(desc, menuQuickReplies));
+  }
+
+  if (mission.mission_type === 'crossword') {
+    const currentEntry = crosswordEntries.find((entry) => crosswordEntryKey(entry) === crosswordProgress.currentEntryId)
+      || crosswordEntries.find((entry) => !crosswordProgress.solved.includes(crosswordEntryKey(entry)))
+      || crosswordEntries[0];
+    return startedResponse(crosswordQuestionResponse(
+      req,
+      event,
+      team,
+      mission,
+      currentEntry,
+      crosswordProgress.solved,
+      '',
+      messageSettings
+    ));
   }
   const title = visibleRawTitle(messageSettings, `${mission.mission_code} ${mission.mission_name}`);
 
@@ -4393,7 +4753,7 @@ async function buildQuizMissionSuccessResponse(req, event, team, mission, kakaoU
   );
 }
 
-async function handleAnswer(req, event, team, utterance, kakaoUserId, messages = DEFAULT_MESSAGE_SETTINGS) {
+async function handleAnswer(req, event, team, utterance, kakaoUserId, messages = DEFAULT_MESSAGE_SETTINGS, providedUserState = null) {
   const teamReload = team;
   const [missionResult, member] = await Promise.all([
     teamReload.current_mission_id
@@ -4450,11 +4810,17 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
     const retriedSequenceChoice = retryChoices.length
       ? Number.isInteger(extractChoiceNumber(utterance, retryChoices))
       : false;
+    const retryCrosswordEntries = mission.mission_type === 'crossword'
+      ? crosswordEntriesInPlayOrder(mission.crossword_data)
+      : [];
+    const retriedCrosswordAnswer = retryCrosswordEntries.some(
+      (entry) => normalizeAnswer(entry.answer) === normalizeAnswer(utterance)
+    );
 
     // 마지막 순서 선택에서 안전 응답이 먼저 나간 경우 정답 저장은 이미 끝났을 수 있습니다.
     // 같은 수행자가 바로 마지막 선택을 다시 누르면 일반 중복 안내 대신 유실된
     // 정답 설명과 정답 이미지를 다시 구성해 보여줍니다.
-    if (completedByCurrentUser && retriedSequenceChoice && completionAgeMs >= 0 && completionAgeMs <= 5 * 60 * 1000) {
+    if (completedByCurrentUser && (retriedSequenceChoice || retriedCrosswordAnswer) && completionAgeMs >= 0 && completionAgeMs <= 5 * 60 * 1000) {
       return buildQuizMissionSuccessResponse(
         req,
         event,
@@ -4475,6 +4841,216 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
     return completedMissionResponse(response);
   }
 
+  if (mission.mission_type === 'crossword') {
+    let crosswordData;
+    try {
+      crosswordData = validateCrosswordData(mission.crossword_data);
+    } catch (error) {
+      return activeMissionResponse(kakaoText(`십자말풀이 설정을 확인해주세요.\n\n${error.message}`, menuQuickReplies));
+    }
+    mission.crossword_data = crosswordData;
+    const entries = crosswordEntriesInPlayOrder(crosswordData);
+    const validIds = new Set(entries.map(crosswordEntryKey));
+    const savedState = providedUserState || await getUserState(event.id, kakaoUserId);
+    const savedProgress = crosswordState(stateData(savedState), mission);
+    let solvedIds = Number(savedProgress.missionId) === Number(mission.id)
+      ? savedProgress.solved.filter((id) => validIds.has(id))
+      : [];
+    let currentEntry = entries.find(
+      (entry) => crosswordEntryKey(entry) === savedProgress.currentEntryId && !solvedIds.includes(crosswordEntryKey(entry))
+    ) || entries.find((entry) => !solvedIds.includes(crosswordEntryKey(entry))) || entries[0];
+
+    const selectedEntry = parseCrosswordSelection(utterance, entries);
+    const navigation = String(utterance || '').trim();
+    if (selectedEntry) {
+      const selectedKey = crosswordEntryKey(selectedEntry);
+      if (solvedIds.includes(selectedKey)) {
+        const nextEntry = entries.find((entry) => !solvedIds.includes(crosswordEntryKey(entry))) || currentEntry;
+        await setUserState(event.id, kakaoUserId, 'WAIT_CROSSWORD_ANSWER', {
+          missionId: mission.id,
+          solved: solvedIds,
+          currentEntryId: crosswordEntryKey(nextEntry),
+        });
+        const response = crosswordQuestionResponse(
+          req, event, team, mission, nextEntry, solvedIds, actorName, messages,
+          'crossword_already_solved_message',
+          {
+            answered_direction_label: crosswordDirectionLabel(selectedEntry.direction),
+            answered_clue_number: selectedEntry.number,
+          }
+        );
+        return activeMissionResponse(response);
+      }
+      currentEntry = selectedEntry;
+      await setUserState(event.id, kakaoUserId, 'WAIT_CROSSWORD_ANSWER', {
+        missionId: mission.id,
+        solved: solvedIds,
+        currentEntryId: selectedKey,
+      });
+      return activeMissionResponse(crosswordQuestionResponse(
+        req, event, team, mission, currentEntry, solvedIds, actorName, messages
+      ));
+    }
+
+    if (/^(가로|세로)\s*\d{1,2}\s*(?:번|번\s*문제|문제)?$/u.test(navigation.replace(/\s+/g, ' '))) {
+      return activeMissionResponse(crosswordQuestionResponse(
+        req, event, team, mission, currentEntry, solvedIds, actorName, messages,
+        'crossword_selection_not_found_message',
+        { requested_problem: navigation }
+      ));
+    }
+
+    if (/^(다음\s*문제|다음)$/u.test(navigation) || /^(이전\s*문제|이전)$/u.test(navigation)) {
+      const offset = /^(이전\s*문제|이전)$/u.test(navigation) ? -1 : 1;
+      currentEntry = crosswordRelativeEntry(entries, solvedIds, crosswordEntryKey(currentEntry), offset) || currentEntry;
+      await setUserState(event.id, kakaoUserId, 'WAIT_CROSSWORD_ANSWER', {
+        missionId: mission.id,
+        solved: solvedIds,
+        currentEntryId: crosswordEntryKey(currentEntry),
+      });
+      return activeMissionResponse(crosswordQuestionResponse(
+        req, event, team, mission, currentEntry, solvedIds, actorName, messages
+      ));
+    }
+
+    const normalizedUtterance = normalizeAnswer(utterance);
+    const unsolvedEntries = entries.filter((entry) => !solvedIds.includes(crosswordEntryKey(entry)));
+    const matchingUnsolved = unsolvedEntries.filter((entry) => normalizeAnswer(entry.answer) === normalizedUtterance);
+    const currentMatch = matchingUnsolved.find((entry) => crosswordEntryKey(entry) === crosswordEntryKey(currentEntry));
+    const answeredEntry = currentMatch || matchingUnsolved[0] || null;
+    const previouslySolvedEntry = entries.find(
+      (entry) => solvedIds.includes(crosswordEntryKey(entry)) && normalizeAnswer(entry.answer) === normalizedUtterance
+    );
+
+    if (!answeredEntry && previouslySolvedEntry) {
+      const nextEntry = entries.find((entry) => !solvedIds.includes(crosswordEntryKey(entry))) || currentEntry;
+      await setUserState(event.id, kakaoUserId, 'WAIT_CROSSWORD_ANSWER', {
+        missionId: mission.id,
+        solved: solvedIds,
+        currentEntryId: crosswordEntryKey(nextEntry),
+      });
+      return activeMissionResponse(crosswordQuestionResponse(
+        req, event, team, mission, nextEntry, solvedIds, actorName, messages,
+        'crossword_already_solved_message',
+        {
+          answered_direction_label: crosswordDirectionLabel(previouslySolvedEntry.direction),
+          answered_clue_number: previouslySolvedEntry.number,
+        }
+      ));
+    }
+
+    if (!answeredEntry) {
+      const wrongPenaltyRaw = Number(mission.wrong_penalty ?? -5);
+      const wrongPenalty = wrongPenaltyRaw > 0 ? -wrongPenaltyRaw : wrongPenaltyRaw;
+      const penaltyKey = `wrong:${mission.id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+      const progress = {
+        missionId: mission.id,
+        solved: solvedIds,
+        currentEntryId: crosswordEntryKey(currentEntry),
+      };
+      const answerSave = await query(
+        `WITH prior_wrong AS MATERIALIZED (
+           SELECT COUNT(*)::int AS count
+           FROM submissions
+           WHERE team_id=$2 AND mission_id=$3 AND status='wrong'
+         ), saved_answer AS (
+           INSERT INTO submissions(event_id, team_id, mission_id, answer_text, actor_kakao_user_id, actor_name, status, score)
+           VALUES ($1,$2,$3,$4,$5,$6,'wrong',0)
+           RETURNING id
+         ), saved_penalty AS (
+           INSERT INTO score_events(event_id, team_id, mission_id, actor_kakao_user_id, actor_name, event_type, event_key, score_delta, memo)
+           SELECT $1,$2,$3,$5,$6,'wrong',$7,$8,'십자말풀이 오답 ' || ((SELECT count FROM prior_wrong) + 1)::text || '회'
+           FROM saved_answer
+           WHERE $8::integer <> 0
+           ON CONFLICT(event_id, team_id, mission_id, event_type, event_key) WHERE event_key <> '' DO NOTHING
+           RETURNING id
+         ), saved_state AS (
+           INSERT INTO user_states(event_id, kakao_user_id, state, data, updated_at)
+           VALUES ($1,$5,'WAIT_CROSSWORD_ANSWER',$9,NOW())
+           ON CONFLICT(event_id, kakao_user_id)
+           DO UPDATE SET state=EXCLUDED.state, data=EXCLUDED.data, updated_at=NOW()
+           RETURNING id
+         )
+         SELECT (SELECT count FROM prior_wrong)::int AS wrong_count;`,
+        [event.id, team.id, mission.id, normalizeSubmissionUtteranceForDisplay(utterance), kakaoUserId, actorName, penaltyKey, wrongPenalty, JSON.stringify(progress)]
+      );
+      const wrongCount = Number(answerSave.rows[0]?.wrong_count || 0) + 1;
+      const [totalAfterWrong, availableScore] = await Promise.all([
+        teamTotalScore(team.id),
+        missionAvailableScore(team.id, mission),
+      ]);
+      const wrongTemplate = String(mission.wrong_message || messages?.crossword_wrong_message || DEFAULT_MESSAGE_SETTINGS.crossword_wrong_message).trim();
+      const variables = crosswordPromptVariables(event, team, mission, currentEntry, solvedIds, actorName, {
+        wrong_count: wrongCount,
+        wrong_penalty: wrongPenalty,
+        total_score: totalAfterWrong,
+        total: totalAfterWrong,
+        available_score: availableScore,
+        mission_available_score: availableScore,
+        answer: normalizeSubmissionUtteranceForDisplay(utterance),
+      });
+      const wrongText = cleanRenderedMessage(renderTemplate(wrongTemplate, variables));
+      return activeMissionResponse(kakaoCard(
+        visibleRawTitle(messages, `${mission.mission_code} ${mission.mission_name}`),
+        wrongText,
+        [],
+        crosswordQuickReplies(entries, solvedIds, crosswordEntryKey(currentEntry)),
+        crosswordBoardUrl(req, event, mission)
+      ));
+    }
+
+    const answeredKey = crosswordEntryKey(answeredEntry);
+    solvedIds = [...new Set([...solvedIds, answeredKey])];
+    const isFinished = solvedIds.length >= entries.length;
+    if (isFinished) {
+      const progress = {
+        missionId: mission.id,
+        solved: solvedIds,
+        currentEntryId: answeredKey,
+        finalAnswer: answeredEntry.answer,
+      };
+      await query(
+        `WITH saved_answer AS (
+           INSERT INTO submissions(event_id, team_id, mission_id, answer_text, actor_kakao_user_id, actor_name, status, score)
+           VALUES ($1,$2,$3,$4,$5,$6,'correct',$7)
+           RETURNING id
+         )
+         INSERT INTO user_states(event_id, kakao_user_id, state, data, updated_at)
+         SELECT $1,$5,'RECENT_CROSSWORD_COMPLETION',$8,NOW()
+         FROM saved_answer
+         ON CONFLICT(event_id, kakao_user_id)
+         DO UPDATE SET state=EXCLUDED.state, data=EXCLUDED.data, updated_at=NOW();`,
+        [event.id, team.id, mission.id, JSON.stringify(solvedIds), kakaoUserId, actorName, Number(mission.score || 0), JSON.stringify(progress)]
+      );
+      return buildQuizMissionSuccessResponse(
+        req,
+        event,
+        team,
+        mission,
+        kakaoUserId,
+        actorName,
+        messages,
+        { submittedScore: Number(mission.score || 0) }
+      );
+    }
+
+    const nextEntry = crosswordRelativeEntry(entries, solvedIds, answeredKey, 1)
+      || entries.find((entry) => !solvedIds.includes(crosswordEntryKey(entry)));
+    await setUserState(event.id, kakaoUserId, 'WAIT_CROSSWORD_ANSWER', {
+      missionId: mission.id,
+      solved: solvedIds,
+      currentEntryId: crosswordEntryKey(nextEntry),
+    });
+    return activeMissionResponse(crosswordQuestionResponse(
+      req, event, team, mission, nextEntry, solvedIds, actorName, messages,
+      'crossword_correct_message',
+      {
+        answered_direction_label: crosswordDirectionLabel(answeredEntry.direction),
+        answered_clue_number: answeredEntry.number,
+      }
+    ));
+  }
+
   if (mission.mission_type === 'quiz') {
     const quizType = normalizeQuizType(mission.quiz_type || 'short');
     const choices = parseMissionChoices(mission.choices || '');
@@ -4490,7 +5066,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
       if (!choices.length || !expected.length) {
         return activeMissionResponse(kakaoText('순서 선택형 미션의 보기 또는 정답 순서가 설정되지 않았습니다. 운영자에게 문의해주세요.', menuQuickReplies));
       }
-      const state = await getUserState(event.id, kakaoUserId);
+      const state = providedUserState || await getUserState(event.id, kakaoUserId);
       const data = stateData(state);
       let selected = Array.isArray(data.selected) && Number(data.missionId) === Number(mission.id)
         ? data.selected.map(Number).filter((n) => Number.isInteger(n) && n > 0)
@@ -5192,12 +5768,12 @@ async function handleKakaoSkill(req, res) {
 
     if (isMissionCode(utterance)) {
       const missionCode = utterance.toUpperCase();
-      const response = await handleMissionStart(req, event, team, missionCode, kakaoUserId, messages);
+      const response = await handleMissionStart(req, event, team, missionCode, kakaoUserId, messages, userState);
       console.info(`[kakao-skill] ${qrMissionCode ? 'qr' : 'code'} ${missionCode} response-ready ${Date.now() - skillStartedAt}ms`);
       return respondKakao(res, response, event, team, kakaoUserId);
     }
 
-    return respondKakao(res, await handleAnswer(req, event, team, utterance, kakaoUserId, messages), event, team, kakaoUserId);
+    return respondKakao(res, await handleAnswer(req, event, team, utterance, kakaoUserId, messages, userState), event, team, kakaoUserId);
   } catch (error) {
     console.error('Kakao skill error:', error);
     if (res.headersSent || res.writableEnded) return res;
@@ -5842,6 +6418,27 @@ app.post('/api/public/verify/location', async (req, res) => {
 });
 
 
+app.get('/api/public/missions/:id/crossword.png', async (req, res) => {
+  try {
+    const event = await getActiveEvent(req);
+    const result = await query(
+      `SELECT crossword_data
+       FROM missions
+       WHERE id=$1 AND event_id=$2 AND mission_type='crossword'
+       LIMIT 1;`,
+      [req.params.id, event.id]
+    );
+    const mission = result.rows[0];
+    if (!mission) return res.status(404).send('crossword mission not found');
+    const png = await renderCrosswordBoardPng(mission.crossword_data);
+    res.set('Content-Type', 'image/png');
+    res.set('Cache-Control', 'public, max-age=300, immutable');
+    res.send(png);
+  } catch (error) {
+    res.status(400).send(error.message);
+  }
+});
+
 app.get('/api/public/missions/:id/image', async (req, res) => {
   try {
     const imageResult = await query(`SELECT image_data, image_mime FROM mission_images WHERE mission_id=$1 AND image_kind='mission' ORDER BY sort_order ASC, id ASC LIMIT 1;`, [req.params.id]);
@@ -6449,15 +7046,24 @@ app.get('/api/admin/missions', requireAdmin, async (req, res) => {
 app.post('/api/admin/missions', requireAdmin, async (req, res) => {
   const event = await getActiveEvent(req);
   const m = req.body;
+  const missionType = String(m.mission_type || '').trim();
+  let crosswordData;
+  try {
+    crosswordData = missionType === 'crossword'
+      ? validateCrosswordData(m.crossword_data)
+      : normalizeCrosswordData(m.crossword_data);
+  } catch (error) {
+    return res.status(400).json({ ok: false, message: error.message });
+  }
   const nextMissionId = await resolveAdminNextMissionId(event.id, null, m.next_mission_id);
   const nextButtonLabel = normalizeNextMissionButtonLabel(m.next_mission_button_label || '');
   const nextMessageTemplate = String(m.next_mission_message_template || '').trim();
   const quizType = normalizeQuizType(m.quiz_type || 'short');
   const result = await query(
-    `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, quiz_type, choices, sequence_answer, question, answer, answer_explanation, wrong_message, wrong_penalty, hint_penalty, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required, next_mission_id, next_mission_button_label, next_mission_message_template)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+    `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, quiz_type, choices, sequence_answer, crossword_data, question, answer, answer_explanation, wrong_message, wrong_penalty, hint_penalty, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required, next_mission_id, next_mission_button_label, next_mission_message_template)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
      RETURNING id, mission_code, mission_name;`,
-    [event.id, m.mission_code, m.mission_name, m.mission_type, quizType, m.choices || '', m.sequence_answer || '', m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty || -5), Number(m.hint_penalty || -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, nextMissionId, nextButtonLabel, nextMessageTemplate]
+    [event.id, m.mission_code, m.mission_name, missionType, quizType, m.choices || '', m.sequence_answer || '', crosswordData, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty ?? -5), Number(m.hint_penalty ?? -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, nextMissionId, nextButtonLabel, nextMessageTemplate]
   );
   res.json({ ok: true, mission: result.rows[0] });
 });
@@ -6465,13 +7071,22 @@ app.post('/api/admin/missions', requireAdmin, async (req, res) => {
 app.patch('/api/admin/missions/:id', requireAdmin, async (req, res) => {
   const event = await getActiveEvent(req);
   const m = req.body;
+  const missionType = String(m.mission_type || '').trim();
+  let crosswordData;
+  try {
+    crosswordData = missionType === 'crossword'
+      ? validateCrosswordData(m.crossword_data)
+      : normalizeCrosswordData(m.crossword_data);
+  } catch (error) {
+    return res.status(400).json({ ok: false, message: error.message });
+  }
   const nextMissionId = await resolveAdminNextMissionId(event.id, req.params.id, m.next_mission_id);
   const nextButtonLabel = normalizeNextMissionButtonLabel(m.next_mission_button_label || '');
   const nextMessageTemplate = String(m.next_mission_message_template || '').trim();
   const quizType = normalizeQuizType(m.quiz_type || 'short');
   const result = await query(
-    `UPDATE missions SET mission_code=$1, mission_name=$2, mission_type=$3, quiz_type=$4, choices=$5, sequence_answer=$6, question=$7, answer=$8, answer_explanation=$9, wrong_message=$10, wrong_penalty=$11, hint_penalty=$12, score=$13, hint=$14, location_name=$15, latitude=$16, longitude=$17, radius_m=$18, sort_order=$19, is_required=$20, next_mission_id=$21, next_mission_button_label=$22, next_mission_message_template=$23 WHERE id=$24 AND event_id=$25 RETURNING id, mission_code, mission_name;`,
-    [m.mission_code, m.mission_name, m.mission_type, quizType, m.choices || '', m.sequence_answer || '', m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty || -5), Number(m.hint_penalty || -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, nextMissionId, nextButtonLabel, nextMessageTemplate, req.params.id, event.id]
+    `UPDATE missions SET mission_code=$1, mission_name=$2, mission_type=$3, quiz_type=$4, choices=$5, sequence_answer=$6, crossword_data=$7, question=$8, answer=$9, answer_explanation=$10, wrong_message=$11, wrong_penalty=$12, hint_penalty=$13, score=$14, hint=$15, location_name=$16, latitude=$17, longitude=$18, radius_m=$19, sort_order=$20, is_required=$21, next_mission_id=$22, next_mission_button_label=$23, next_mission_message_template=$24 WHERE id=$25 AND event_id=$26 RETURNING id, mission_code, mission_name;`,
+    [m.mission_code, m.mission_name, missionType, quizType, m.choices || '', m.sequence_answer || '', crosswordData, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty ?? -5), Number(m.hint_penalty ?? -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, nextMissionId, nextButtonLabel, nextMessageTemplate, req.params.id, event.id]
   );
   if (!result.rows[0]) return res.status(404).json({ ok: false, message: '미션을 찾을 수 없습니다.' });
   res.json({ ok: true, mission: result.rows[0] });
@@ -6837,4 +7452,14 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     });
 });
 
-export { app, server, pool, createSubmissionPreview, normalizeSubmissionImageInput };
+export {
+  app,
+  server,
+  pool,
+  createSubmissionPreview,
+  normalizeSubmissionImageInput,
+  normalizeCrosswordData,
+  validateCrosswordData,
+  crosswordEntriesInPlayOrder,
+  renderCrosswordBoardPng,
+};

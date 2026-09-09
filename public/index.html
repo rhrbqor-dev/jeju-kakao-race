@@ -61,6 +61,18 @@
     .small { font-size:12px; color:var(--muted); }
     .inline-check { display:flex; align-items:center; gap:8px; color:var(--text); font-size:14px; margin:10px 0; }
     .thumb { max-width:160px; max-height:100px; border-radius:10px; border:1px solid var(--line); display:block; margin-top:8px; }
+    .crossword-builder { margin:12px 0; padding:14px; border:1px solid #f0cf83; border-radius:14px; background:#fffaf0; }
+    .crossword-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 10px; }
+    .crossword-entry-fields { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px 10px; }
+    .crossword-board-scroll { overflow:auto; margin-top:12px; padding:10px; background:#6b3d22; border-radius:12px; }
+    .crossword-board { --cw-cell:46px; display:grid; width:max-content; margin:auto; border:1px solid #392a1c; }
+    .crossword-cell { position:relative; width:var(--cw-cell); height:var(--cw-cell); border:1px solid #392a1c; background:#f2b544; display:flex; align-items:center; justify-content:center; color:#21170f; font-size:22px; font-weight:800; }
+    .crossword-cell.used { background:#fffdf6; }
+    .crossword-cell.draft { box-shadow:inset 0 0 0 3px #2f6df6; }
+    .crossword-cell-number { position:absolute; left:3px; top:1px; font-size:9px; line-height:1; font-weight:800; }
+    .crossword-entry-list { margin-top:12px; }
+    .crossword-entry-list table { min-width:620px; background:#fff; }
+    @media(max-width:700px){ .crossword-fields,.crossword-entry-fields { grid-template-columns:1fr 1fr; } .crossword-board { --cw-cell:38px; } .crossword-cell { font-size:18px; } }
     @media (max-width:900px) { .stats,.two { grid-template-columns:1fr; } table { min-width:960px; } }
   </style>
 </head>
@@ -159,7 +171,7 @@
           <input id="missionId" type="hidden" />
           <label>미션코드</label><input id="missionCode" placeholder="M1" />
           <label>미션명</label><input id="missionName" placeholder="해신사" />
-          <label>유형</label><select id="missionType" onchange="toggleQuizFields()"><option value="quiz">퀴즈</option><option value="photo">사진</option><option value="gps">GPS</option><option value="visit">방문문구</option><option value="complete">완주</option></select>
+          <label>유형</label><select id="missionType" onchange="toggleQuizFields()"><option value="quiz">퀴즈</option><option value="crossword">십자말풀이</option><option value="photo">사진</option><option value="gps">GPS</option><option value="visit">방문문구</option><option value="complete">완주</option></select>
           <div id="quizTypeBox">
             <label>퀴즈 방식</label>
             <select id="missionQuizType" onchange="toggleQuizFields()">
@@ -178,15 +190,42 @@
             <input id="missionSequenceAnswer" placeholder="예: 4,1,2,3" />
             <p class="small" id="quizHelpText">객관식은 정답 칸에 정답 번호를 입력합니다. 예: 1 / 순서 선택형은 정답 순서를 입력합니다. 예: 4,1,2,3</p>
           </div>
+          <div id="crosswordBox" class="crossword-builder hidden">
+            <h3 style="margin:0 0 8px;">십자말풀이 문제판 만들기</h3>
+            <p class="small">문제 수는 자유롭게 추가/삭제할 수 있습니다. 시작 위치는 1부터 세며, 정답을 입력하는 즉시 아래 문제판 미리보기에 글자가 표시됩니다. 문제판 이미지 파일은 따로 만들 필요가 없고, 참가자에게는 글자가 없는 같은 문제판이 자동 전송됩니다.</p>
+            <div class="crossword-fields">
+              <div><label>문제판 행 수</label><input id="crosswordRows" type="number" min="3" max="20" value="8" oninput="renderCrosswordBuilder()" /></div>
+              <div><label>문제판 열 수</label><input id="crosswordCols" type="number" min="3" max="20" value="8" oninput="renderCrosswordBuilder()" /></div>
+            </div>
+            <input id="crosswordEntryId" type="hidden" />
+            <div class="crossword-entry-fields">
+              <div><label>문제 번호</label><input id="crosswordNumber" type="number" min="1" max="99" value="1" oninput="renderCrosswordBuilder()" /></div>
+              <div><label>방향</label><select id="crosswordDirection" onchange="renderCrosswordBuilder()"><option value="across">가로</option><option value="down">세로</option></select></div>
+              <div><label>시작 행</label><input id="crosswordRow" type="number" min="1" max="20" value="1" oninput="renderCrosswordBuilder()" /></div>
+              <div><label>시작 열</label><input id="crosswordCol" type="number" min="1" max="20" value="1" oninput="renderCrosswordBuilder()" /></div>
+              <div style="grid-column:span 2;"><label>정답</label><input id="crosswordAnswer" placeholder="예: 화북천" oninput="renderCrosswordBuilder()" /></div>
+            </div>
+            <label>문제 문구</label><textarea id="crosswordClue" rows="3" placeholder="예: 별도봉에서 흘러 바다와 만나는 하천의 이름은?" oninput="renderCrosswordBuilder()"></textarea>
+            <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+              <button type="button" id="crosswordEntrySaveButton" onclick="saveCrosswordEntry()">문제 추가</button>
+              <button type="button" class="secondary" onclick="clearCrosswordEntryEditor()">입력칸 비우기</button>
+            </div>
+            <p id="crosswordStatus" class="small">문제를 입력하면 미리보기가 표시됩니다.</p>
+            <div class="crossword-board-scroll"><div id="crosswordBoard" class="crossword-board"></div></div>
+            <div id="crosswordEntryList" class="table-wrap crossword-entry-list"></div>
+            <p class="small">출제 시작 순서는 가로 문제 번호순, 그다음 세로 문제 번호순입니다. 참가자는 문제 버튼 또는 “가로 3번” 같은 입력으로 순서를 바꿀 수 있고, 다른 미완료 문제의 정답을 바로 입력해도 정답 처리됩니다.</p>
+          </div>
           <label style="display:flex;gap:8px;align-items:center;margin-top:10px;"><input id="missionRequired" type="checkbox" checked style="width:auto;" /> 완주 조건에 포함</label>
           <p class="small">ON이면 이 미션을 완료해야 완주 미션이 자동으로 열립니다. 보너스/선택 미션은 OFF로 두세요. 완주 유형 미션은 이 값과 관계없이 마지막 완주 처리용으로 사용됩니다.</p>
           <label>질문/안내문</label><textarea id="missionQuestion" rows="3"></textarea>
-          <label>미션 이미지 업로드</label>
-          <input id="missionImages" type="file" accept="image/jpeg,image/png,image/webp" multiple />
-          <div id="missionImageStatus" class="small">등록된 미션 이미지 없음</div>
-          <p class="small">제한: 미션 이미지 최대 5장, 이미지 1장당 최대 5MB까지 선택할 수 있습니다. 2MB를 넘는 이미지는 업로드 전 자동 최적화됩니다.</p>
+          <div id="missionImageUploadBox">
+            <label>미션 이미지 업로드</label>
+            <input id="missionImages" type="file" accept="image/jpeg,image/png,image/webp" multiple />
+            <div id="missionImageStatus" class="small">등록된 미션 이미지 없음</div>
+            <p class="small">제한: 미션 이미지 최대 5장, 이미지 1장당 최대 5MB까지 선택할 수 있습니다. 2MB를 넘는 이미지는 업로드 전 자동 최적화됩니다.</p>
+          </div>
           <label id="missionAnswerLabel">정답</label><input id="missionAnswer" placeholder="주관식: 해신사|해 신 사 / 객관식: 1" />
-          <label>오답 시 출력 멘트</label><textarea id="missionWrongMessage" rows="3" placeholder="비워두면 기본 오답 안내가 표시됩니다. 사용 가능: {wrong_count}, {wrong_penalty}, {available_score}, {distance_m}, {radius_m}, {hint}, {mission_name}, {actor_name}"></textarea>
+          <label>오답 시 출력 멘트</label><textarea id="missionWrongMessage" rows="3" placeholder="비워두면 기본 오답 안내가 표시됩니다. 사용 가능: {wrong_count}, {wrong_penalty}, {available_score}, {distance_m}, {radius_m}, {hint}, {mission_name}, {actor_name}, {direction_label}, {clue_number}, {clue}"></textarea>
           <label>정답 설명</label><textarea id="missionAnswerExplanation" rows="4" placeholder="예: 해신사는 바다의 안전과 풍어를 기원하던 장소입니다."></textarea>
           <label>정답 설명 이미지 업로드</label>
           <input id="answerImages" type="file" accept="image/jpeg,image/png,image/webp" multiple />
@@ -522,6 +561,7 @@
             <h3>기본·시스템 문구 전체 설정</h3>
             <p class="small">점수, 순위, 팀 참가/수정, 사진 접수·승인·반려처럼 기존에 코드가 자동으로 붙이던 문구입니다. 치환값은 중괄호 그대로 유지하고 나머지 어투를 행사 테마에 맞게 바꿀 수 있습니다.</p>
             <p class="small">다른 팀원이 완료한 미션 안내에서는 <b>{completed_actor_name}</b>을 완료한 팀원의 이름으로 사용할 수 있습니다.</p>
+            <p class="small">십자말풀이 문구에서는 <b>{mission_question}, {direction_label}, {clue_number}, {clue}, {solved_count}, {remaining_count}, {clue_count}, {answered_direction_label}, {answered_clue_number}, {requested_problem}, {wrong_count}, {wrong_penalty}, {available_score}</b>를 사용할 수 있습니다.</p>
             <div id="systemMessageFields"></div>
 
             <div style="height:12px"></div>
@@ -545,6 +585,7 @@ let kakaoSkillKey = '';
 let currentEventId = localStorage.getItem('currentEventId') || '';
 let knownPendingPhotoIds = new Set();
 let notificationEnabled = false;
+let crosswordEntries = [];
 
 function authHeaders() {
   const pw = adminPassword || localStorage.getItem('adminPassword') || localStorage.getItem('admin_password') || '';
@@ -1357,23 +1398,220 @@ async function deleteSubmissionOriginals() {
 function quizTypeLabel(v) {
   return v === 'choice' ? '객관식' : (v === 'sequence' ? '순서형' : '주관식');
 }
+function missionTypeLabel(v) {
+  return ({ quiz:'퀴즈', crossword:'십자말풀이', photo:'사진', gps:'GPS', visit:'방문문구', complete:'완주' })[v] || v;
+}
+function crosswordDirectionLabel(direction) {
+  return direction === 'down' ? '세로' : '가로';
+}
+function normalizeCrosswordWord(value) {
+  return String(value || '').normalize('NFC').trim().replace(/[^\p{L}\p{N}]/gu, '');
+}
+function crosswordPlayOrder(entries = crosswordEntries) {
+  return [...entries].sort((a, b) => {
+    const directionOrder = (a.direction === 'across' ? 0 : 1) - (b.direction === 'across' ? 0 : 1);
+    return directionOrder || Number(a.number) - Number(b.number) || Number(a.row) - Number(b.row) || Number(a.col) - Number(b.col);
+  });
+}
+function crosswordBoardSize() {
+  return {
+    rows: Math.min(20, Math.max(3, Math.floor(Number($('crosswordRows')?.value || 8)))),
+    cols: Math.min(20, Math.max(3, Math.floor(Number($('crosswordCols')?.value || 8)))),
+  };
+}
+function currentCrosswordDraft() {
+  const { rows, cols } = crosswordBoardSize();
+  return {
+    id: $('crosswordEntryId')?.value || '__draft__',
+    number: Math.min(99, Math.max(1, Math.floor(Number($('crosswordNumber')?.value || 1)))),
+    direction: $('crosswordDirection')?.value === 'down' ? 'down' : 'across',
+    row: Math.min(rows, Math.max(1, Math.floor(Number($('crosswordRow')?.value || 1)))),
+    col: Math.min(cols, Math.max(1, Math.floor(Number($('crosswordCol')?.value || 1)))),
+    answer: normalizeCrosswordWord($('crosswordAnswer')?.value || '').slice(0, 20),
+    clue: String($('crosswordClue')?.value || '').trim().slice(0, 500),
+    draft: true,
+  };
+}
+function buildCrosswordCellMap(entries, rows, cols, requireText = false) {
+  const cells = new Map();
+  const numbers = new Set();
+  for (const entry of entries) {
+    const direction = entry.direction === 'down' ? 'down' : 'across';
+    const directionNumber = `${direction}:${Number(entry.number)}`;
+    if (numbers.has(directionNumber)) throw new Error(`${crosswordDirectionLabel(direction)} ${entry.number}번 문제가 중복되었습니다.`);
+    numbers.add(directionNumber);
+    const answer = normalizeCrosswordWord(entry.answer);
+    if (!answer) {
+      if (requireText) throw new Error(`${crosswordDirectionLabel(direction)} ${entry.number}번 정답을 입력해주세요.`);
+      continue;
+    }
+    if (requireText && !String(entry.clue || '').trim()) throw new Error(`${crosswordDirectionLabel(direction)} ${entry.number}번 문제 문구를 입력해주세요.`);
+    const letters = [...answer];
+    const endRow = Number(entry.row) + (direction === 'down' ? letters.length - 1 : 0);
+    const endCol = Number(entry.col) + (direction === 'across' ? letters.length - 1 : 0);
+    if (Number(entry.row) < 1 || Number(entry.col) < 1 || endRow > rows || endCol > cols) {
+      throw new Error(`${crosswordDirectionLabel(direction)} ${entry.number}번 정답이 문제판 범위를 벗어납니다.`);
+    }
+    letters.forEach((letter, offset) => {
+      const row = Number(entry.row) + (direction === 'down' ? offset : 0);
+      const col = Number(entry.col) + (direction === 'across' ? offset : 0);
+      const key = `${row}:${col}`;
+      const current = cells.get(key);
+      if (current && current.letter !== letter) throw new Error(`${row}행 ${col}열에서 '${current.letter}'와 '${letter}'가 겹칩니다.`);
+      if (current?.directions?.has(direction)) throw new Error(`${row}행 ${col}열에서 같은 방향의 정답이 겹칩니다.`);
+      const cell = current || { letter, numbers: [], directions: new Set(), draft: false };
+      cell.directions.add(direction);
+      cell.draft = cell.draft || entry.draft === true;
+      if (offset === 0 && !cell.numbers.includes(Number(entry.number))) cell.numbers.push(Number(entry.number));
+      cells.set(key, cell);
+    });
+  }
+  return cells;
+}
+function renderCrosswordBuilder() {
+  if (!$('crosswordBoard')) return;
+  const { rows, cols } = crosswordBoardSize();
+  $('crosswordRows').value = rows;
+  $('crosswordCols').value = cols;
+  const draft = currentCrosswordDraft();
+  const previewEntries = crosswordEntries.filter(entry => String(entry.id) !== String(draft.id));
+  if (draft.answer) previewEntries.push(draft);
+  let cells = new Map();
+  try {
+    cells = buildCrosswordCellMap(previewEntries, rows, cols, false);
+    $('crosswordStatus').textContent = crosswordEntries.length
+      ? `등록된 문제 ${crosswordEntries.length}개 · 문제판 ${rows}행 × ${cols}열`
+      : '첫 문제의 정답과 위치를 입력해보세요.';
+    $('crosswordStatus').style.color = '';
+  } catch (error) {
+    $('crosswordStatus').textContent = error.message;
+    $('crosswordStatus').style.color = '#b42323';
+  }
+  $('crosswordBoard').style.gridTemplateColumns = `repeat(${cols}, var(--cw-cell))`;
+  const board = [];
+  for (let row = 1; row <= rows; row += 1) {
+    for (let col = 1; col <= cols; col += 1) {
+      const cell = cells.get(`${row}:${col}`);
+      const className = `crossword-cell${cell ? ' used' : ''}${cell?.draft ? ' draft' : ''}`;
+      const number = cell?.numbers?.length ? `<span class="crossword-cell-number">${cell.numbers.sort((a,b)=>a-b).join('·')}</span>` : '';
+      board.push(`<div class="${className}">${number}${cell ? esc(cell.letter) : ''}</div>`);
+    }
+  }
+  $('crosswordBoard').innerHTML = board.join('');
+
+  const ordered = crosswordPlayOrder();
+  $('crosswordEntryList').innerHTML = ordered.length
+    ? `<table><thead><tr><th>번호</th><th>정답</th><th>시작</th><th>문제</th><th>관리</th></tr></thead><tbody>${ordered.map(entry => `<tr><td>${crosswordDirectionLabel(entry.direction)} ${entry.number}번</td><td>${esc(entry.answer)}</td><td>${entry.row}행 ${entry.col}열</td><td>${esc(entry.clue)}</td><td><button type="button" class="secondary" onclick="editCrosswordEntry('${esc(entry.id)}')">수정</button> <button type="button" class="danger" onclick="deleteCrosswordEntry('${esc(entry.id)}')">삭제</button></td></tr>`).join('')}</tbody></table>`
+    : '<p class="small" style="padding:0 10px;">아직 추가한 문제가 없습니다.</p>';
+}
+function clearCrosswordEntryEditor() {
+  $('crosswordEntryId').value = '';
+  const direction = $('crosswordDirection')?.value === 'down' ? 'down' : 'across';
+  const sameDirection = crosswordEntries.filter(entry => entry.direction === direction);
+  $('crosswordNumber').value = sameDirection.length ? Math.max(...sameDirection.map(entry => Number(entry.number) || 0)) + 1 : 1;
+  $('crosswordRow').value = 1;
+  $('crosswordCol').value = 1;
+  $('crosswordAnswer').value = '';
+  $('crosswordClue').value = '';
+  $('crosswordEntrySaveButton').textContent = '문제 추가';
+  renderCrosswordBuilder();
+}
+function saveCrosswordEntry() {
+  try {
+    const { rows, cols } = crosswordBoardSize();
+    const draft = currentCrosswordDraft();
+    if (!draft.answer) throw new Error('정답을 입력해주세요.');
+    if (!draft.clue) throw new Error('문제 문구를 입력해주세요.');
+    if (draft.id === '__draft__') draft.id = `cw-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    draft.draft = false;
+    const nextEntries = crosswordEntries.filter(entry => String(entry.id) !== String(draft.id));
+    nextEntries.push(draft);
+    buildCrosswordCellMap(nextEntries, rows, cols, true);
+    crosswordEntries = nextEntries;
+    clearCrosswordEntryEditor();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+function editCrosswordEntry(id) {
+  const entry = crosswordEntries.find(item => String(item.id) === String(id));
+  if (!entry) return;
+  $('crosswordEntryId').value = entry.id;
+  $('crosswordNumber').value = entry.number;
+  $('crosswordDirection').value = entry.direction;
+  $('crosswordRow').value = entry.row;
+  $('crosswordCol').value = entry.col;
+  $('crosswordAnswer').value = entry.answer;
+  $('crosswordClue').value = entry.clue;
+  $('crosswordEntrySaveButton').textContent = '문제 수정 반영';
+  renderCrosswordBuilder();
+}
+function deleteCrosswordEntry(id) {
+  if (!confirm('이 십자말풀이 문제를 삭제할까요?')) return;
+  crosswordEntries = crosswordEntries.filter(entry => String(entry.id) !== String(id));
+  if ($('crosswordEntryId').value === String(id)) clearCrosswordEntryEditor();
+  else renderCrosswordBuilder();
+}
+function loadCrosswordData(value) {
+  let data = value;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch (_) { data = {}; }
+  }
+  data = data && typeof data === 'object' ? data : {};
+  $('crosswordRows').value = Math.min(20, Math.max(3, Number(data.rows || 8)));
+  $('crosswordCols').value = Math.min(20, Math.max(3, Number(data.cols || 8)));
+  $('crosswordDirection').value = 'across';
+  crosswordEntries = Array.isArray(data.entries) ? data.entries.map((entry, index) => ({
+    id: String(entry.id || `cw-loaded-${index + 1}`),
+    number: Number(entry.number || index + 1),
+    direction: entry.direction === 'down' ? 'down' : 'across',
+    row: Number(entry.row || 1),
+    col: Number(entry.col || 1),
+    answer: normalizeCrosswordWord(entry.answer).slice(0, 20),
+    clue: String(entry.clue || '').trim().slice(0, 500),
+  })) : [];
+  clearCrosswordEntryEditor();
+}
+function collectCrosswordData() {
+  const { rows, cols } = crosswordBoardSize();
+  const draft = currentCrosswordDraft();
+  if (draft.answer || draft.clue) {
+    if (!draft.answer || !draft.clue) throw new Error('입력 중인 십자말풀이 문제의 정답과 문제 문구를 모두 입력해주세요.');
+    if (draft.id === '__draft__') draft.id = `cw-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    draft.draft = false;
+    const nextEntries = crosswordEntries.filter(entry => String(entry.id) !== String(draft.id));
+    nextEntries.push(draft);
+    buildCrosswordCellMap(nextEntries, rows, cols, true);
+    crosswordEntries = nextEntries;
+  }
+  if (!crosswordEntries.length) throw new Error('십자말풀이 문제를 1개 이상 추가해주세요.');
+  buildCrosswordCellMap(crosswordEntries, rows, cols, true);
+  return { rows, cols, entries: crosswordPlayOrder().map(({ draft, ...entry }) => entry) };
+}
 function toggleQuizFields() {
-  const isQuiz = $('missionType')?.value === 'quiz';
+  const missionType = $('missionType')?.value || 'quiz';
+  const isQuiz = missionType === 'quiz';
+  const isCrossword = missionType === 'crossword';
   const qType = $('missionQuizType')?.value || 'short';
   if ($('quizTypeBox')) $('quizTypeBox').style.display = isQuiz ? '' : 'none';
+  if ($('crosswordBox')) $('crosswordBox').classList.toggle('hidden', !isCrossword);
+  if ($('missionImageUploadBox')) $('missionImageUploadBox').classList.toggle('hidden', isCrossword);
   if ($('missionChoices')) $('missionChoices').style.display = isQuiz && qType !== 'short' ? '' : 'none';
   if ($('missionChoicesLabel')) $('missionChoicesLabel').style.display = isQuiz && qType !== 'short' ? '' : 'none';
   if ($('missionSequenceAnswer')) $('missionSequenceAnswer').style.display = isQuiz && qType === 'sequence' ? '' : 'none';
   if ($('missionSequenceAnswerLabel')) $('missionSequenceAnswerLabel').style.display = isQuiz && qType === 'sequence' ? '' : 'none';
   if ($('quizHelpText')) $('quizHelpText').style.display = isQuiz && qType !== 'short' ? '' : 'none';
   if ($('missionAnswerLabel')) {
+    $('missionAnswerLabel').style.display = isCrossword ? 'none' : '';
     $('missionAnswerLabel').textContent = qType === 'choice' ? '정답 번호' : (qType === 'sequence' ? '정답 순서 또는 예비 정답' : '정답(복수 정답은 | 로 구분)');
   }
   if ($('missionAnswer')) {
+    $('missionAnswer').style.display = isCrossword ? 'none' : '';
     $('missionAnswer').placeholder = qType === 'choice'
       ? '예: 1'
       : (qType === 'sequence' ? '예: 4,1,2,3' : '해신사|해 신 사');
   }
+  if (isCrossword) renderCrosswordBuilder();
 }
 
 async function loadMissions() {
@@ -1383,7 +1621,9 @@ async function loadMissions() {
     const missionImg = Number(m.mission_image_count || 0) > 0 ? `${m.mission_image_count}장` : (m.has_mission_image ? '1장' : '-');
     const answerImg = Number(m.answer_image_count || 0) > 0 ? `${m.answer_image_count}장` : '-';
     const nextMission = m.next_mission_code ? `${esc(m.next_mission_code)}<br><span class="small">${esc(m.next_mission_name || '')}</span>` : '-';
-    return `<tr><td>${esc(m.mission_code)}</td><td>${esc(m.mission_name)}</td><td>${esc(m.mission_type)}</td><td>${m.mission_type === 'quiz' ? quizTypeLabel(m.quiz_type) : '-'}</td><td>${m.mission_type === 'complete' ? '완주' : (m.is_required === false ? '제외' : '포함')}</td><td>${m.score}</td><td>${m.wrong_penalty ?? -5}</td><td>${m.hint_penalty ?? -10}</td><td>${nextMission}</td><td>${m.next_mission_message_template ? '사용자 문구' : '-'}</td><td>${missionImg}</td><td>${answerImg}</td><td>${m.wrong_message ? '있음' : '-'}</td><td>${m.answer_explanation ? '있음' : '-'}</td><td><button class="secondary" onclick="editMission(${m.id})">수정</button> <button class="danger" onclick="deleteMission(${m.id})">삭제</button></td></tr>`;
+    const crosswordCount = Array.isArray(m.crossword_data?.entries) ? m.crossword_data.entries.length : 0;
+    const quizMethod = m.mission_type === 'quiz' ? quizTypeLabel(m.quiz_type) : (m.mission_type === 'crossword' ? `${crosswordCount}문제` : '-');
+    return `<tr><td>${esc(m.mission_code)}</td><td>${esc(m.mission_name)}</td><td>${esc(missionTypeLabel(m.mission_type))}</td><td>${quizMethod}</td><td>${m.mission_type === 'complete' ? '완주' : (m.is_required === false ? '제외' : '포함')}</td><td>${m.score}</td><td>${m.wrong_penalty ?? -5}</td><td>${m.hint_penalty ?? -10}</td><td>${nextMission}</td><td>${m.next_mission_message_template ? '사용자 문구' : '-'}</td><td>${missionImg}</td><td>${answerImg}</td><td>${m.wrong_message ? '있음' : '-'}</td><td>${m.answer_explanation ? '있음' : '-'}</td><td><button class="secondary" onclick="editMission(${m.id})">수정</button> <button class="danger" onclick="deleteMission(${m.id})">삭제</button></td></tr>`;
   }).join('');
   fillNextMissionOptions($('missionNextId')?.value || '', $('missionId')?.value || '');
 }
@@ -1423,6 +1663,7 @@ function editMission(id) {
   $('missionFormTitle').textContent = '미션 수정';
   $('missionId').value = m.id; $('missionCode').value = m.mission_code; $('missionName').value = m.mission_name; $('missionType').value = m.mission_type;
   $('missionQuestion').value = m.question; $('missionAnswer').value = m.answer; $('missionQuizType').value = m.quiz_type || 'short'; $('missionChoices').value = m.choices || ''; $('missionSequenceAnswer').value = m.sequence_answer || ''; $('missionWrongMessage').value = m.wrong_message || ''; $('missionAnswerExplanation').value = m.answer_explanation || ''; $('missionScore').value = m.score; $('missionWrongPenalty').value = m.wrong_penalty ?? -5; $('missionHintPenalty').value = m.hint_penalty ?? -10; $('missionHint').value = m.hint; $('missionRequired').checked = m.is_required !== false;
+  loadCrosswordData(m.crossword_data || { rows:8, cols:8, entries:[] });
   fillNextMissionOptions(m.next_mission_id || '', m.id);
   $('missionNextButtonLabel').value = (m.next_mission_button_label || '다음 미션 시작').slice(0, 12);
   updateNextMissionButtonCount();
@@ -1445,6 +1686,7 @@ function clearMissionForm() {
   $('missionImages').value=''; $('answerImages').value='';
   $('missionImageStatus').textContent='등록된 미션 이미지 없음';
   $('answerImageStatus').textContent='등록된 정답 설명 이미지 없음';
+  loadCrosswordData({ rows:8, cols:8, entries:[] });
   toggleQuizFields();
 }
 const MISSION_IMAGE_LIMITS = { maxCount: 5, uploadMaxBytes: 5 * 1024 * 1024, targetBytes: 2 * 1024 * 1024, allowed: ['image/jpeg','image/png','image/webp'] };
@@ -1572,10 +1814,13 @@ async function uploadMissionImages(missionId, kind, inputId) {
 }
 async function saveMission() {
   try {
+    const isCrossword = $('missionType').value === 'crossword';
+    const crosswordData = isCrossword ? collectCrosswordData() : { rows:8, cols:8, entries:[] };
     const body = {
       mission_code:$('missionCode').value.trim(), mission_name:$('missionName').value.trim(), mission_type:$('missionType').value,
       quiz_type:$('missionQuizType')?.value || 'short', choices:$('missionChoices')?.value || '', sequence_answer:$('missionSequenceAnswer')?.value || '',
-      question:$('missionQuestion').value, answer:$('missionAnswer').value, wrong_message:$('missionWrongMessage').value, answer_explanation:$('missionAnswerExplanation').value, score:Number($('missionScore').value||0), wrong_penalty:Number($('missionWrongPenalty').value||-5), hint_penalty:Number($('missionHintPenalty').value||-10), hint:$('missionHint').value,
+      crossword_data:crosswordData,
+      question:$('missionQuestion').value, answer:isCrossword ? '' : $('missionAnswer').value, wrong_message:$('missionWrongMessage').value, answer_explanation:$('missionAnswerExplanation').value, score:Number($('missionScore').value||0), wrong_penalty:Number($('missionWrongPenalty').value||-5), hint_penalty:Number($('missionHintPenalty').value||-10), hint:$('missionHint').value,
       next_mission_id:$('missionNextId')?.value ? Number($('missionNextId').value) : null,
       next_mission_button_label:($('missionNextButtonLabel')?.value || '다음 미션 시작').trim().slice(0, 12),
       next_mission_message_template:($('missionNextMessageTemplate')?.value || '').trim(),
@@ -1585,7 +1830,7 @@ async function saveMission() {
     const id = $('missionId').value;
     const data = await api(id ? `/api/admin/missions/${id}` : '/api/admin/missions', { method:id?'PATCH':'POST', body: JSON.stringify(body) });
     const missionId = id || data.mission.id;
-    await uploadMissionImages(missionId, 'mission', 'missionImages');
+    if (!isCrossword) await uploadMissionImages(missionId, 'mission', 'missionImages');
     await uploadMissionImages(missionId, 'answer', 'answerImages');
     clearMissionForm(); await loadAll();
     alert('미션이 저장되었습니다.');
