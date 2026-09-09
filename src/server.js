@@ -4311,10 +4311,17 @@ async function missionCompletionResponse(req, event, mission, text, quickReplies
   const team = options.team || {};
   const messageSettings = options.settings || await getMessageSettings(event.id);
   const cardTitle = visibleRawTitle(messageSettings, title);
-  const [autoCompleteMission, linkedMission] = await Promise.all([
-    activateCompleteMissionIfReady(event.id, team, mission),
-    getLinkedNextMission(event.id, mission),
-  ]);
+  let autoCompleteMission;
+  let linkedMission;
+  if (options.progressionResolved === true) {
+    autoCompleteMission = options.autoCompleteMission || null;
+    linkedMission = options.linkedMission || null;
+  } else {
+    [autoCompleteMission, linkedMission] = await Promise.all([
+      activateCompleteMissionIfReady(event.id, team, mission),
+      getLinkedNextMission(event.id, mission),
+    ]);
+  }
 
   let buttons = [];
   let finalText = text;
@@ -4700,13 +4707,174 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
   return markMissionCompletedResponse(kakaoText(finalText, [...buttons, ...approvedPhotoQuickReplies]));
 }
 
+const COMPLETE_CROSSWORD_MISSION_SQL = `/* crossword-finalize-single-roundtrip */
+     WITH saved_answer AS (
+       INSERT INTO submissions(
+         event_id, team_id, mission_id, answer_text, actor_kakao_user_id,
+         actor_name, status, score, submission_key
+       )
+       SELECT $1,$2,$3,$4,$5,$6,'correct',$7,'crossword:complete'
+       WHERE NOT EXISTS (
+         SELECT 1 FROM submissions
+         WHERE team_id=$2 AND mission_id=$3 AND status IN ('correct','approved')
+       )
+       ON CONFLICT DO NOTHING
+       RETURNING mission_id, score
+     ), saved_state AS (
+       INSERT INTO user_states(event_id, kakao_user_id, state, data, updated_at)
+       SELECT $1,$5,'RECENT_CROSSWORD_COMPLETION',$8,NOW()
+       FROM saved_answer
+       ON CONFLICT(event_id, kakao_user_id)
+       DO UPDATE SET state=EXCLUDED.state, data=EXCLUDED.data, updated_at=NOW()
+       RETURNING id
+     ), combined_scores AS MATERIALIZED (
+       SELECT mission_id, score
+       FROM submissions
+       WHERE team_id=$2 AND status IN ('correct','approved')
+       UNION ALL
+       SELECT mission_id, score FROM saved_answer
+     ), mission_scores AS MATERIALIZED (
+       SELECT mission_id, MAX(score)::int AS score
+       FROM combined_scores
+       GROUP BY mission_id
+     ), score_summary AS MATERIALIZED (
+       SELECT
+         (
+           COALESCE((SELECT SUM(score) FROM mission_scores), 0)
+           + COALESCE((
+             SELECT SUM(se.score_delta)
+             FROM score_events se
+             WHERE se.team_id=$2
+               AND (
+                 se.event_type NOT IN ('hint','wrong')
+                 OR EXISTS (SELECT 1 FROM mission_scores completed WHERE completed.mission_id=se.mission_id)
+               )
+           ), 0)
+         )::int AS total,
+         COALESCE((
+           SELECT SUM(score_delta) FROM score_events
+           WHERE team_id=$2 AND mission_id=$3
+         ), 0)::int AS mission_adjustment,
+         COALESCE((
+           SELECT SUM(score_delta) FROM score_events
+           WHERE team_id=$2 AND mission_id=$3 AND event_type='wrong'
+         ), 0)::int AS wrong_penalty_total,
+         COALESCE((
+           SELECT SUM(score_delta) FROM score_events
+           WHERE team_id=$2 AND mission_id=$3 AND event_type='hint'
+         ), 0)::int AS hint_penalty_total,
+         COALESCE((
+           SELECT COUNT(*) FROM submissions
+           WHERE team_id=$2 AND mission_id=$3 AND status='wrong'
+         ), 0)::int AS wrong_count
+     ), ready_complete AS MATERIALIZED (
+       SELECT complete_mission.id, complete_mission.event_id, complete_mission.mission_code,
+              complete_mission.mission_name, complete_mission.mission_type,
+              complete_mission.question, complete_mission.answer,
+              complete_mission.answer_explanation, complete_mission.sort_order
+       FROM missions complete_mission
+       WHERE complete_mission.event_id=$1
+         AND complete_mission.mission_type='complete'
+         AND NOT EXISTS (
+           SELECT 1 FROM mission_scores completed
+           WHERE completed.mission_id=complete_mission.id
+         )
+         AND EXISTS (
+           SELECT 1 FROM missions required
+           WHERE required.event_id=$1
+             AND required.is_required=TRUE
+             AND required.mission_type <> 'complete'
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM missions required
+           WHERE required.event_id=$1
+             AND required.is_required=TRUE
+             AND required.mission_type <> 'complete'
+             AND NOT EXISTS (
+               SELECT 1 FROM mission_scores completed
+               WHERE completed.mission_id=required.id
+             )
+         )
+       ORDER BY complete_mission.sort_order ASC, complete_mission.id ASC
+       LIMIT 1
+     ), activated AS (
+       UPDATE teams target_team
+       SET current_mission_id=ready_complete.id
+       FROM ready_complete
+       WHERE target_team.id=$2 AND target_team.event_id=$1 AND target_team.status <> 'finished'
+       RETURNING ready_complete.*
+     ), linked_mission AS MATERIALIZED (
+       SELECT next_mission.id, next_mission.mission_code, next_mission.mission_name, next_mission.mission_type
+       FROM missions current_mission
+       JOIN missions next_mission
+         ON next_mission.id=current_mission.next_mission_id
+        AND next_mission.event_id=current_mission.event_id
+       WHERE current_mission.id=$3 AND current_mission.event_id=$1
+       LIMIT 1
+     ), answer_images AS MATERIALIZED (
+       SELECT id, mission_id, image_kind, image_mime, file_name, sort_order, created_at
+       FROM mission_images
+       WHERE mission_id=$3 AND image_kind='answer'
+       ORDER BY sort_order ASC, id ASC
+     )
+     SELECT
+       EXISTS(SELECT 1 FROM saved_answer) AS answer_saved,
+       EXISTS(SELECT 1 FROM saved_state) AS state_saved,
+       score_summary.total,
+       score_summary.mission_adjustment,
+       score_summary.wrong_penalty_total,
+       score_summary.hint_penalty_total,
+       score_summary.wrong_count,
+       COALESCE((
+         SELECT jsonb_agg(to_jsonb(answer_images) ORDER BY answer_images.sort_order, answer_images.id)
+         FROM answer_images
+       ), '[]'::jsonb) AS answer_images,
+       (SELECT to_jsonb(activated) FROM activated LIMIT 1) AS auto_complete_mission,
+       (SELECT to_jsonb(linked_mission) FROM linked_mission LIMIT 1) AS linked_mission
+     FROM score_summary;`;
+
+async function completeCrosswordMission(event, team, mission, kakaoUserId, actorName, solvedIds, progress) {
+  const result = await query(
+    COMPLETE_CROSSWORD_MISSION_SQL,
+    [
+      event.id,
+      team.id,
+      mission.id,
+      JSON.stringify(solvedIds),
+      kakaoUserId,
+      actorName,
+      Number(mission.score || 0),
+      JSON.stringify(progress),
+    ]
+  );
+  const row = result.rows[0] || {};
+  return {
+    answerSaved: row.answer_saved === true,
+    stateSaved: row.state_saved === true,
+    summary: {
+      total: Number(row.total || 0),
+      missionAdjustment: Number(row.mission_adjustment || 0),
+      wrongPenaltyTotal: Number(row.wrong_penalty_total || 0),
+      hintPenaltyTotal: Number(row.hint_penalty_total || 0),
+      wrongCount: Number(row.wrong_count || 0),
+    },
+    answerImages: Array.isArray(row.answer_images) ? row.answer_images : [],
+    autoCompleteMission: row.auto_complete_mission || null,
+    linkedMission: row.linked_mission || null,
+  };
+}
+
 async function buildQuizMissionSuccessResponse(req, event, team, mission, kakaoUserId, actorName, messages, options = {}) {
-  // 정답 직후 총점과 감점 종류를 네 번 따로 조회하면 연결 대기까지 겹쳐
-  // 순서형 마지막 선택에서 카카오 응답 제한을 넘길 수 있습니다.
-  const [summary, answerImages] = await Promise.all([
-    missionCompletionScoreSummary(team.id, mission.id),
-    getMissionImages(mission.id, 'answer'),
-  ]);
+  // 단일 완료 쿼리에서 계산된 값이 있으면 추가 DB 조회 없이 응답을 조립합니다.
+  let summary = options.summary || null;
+  let answerImages = Array.isArray(options.answerImages) ? options.answerImages : null;
+  if (!summary || !answerImages) {
+    [summary, answerImages] = await Promise.all([
+      summary ? Promise.resolve(summary) : missionCompletionScoreSummary(team.id, mission.id),
+      answerImages ? Promise.resolve(answerImages) : getMissionImages(mission.id, 'answer'),
+    ]);
+  }
   if (options.scheduleSideEffects !== false) {
     scheduleMissionCompletedSideEffects(event, team, mission, kakaoUserId, actorName, summary.total);
   }
@@ -4749,7 +4917,15 @@ async function buildQuizMissionSuccessResponse(req, event, team, mission, kakaoU
     menuQuickReplies,
     finalImageUrls,
     `${mission.mission_code} ${mission.mission_name} 정답 설명`,
-    { team, actorName, total: summary.total, settings: messages }
+    {
+      team,
+      actorName,
+      total: summary.total,
+      settings: messages,
+      progressionResolved: options.progressionResolved === true,
+      autoCompleteMission: options.autoCompleteMission || null,
+      linkedMission: options.linkedMission || null,
+    }
   );
 }
 
@@ -5009,18 +5185,14 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
         currentEntryId: answeredKey,
         finalAnswer: answeredEntry.answer,
       };
-      await query(
-        `WITH saved_answer AS (
-           INSERT INTO submissions(event_id, team_id, mission_id, answer_text, actor_kakao_user_id, actor_name, status, score)
-           VALUES ($1,$2,$3,$4,$5,$6,'correct',$7)
-           RETURNING id
-         )
-         INSERT INTO user_states(event_id, kakao_user_id, state, data, updated_at)
-         SELECT $1,$5,'RECENT_CROSSWORD_COMPLETION',$8,NOW()
-         FROM saved_answer
-         ON CONFLICT(event_id, kakao_user_id)
-         DO UPDATE SET state=EXCLUDED.state, data=EXCLUDED.data, updated_at=NOW();`,
-        [event.id, team.id, mission.id, JSON.stringify(solvedIds), kakaoUserId, actorName, Number(mission.score || 0), JSON.stringify(progress)]
+      const completionResult = await completeCrosswordMission(
+        event,
+        team,
+        mission,
+        kakaoUserId,
+        actorName,
+        solvedIds,
+        progress
       );
       return buildQuizMissionSuccessResponse(
         req,
@@ -5030,7 +5202,15 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
         kakaoUserId,
         actorName,
         messages,
-        { submittedScore: Number(mission.score || 0) }
+        {
+          submittedScore: Number(mission.score || 0),
+          scheduleSideEffects: completionResult.answerSaved,
+          summary: completionResult.summary,
+          answerImages: completionResult.answerImages,
+          progressionResolved: true,
+          autoCompleteMission: completionResult.autoCompleteMission,
+          linkedMission: completionResult.linkedMission,
+        }
       );
     }
 
@@ -7462,4 +7642,5 @@ export {
   validateCrosswordData,
   crosswordEntriesInPlayOrder,
   renderCrosswordBoardPng,
+  COMPLETE_CROSSWORD_MISSION_SQL,
 };
