@@ -1665,22 +1665,28 @@ function teamCreatedResponse(req, event, team, memberName, messages = DEFAULT_ME
   ));
 }
 
-function automaticParticipationResponse(req, event, team, memberName, messages = DEFAULT_MESSAGE_SETTINGS) {
+function automaticParticipationResponse(req, event, team, memberName, messages = DEFAULT_MESSAGE_SETTINGS, options = {}) {
   const cleanMemberName = String(memberName || team?.leader_name || '참가자').trim();
   const variables = {
     ...eventTemplateVars(event, team, cleanMemberName),
     member_name: cleanMemberName,
     actor_name: cleanMemberName,
   };
-  const baseText = renderTemplate(messages.automatic_participation_complete_message, variables);
+  // 팀명과 닉네임을 모두 사용하지 않는 행사는 "게임 시작" 한 번이
+  // 곧 참가 등록 완료이므로 관리자가 작성한 게임 시작 멘트를 바로 보여줍니다.
+  const showStartMessage = options.showStartMessage === true;
+  const baseText = renderTemplate(
+    showStartMessage ? messages.start_message : messages.automatic_participation_complete_message,
+    variables
+  );
   return skipKakaoCommonPostProcessing(kakaoTeamReadyMessage(
     req,
     messages,
-    'team_created',
+    showStartMessage ? 'start' : 'team_created',
     baseText,
     variables,
     menuQuickReplies,
-    '참가 등록 완료'
+    showStartMessage ? '미션 시작' : '참가 등록 완료'
   ));
 }
 
@@ -5610,7 +5616,11 @@ async function handleKakaoSkill(req, res) {
       await clearUserState(event.id, kakaoUserId);
       if (isRecent && (isSameNickname || isSameTeamName || isRepeatedAutomaticStart)) {
         const response = data.automatic === true || !participationFeatures.team_setup_enabled
-          ? automaticParticipationResponse(req, event, team, savedMemberName, messages)
+          ? automaticParticipationResponse(req, event, team, savedMemberName, messages, {
+              showStartMessage: !participationFeatures.team_setup_enabled
+                && !participationFeatures.nickname_setup_enabled
+                && isStartCommand(utterance),
+            })
           : teamCreatedResponse(req, event, team, savedMemberName, messages);
         return respondKakao(res, response);
       }
@@ -5642,7 +5652,9 @@ async function handleKakaoSkill(req, res) {
     if (!team && !participationFeatures.team_setup_enabled && userState?.state === 'WAIT_AUTO_NICKNAME') {
       if (!participationFeatures.nickname_setup_enabled) {
         team = await createTeam(event.id, kakaoUserId, '', '참가자', { automatic: true });
-        return respondKakao(res, automaticParticipationResponse(req, event, team, '참가자', messages));
+        return respondKakao(res, automaticParticipationResponse(req, event, team, '참가자', messages, {
+          showStartMessage: true,
+        }));
       }
       const memberName = cleanName(utterance);
       if (memberName.length < 2 || isBlockedTeamName(memberName)) {
@@ -5833,11 +5845,28 @@ async function handleKakaoSkill(req, res) {
             ));
           }
           team = await createTeam(event.id, kakaoUserId, '', '참가자', { automatic: true });
-          return respondKakao(res, automaticParticipationResponse(req, event, team, '참가자', messages));
+          return respondKakao(res, automaticParticipationResponse(req, event, team, '참가자', messages, {
+            showStartMessage: true,
+          }));
         }
         return respondKakao(
           res,
           kakaoConfiguredMessage(req, messages, 'start', renderTemplate(messages.start_message, eventTemplateVars(event)), startQuickReplies, '')
+        );
+      }
+      if (
+        isStartCommand(utterance)
+        && !participationFeatures.team_setup_enabled
+        && !participationFeatures.nickname_setup_enabled
+      ) {
+        return respondKakao(
+          res,
+          automaticParticipationResponse(req, event, team, team.leader_name || '참가자', messages, {
+            showStartMessage: true,
+          }),
+          event,
+          team,
+          kakaoUserId
         );
       }
       return respondKakao(
