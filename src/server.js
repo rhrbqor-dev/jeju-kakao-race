@@ -722,6 +722,7 @@ async function copyEventContent(sourceEventId, targetEventId) {
     [targetEventId, sourceEventId]
   );
   messageSettingsCache.delete(Number(targetEventId));
+  participationFeatureSettingsCache.delete(Number(targetEventId));
 }
 
 async function ensureAppSettingsTable() {
@@ -739,6 +740,7 @@ async function ensureAppSettingsTable() {
 }
 
 const messageSettingsCache = new Map();
+const participationFeatureSettingsCache = new Map();
 
 async function getSetting(eventId, settingKey, defaultValue = {}) {
   // app_settings는 서버 시작 시 initDb에서 생성합니다. 매 챗봇 요청마다
@@ -768,6 +770,56 @@ async function setSetting(eventId, settingKey, settingValue = {}) {
     [eventId, settingKey, JSON.stringify(settingValue || {})]
   );
   if (settingKey === 'chatbot_messages') messageSettingsCache.delete(Number(eventId));
+  if (settingKey === 'participation_features') participationFeatureSettingsCache.delete(Number(eventId));
+}
+
+
+
+const DEFAULT_PARTICIPATION_FEATURE_SETTINGS = {
+  team_setup_enabled: true,
+  nickname_setup_enabled: true,
+  realtime_ranking_enabled: true,
+};
+
+function normalizeFeatureBoolean(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (value === true || value === 'true' || value === 'on' || value === 1 || value === '1') return true;
+  if (value === false || value === 'false' || value === 'off' || value === 0 || value === '0') return false;
+  return fallback;
+}
+
+function normalizeParticipationFeatureSettings(value = {}) {
+  const incoming = value && typeof value === 'object' ? value : {};
+  return {
+    team_setup_enabled: normalizeFeatureBoolean(
+      incoming.team_setup_enabled,
+      DEFAULT_PARTICIPATION_FEATURE_SETTINGS.team_setup_enabled
+    ),
+    nickname_setup_enabled: normalizeFeatureBoolean(
+      incoming.nickname_setup_enabled,
+      DEFAULT_PARTICIPATION_FEATURE_SETTINGS.nickname_setup_enabled
+    ),
+    realtime_ranking_enabled: normalizeFeatureBoolean(
+      incoming.realtime_ranking_enabled,
+      DEFAULT_PARTICIPATION_FEATURE_SETTINGS.realtime_ranking_enabled
+    ),
+  };
+}
+
+async function getParticipationFeatureSettings(eventId) {
+  const cacheKey = Number(eventId);
+  if (participationFeatureSettingsCache.has(cacheKey)) {
+    return participationFeatureSettingsCache.get(cacheKey);
+  }
+  const saved = await getSetting(eventId, 'participation_features', DEFAULT_PARTICIPATION_FEATURE_SETTINGS);
+  const settings = normalizeParticipationFeatureSettings(saved);
+  participationFeatureSettingsCache.set(cacheKey, settings);
+  return settings;
+}
+
+function rememberParticipationFeatureSettings(eventId, settings) {
+  participationFeatureSettingsCache.set(Number(eventId), settings);
+  return settings;
 }
 
 
@@ -1039,6 +1091,13 @@ const SYSTEM_MESSAGE_SETTING_DEFINITIONS = [
   { textKey: 'edit_team_name_complete_message', label: '팀명 수정 완료 안내' },
   { textKey: 'edit_member_name_prompt_message', label: '새 이름 입력 안내' },
   { textKey: 'edit_member_name_complete_message', label: '이름 수정 완료 안내' },
+  { textKey: 'nickname_only_prompt_message', label: '팀 설정 OFF일 때 닉네임 입력 안내' },
+  { textKey: 'automatic_participation_complete_message', label: '자동 참가 등록 완료 안내' },
+  { textKey: 'automatic_participation_start_message', label: '자동 참가 시작 필요 안내' },
+  { textKey: 'automatic_returning_message', label: '팀 설정 OFF 기존 참가자 안내' },
+  { textKey: 'team_setup_disabled_message', label: '팀 설정 OFF 명령 안내' },
+  { textKey: 'nickname_setup_disabled_message', label: '닉네임 설정 OFF 명령 안내' },
+  { textKey: 'ranking_disabled_message', label: '실시간 랭킹 OFF 안내' },
   { textKey: 'already_completed_by_member_message', label: '다른 팀원이 완료한 미션 안내' },
   { textKey: 'gps_web_success_message', label: 'GPS 웹 인증 완료 후 버튼 안내' },
   { textKey: 'gps_result_success_message', label: 'GPS 인증 결과 확인 성공 안내' },
@@ -1193,6 +1252,20 @@ const DEFAULT_MESSAGE_SETTINGS = {
   edit_member_name_complete_message: `이름/닉네임 수정 완료!
 
 새 이름: {member_name}`,
+  nickname_only_prompt_message: `참가자 이름 또는 닉네임을 입력해주세요.
+예: 홍길동`,
+  automatic_participation_complete_message: `참가 등록이 완료되었습니다.
+
+이름/닉네임: {member_name}`,
+  automatic_participation_start_message: `참여를 시작하려면 아래 "게임 시작" 버튼을 눌러주세요.`,
+  automatic_returning_message: `참여 중입니다.
+
+진행할 미션을 선택해주세요.`,
+  team_setup_disabled_message: `현재는 팀 설정을 사용하지 않습니다.
+
+참가자는 개인 단위로 자동 등록됩니다.`,
+  nickname_setup_disabled_message: `현재는 이름 또는 닉네임 설정을 사용하지 않습니다.`,
+  ranking_disabled_message: `현재 실시간 랭킹은 공개하지 않습니다.`,
   photo_mission_guide_message: `{question}
 
 아래 버튼을 눌러 사진을 업로드하면 운영자 승인 후 점수가 반영됩니다.`,
@@ -1381,6 +1454,43 @@ function teamCreatedResponse(req, event, team, memberName, messages = DEFAULT_ME
     variables,
     ['미션 목록', '팀원 목록', '도움말'],
     '팀 생성 완료'
+  ));
+}
+
+function automaticParticipationResponse(req, event, team, memberName, messages = DEFAULT_MESSAGE_SETTINGS) {
+  const cleanMemberName = String(memberName || team?.leader_name || '참가자').trim();
+  const variables = {
+    ...eventTemplateVars(event, team, cleanMemberName),
+    member_name: cleanMemberName,
+    actor_name: cleanMemberName,
+  };
+  const baseText = renderTemplate(messages.automatic_participation_complete_message, variables);
+  return skipKakaoCommonPostProcessing(kakaoTeamReadyMessage(
+    req,
+    messages,
+    'team_created',
+    baseText,
+    variables,
+    menuQuickReplies,
+    '참가 등록 완료'
+  ));
+}
+
+function joinedTeamResponse(req, event, team, memberName, messages = DEFAULT_MESSAGE_SETTINGS) {
+  const variables = {
+    ...eventTemplateVars(event, team, memberName),
+    member_name: memberName,
+    actor_name: memberName,
+  };
+  const joinText = renderTemplate(messages.join_complete_message, variables);
+  return skipKakaoCommonPostProcessing(kakaoTeamReadyMessage(
+    req,
+    messages,
+    'team_created',
+    joinText,
+    variables,
+    menuQuickReplies,
+    '팀 참가 완료'
   ));
 }
 
@@ -1935,7 +2045,10 @@ async function initDb() {
       id DESC
     LIMIT 1;
   `);
-  await Promise.all(settingsEvents.rows.map((row) => getMessageSettings(row.id)));
+  await Promise.all(settingsEvents.rows.flatMap((row) => [
+    getMessageSettings(row.id),
+    getParticipationFeatureSettings(row.id),
+  ]));
 }
 
 
@@ -2170,9 +2283,10 @@ async function generateTeamCode(eventId) {
   return `T${Date.now().toString(36).toUpperCase()}`;
 }
 
-async function createTeam(eventId, kakaoUserId, teamName, memberName = '팀장') {
+async function createTeam(eventId, kakaoUserId, teamName, memberName = '팀장', options = {}) {
   const leaderName = memberName || '팀장';
-  const recoveryData = JSON.stringify({ teamName, memberName: leaderName, createdAt: nowIso() });
+  const automatic = options?.automatic === true;
+  const recoveryData = JSON.stringify({ teamName, memberName: leaderName, automatic, createdAt: nowIso() });
   const startedAt = Date.now();
   try {
     // 행사별 카운터 갱신과 팀/팀원/복구 상태 저장을 하나의 원자적 SQL로 처리합니다.
@@ -2184,12 +2298,16 @@ async function createTeam(eventId, kakaoUserId, teamName, memberName = '팀장')
        ON CONFLICT(event_id)
        DO UPDATE SET next_number=event_team_counters.next_number + 1, updated_at=NOW()
        RETURNING next_number AS next_num
+     ), generated_team AS MATERIALIZED (
+       SELECT next_num,
+              'T' || CASE WHEN next_num < 1000 THEN LPAD(next_num::text, 3, '0') ELSE next_num::text END AS team_code
+       FROM next_code
      ), inserted_team AS (
        INSERT INTO teams(event_id, team_code, team_name, leader_name, kakao_user_id, public_token)
        SELECT $1,
-              'T' || CASE WHEN next_num < 1000 THEN LPAD(next_num::text, 3, '0') ELSE next_num::text END,
-              $3, $4, $2, $5
-       FROM next_code
+              team_code,
+              COALESCE(NULLIF(BTRIM($3), ''), team_code), $4, $2, $5
+       FROM generated_team
        RETURNING *
      ), inserted_member AS (
        INSERT INTO team_members(event_id, team_id, kakao_user_id, member_name, role)
@@ -2628,6 +2746,52 @@ function normalizeKakaoResponse(response) {
   return response;
 }
 
+const TEAM_SETUP_ACTIONS = new Set([
+  '팀 생성', '팀생성', '새 팀', '새팀', '팀 만들기', '팀만들기',
+  '팀 참가', '팀참가', '팀 합류', '팀합류', '참가코드 입력', '팀코드 입력',
+  '팀명 수정', '팀이름 수정', '팀 이름 수정', '팀명변경', '팀명 변경',
+  '팀원', '팀원 목록', '팀원보기', '팀원 보기', '우리 팀',
+]);
+const NICKNAME_SETUP_ACTIONS = new Set([
+  '이름 수정', '닉네임 수정', '내 이름 수정', '내 닉네임 수정', '이름변경', '닉네임변경',
+]);
+const REALTIME_RANKING_ACTIONS = new Set(['순위', '랭킹', '순위 보기']);
+
+function participationActionText(item = {}) {
+  if (typeof item === 'string') return item.trim();
+  return String(item?.messageText || item?.label || '').trim();
+}
+
+function participationActionVisible(item, features = DEFAULT_PARTICIPATION_FEATURE_SETTINGS) {
+  const text = participationActionText(item);
+  if (!features.team_setup_enabled && TEAM_SETUP_ACTIONS.has(text)) return false;
+  if (!features.nickname_setup_enabled && NICKNAME_SETUP_ACTIONS.has(text)) return false;
+  if (!features.realtime_ranking_enabled && REALTIME_RANKING_ACTIONS.has(text)) return false;
+  return true;
+}
+
+function applyParticipationFeatureVisibility(response, features = DEFAULT_PARTICIPATION_FEATURE_SETTINGS) {
+  if (!response?.template) return response;
+  const normalizedFeatures = normalizeParticipationFeatureSettings(features);
+  if (Array.isArray(response.template.quickReplies)) {
+    const replies = response.template.quickReplies.filter((item) => participationActionVisible(item, normalizedFeatures));
+    if (replies.length) response.template.quickReplies = replies;
+    else delete response.template.quickReplies;
+  }
+
+  const filterButtons = (card) => {
+    if (!card || !Array.isArray(card.buttons)) return;
+    card.buttons = card.buttons.filter((item) => participationActionVisible(item, normalizedFeatures));
+    if (!card.buttons.length) delete card.buttons;
+  };
+  for (const output of response.template.outputs || []) {
+    filterButtons(output?.basicCard);
+    filterButtons(output?.textCard);
+    for (const item of output?.carousel?.items || []) filterButtons(item);
+  }
+  return response;
+}
+
 async function respondKakao(res, response, event = null, team = null, kakaoUserId = '') {
   // 완주 응답은 필요한 점수/순위와 버튼을 이미 모두 구성했습니다.
   // 여기서 팀 알림·다음 미션·힌트 확인 쿼리를 다시 실행하면 카카오 응답 제한시간을
@@ -2642,6 +2806,10 @@ async function respondKakao(res, response, event = null, team = null, kakaoUserI
     response = prependUnreadNoticesToResponse(response, noticeText);
   }
   response = normalizeKakaoResponse(response);
+  response = applyParticipationFeatureVisibility(
+    response,
+    res?.locals?.participationFeatures || DEFAULT_PARTICIPATION_FEATURE_SETTINGS
+  );
   if (res.headersSent || res.writableEnded) return res;
   return res.status(200).json(response);
 }
@@ -3158,6 +3326,7 @@ function buildImageCards(title, _description, imageUrls = [], _buttons = []) {
 }
 
 const startQuickReplies = ['팀 생성', '팀 참가', '도움말'];
+const automaticStartQuickReplies = ['게임 시작', '도움말'];
 const menuQuickReplies = ['미션 목록', '내 점수', '순위', '팀원 목록', '팀명 수정', '이름 수정', '도움말'];
 const approvedPhotoQuickReplies = [secureImagePluginButton('사진 다시 제출', '사진 다시 제출'), ...menuQuickReplies];
 const pendingPhotoQuickReplies = ['인증 결과 확인', secureImagePluginButton('사진 다시 제출', '사진 다시 제출'), ...menuQuickReplies];
@@ -4598,10 +4767,12 @@ async function handleKakaoSkill(req, res) {
     }
 
     const event = await resolveKakaoEvent(req, kakaoUserId);
-    const [messages, userContext] = await Promise.all([
+    const [messages, userContext, participationFeatures] = await Promise.all([
       getMessageSettings(event.id),
       getKakaoUserContext(event.id, kakaoUserId),
+      getParticipationFeatureSettings(event.id),
     ]);
+    res.locals.participationFeatures = participationFeatures;
     const initialTeam = userContext.team;
     const userState = userContext.userState;
     timeoutMessage = String(messages.skill_timeout_message || timeoutMessage).trim();
@@ -4673,11 +4844,19 @@ async function handleKakaoSkill(req, res) {
       const savedAt = new Date(userState.updated_at || data.createdAt || 0).getTime();
       const isRecent = Number.isFinite(savedAt) && Date.now() - savedAt <= 30 * 60 * 1000;
       const isSameNickname = normalizeAnswer(cleanName(utterance)) === normalizeAnswer(savedMemberName);
+      const isSameTeamName = !participationFeatures.nickname_setup_enabled
+        && normalizeAnswer(String(utterance || '')) === normalizeAnswer(String(data.teamName || ''));
+      const isRepeatedAutomaticStart = data.automatic === true
+        && !participationFeatures.nickname_setup_enabled
+        && isStartCommand(utterance);
 
       // 복구 상태는 다음 메시지에서 반드시 해제해 일반 명령 처리를 방해하지 않게 합니다.
       await clearUserState(event.id, kakaoUserId);
-      if (isRecent && isSameNickname) {
-        return respondKakao(res, teamCreatedResponse(req, event, team, savedMemberName, messages));
+      if (isRecent && (isSameNickname || isSameTeamName || isRepeatedAutomaticStart)) {
+        const response = data.automatic === true || !participationFeatures.team_setup_enabled
+          ? automaticParticipationResponse(req, event, team, savedMemberName, messages)
+          : teamCreatedResponse(req, event, team, savedMemberName, messages);
+        return respondKakao(res, response);
       }
     }
 
@@ -4690,15 +4869,55 @@ async function handleKakaoSkill(req, res) {
       && !team.current_mission_id
       && normalizeAnswer(cleanName(utterance)) === normalizeAnswer(team.leader_name)
     ) {
-      return respondKakao(res, teamCreatedResponse(req, event, team, team.leader_name, messages));
+      const response = participationFeatures.team_setup_enabled
+        ? teamCreatedResponse(req, event, team, team.leader_name, messages)
+        : automaticParticipationResponse(req, event, team, team.leader_name, messages);
+      return respondKakao(res, response);
     }
 
     if (isCancelCommand(utterance)) {
       await clearUserState(event.id, kakaoUserId);
-      return respondKakao(res, kakaoText('진행 중인 입력을 취소했습니다.', team ? menuQuickReplies : startQuickReplies), event, team, kakaoUserId);
+      const cancelReplies = team
+        ? menuQuickReplies
+        : (participationFeatures.team_setup_enabled ? startQuickReplies : automaticStartQuickReplies);
+      return respondKakao(res, kakaoText('진행 중인 입력을 취소했습니다.', cancelReplies), event, team, kakaoUserId);
     }
 
-    if (!team && userState?.state === 'WAIT_TEAM_NAME') {
+    if (!team && !participationFeatures.team_setup_enabled && userState?.state === 'WAIT_AUTO_NICKNAME') {
+      if (!participationFeatures.nickname_setup_enabled) {
+        team = await createTeam(event.id, kakaoUserId, '', '참가자', { automatic: true });
+        return respondKakao(res, automaticParticipationResponse(req, event, team, '참가자', messages));
+      }
+      const memberName = cleanName(utterance);
+      if (memberName.length < 2 || isBlockedTeamName(memberName)) {
+        return respondKakao(res, kakaoText(
+          renderTemplate(messages.nickname_only_prompt_message, eventTemplateVars(event)),
+          ['취소']
+        ));
+      }
+      team = await createTeam(event.id, kakaoUserId, '', memberName, { automatic: true });
+      return respondKakao(res, automaticParticipationResponse(req, event, team, memberName, messages));
+    }
+
+    if (
+      !team
+      && !participationFeatures.team_setup_enabled
+      && ['WAIT_TEAM_NAME', 'WAIT_LEADER_NAME', 'WAIT_SELECT_JOIN_TEAM', 'WAIT_JOIN_MEMBER_NAME'].includes(userState?.state)
+    ) {
+      await clearUserState(event.id, kakaoUserId);
+    }
+
+    if (team && userState?.state === 'WAIT_EDIT_TEAM_NAME' && !participationFeatures.team_setup_enabled) {
+      await clearUserState(event.id, kakaoUserId);
+      return respondKakao(res, kakaoText(messages.team_setup_disabled_message, menuQuickReplies), event, team, kakaoUserId);
+    }
+
+    if (team && userState?.state === 'WAIT_EDIT_MEMBER_NAME' && !participationFeatures.nickname_setup_enabled) {
+      await clearUserState(event.id, kakaoUserId);
+      return respondKakao(res, kakaoText(messages.nickname_setup_disabled_message, menuQuickReplies), event, team, kakaoUserId);
+    }
+
+    if (!team && participationFeatures.team_setup_enabled && userState?.state === 'WAIT_TEAM_NAME') {
       const teamName = utterance.replace(/^(팀명|팀이름|팀 이름)[:：]?/i, '').trim();
 
       if (!teamName || teamName.length < 2) {
@@ -4711,16 +4930,25 @@ async function handleKakaoSkill(req, res) {
         return respondKakao(res, kakaoText('사용할 수 없는 팀 이름입니다.\n다른 팀 이름을 입력해주세요.\n예: 귤탐험대', ['취소']));
       }
 
+      if (!participationFeatures.nickname_setup_enabled) {
+        team = await createTeam(event.id, kakaoUserId, teamName.slice(0, 30), '팀장');
+        return respondKakao(res, teamCreatedResponse(req, event, team, '팀장', messages));
+      }
+
       await setUserState(event.id, kakaoUserId, 'WAIT_LEADER_NAME', { teamName: teamName.slice(0, 30) });
       return respondKakao(res, kakaoConfiguredMessage(req, messages, 'team_name_saved', renderTemplate(messages.team_name_saved_message, { team_name: teamName.slice(0, 30) }), ['취소'], '팀 생성'));
     }
 
-    if (!team && userState?.state === 'WAIT_LEADER_NAME') {
+    if (!team && participationFeatures.team_setup_enabled && userState?.state === 'WAIT_LEADER_NAME') {
       const memberName = cleanName(utterance);
       const teamName = String(data.teamName || '').trim();
       if (!teamName) {
         await setUserState(event.id, kakaoUserId, 'WAIT_TEAM_NAME', {});
         return respondKakao(res, kakaoConfiguredMessage(req, messages, 'create_prompt', renderTemplate(messages.create_team_prompt, eventTemplateVars(event)), ['취소'], '팀 생성'));
+      }
+      if (!participationFeatures.nickname_setup_enabled) {
+        team = await createTeam(event.id, kakaoUserId, teamName, '팀장');
+        return respondKakao(res, teamCreatedResponse(req, event, team, '팀장', messages));
       }
       if (memberName.length < 2) {
         return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동', ['취소']));
@@ -4730,13 +4958,25 @@ async function handleKakaoSkill(req, res) {
       return respondKakao(res, teamCreatedResponse(req, event, team, memberName, messages));
     }
 
-    if (!team && userState?.state === 'WAIT_SELECT_JOIN_TEAM') {
+    if (!team && participationFeatures.team_setup_enabled && userState?.state === 'WAIT_SELECT_JOIN_TEAM') {
       const index = Number(utterance) - 1;
       const teams = Array.isArray(data.teams) ? data.teams : [];
       if (!Number.isInteger(index) || index < 0 || index >= teams.length) {
         return respondKakao(res, kakaoText('목록에 있는 번호를 입력해주세요.\n예: 1', ['취소']));
       }
       const selected = teams[index];
+      if (!participationFeatures.nickname_setup_enabled) {
+        team = await joinTeamById(event.id, selected.id, kakaoUserId, '팀원');
+        if (!team) {
+          await clearUserState(event.id, kakaoUserId);
+          return respondKakao(res, kakaoText('선택한 팀을 찾을 수 없습니다. 다시 팀 참가를 진행해주세요.', ['팀 참가', '팀 생성']));
+        }
+        setImmediate(() => {
+          addTeamNotice(event.id, team.id, '새 팀원이 참가했습니다.', kakaoUserId)
+            .catch((error) => console.error('[join-team notice error]', error));
+        });
+        return respondKakao(res, joinedTeamResponse(req, event, team, '팀원', messages));
+      }
       await setUserState(event.id, kakaoUserId, 'WAIT_JOIN_MEMBER_NAME', { teamId: selected.id, teamName: selected.name });
       return respondKakao(
         res,
@@ -4744,7 +4984,15 @@ async function handleKakaoSkill(req, res) {
       );
     }
 
-    if (!team && userState?.state === 'WAIT_JOIN_MEMBER_NAME') {
+    if (!team && participationFeatures.team_setup_enabled && userState?.state === 'WAIT_JOIN_MEMBER_NAME') {
+      if (!participationFeatures.nickname_setup_enabled) {
+        team = await joinTeamById(event.id, data.teamId, kakaoUserId, '팀원');
+        if (!team) {
+          await clearUserState(event.id, kakaoUserId);
+          return respondKakao(res, kakaoText('선택한 팀을 찾을 수 없습니다. 다시 팀 참가를 진행해주세요.', ['팀 참가', '팀 생성']));
+        }
+        return respondKakao(res, joinedTeamResponse(req, event, team, '팀원', messages));
+      }
       const memberName = cleanName(utterance);
       if (memberName.length < 2) {
         return respondKakao(res, kakaoText('이름 또는 닉네임은 2글자 이상으로 입력해주세요.\n예: 홍길동', ['취소']));
@@ -4758,19 +5006,7 @@ async function handleKakaoSkill(req, res) {
         addTeamNotice(event.id, team.id, `${memberName}님이 팀에 참가했습니다.`, kakaoUserId)
           .catch((error) => console.error('[join-team notice error]', error));
       });
-      const joinReadyVars = {
-        event_name: event.event_name,
-        event_code: event.event_code,
-        team_name: team.team_name,
-        team_code: team.team_code,
-        member_name: memberName,
-        actor_name: memberName,
-      };
-      const joinText = renderTemplate(messages.join_complete_message, joinReadyVars);
-      return respondKakao(
-        res,
-        skipKakaoCommonPostProcessing(kakaoTeamReadyMessage(req, messages, 'team_created', joinText, joinReadyVars, menuQuickReplies, '팀 참가 완료'))
-      );
+      return respondKakao(res, joinedTeamResponse(req, event, team, memberName, messages));
     }
 
     if (team && userState?.state === 'WAIT_EDIT_TEAM_NAME') {
@@ -4826,6 +5062,23 @@ async function handleKakaoSkill(req, res) {
 
     if (isStartCommand(utterance) || isHelpCommand(utterance)) {
       if (!team) {
+        if (!participationFeatures.team_setup_enabled) {
+          if (isHelpCommand(utterance) && !isStartCommand(utterance)) {
+            return respondKakao(res, kakaoText(
+              renderTemplate(messages.automatic_participation_start_message, eventTemplateVars(event)),
+              automaticStartQuickReplies
+            ));
+          }
+          if (participationFeatures.nickname_setup_enabled) {
+            await setUserState(event.id, kakaoUserId, 'WAIT_AUTO_NICKNAME', {});
+            return respondKakao(res, kakaoText(
+              renderTemplate(messages.nickname_only_prompt_message, eventTemplateVars(event)),
+              ['취소']
+            ));
+          }
+          team = await createTeam(event.id, kakaoUserId, '', '참가자', { automatic: true });
+          return respondKakao(res, automaticParticipationResponse(req, event, team, '참가자', messages));
+        }
         return respondKakao(
           res,
           kakaoConfiguredMessage(req, messages, 'start', renderTemplate(messages.start_message, eventTemplateVars(event)), startQuickReplies, '')
@@ -4833,7 +5086,17 @@ async function handleKakaoSkill(req, res) {
       }
       return respondKakao(
         res,
-        kakaoConfiguredMessage(req, messages, 'returning', renderTemplate(messages.returning_team_message, eventTemplateVars(event, team)), menuQuickReplies, ''),
+        kakaoConfiguredMessage(
+          req,
+          messages,
+          'returning',
+          renderTemplate(
+            participationFeatures.team_setup_enabled ? messages.returning_team_message : messages.automatic_returning_message,
+            eventTemplateVars(event, team)
+          ),
+          menuQuickReplies,
+          ''
+        ),
         event,
         team,
         kakaoUserId
@@ -4841,30 +5104,55 @@ async function handleKakaoSkill(req, res) {
     }
 
     if (!team && isCreateTeamCommand(utterance)) {
+      if (!participationFeatures.team_setup_enabled) {
+        return respondKakao(res, kakaoText(messages.team_setup_disabled_message, automaticStartQuickReplies));
+      }
       await setUserState(event.id, kakaoUserId, 'WAIT_TEAM_NAME', {});
       return respondKakao(res, kakaoConfiguredMessage(req, messages, 'create_prompt', renderTemplate(messages.create_team_prompt, eventTemplateVars(event)), ['취소'], '팀 생성'));
     }
 
     if (!team && isJoinTeamCommand(utterance)) {
+      if (!participationFeatures.team_setup_enabled) {
+        return respondKakao(res, kakaoText(messages.team_setup_disabled_message, automaticStartQuickReplies));
+      }
       const response = await handleJoinTeamList(req, event, kakaoUserId, messages);
       return respondKakao(res, response);
     }
 
     if (!team) {
+      if (!participationFeatures.team_setup_enabled) {
+        return respondKakao(res, kakaoText(
+          renderTemplate(messages.automatic_participation_start_message, eventTemplateVars(event)),
+          automaticStartQuickReplies
+        ));
+      }
       return respondKakao(res, kakaoConfiguredMessage(req, messages, 'need_team', messages.need_team_message, startQuickReplies, '참가 안내'));
     }
 
+    if (!participationFeatures.team_setup_enabled && (isCreateTeamCommand(utterance) || isJoinTeamCommand(utterance))) {
+      return respondKakao(res, kakaoText(messages.team_setup_disabled_message, menuQuickReplies), event, team, kakaoUserId);
+    }
+
     if (isTeamNameEditCommand(utterance)) {
+      if (!participationFeatures.team_setup_enabled) {
+        return respondKakao(res, kakaoText(messages.team_setup_disabled_message, menuQuickReplies), event, team, kakaoUserId);
+      }
       await setUserState(event.id, kakaoUserId, 'WAIT_EDIT_TEAM_NAME', {});
       return respondKakao(res, kakaoText(renderTemplate(messages.edit_team_name_prompt_message, eventTemplateVars(event, team)), ['취소']));
     }
 
     if (isMemberNameEditCommand(utterance)) {
+      if (!participationFeatures.nickname_setup_enabled) {
+        return respondKakao(res, kakaoText(messages.nickname_setup_disabled_message, menuQuickReplies), event, team, kakaoUserId);
+      }
       await setUserState(event.id, kakaoUserId, 'WAIT_EDIT_MEMBER_NAME', {});
       return respondKakao(res, kakaoText(renderTemplate(messages.edit_member_name_prompt_message, eventTemplateVars(event, team)), ['취소']));
     }
 
     if (isTeamMembersCommand(utterance)) {
+      if (!participationFeatures.team_setup_enabled) {
+        return respondKakao(res, kakaoText(messages.team_setup_disabled_message, menuQuickReplies), event, team, kakaoUserId);
+      }
       return respondKakao(res, await handleTeamMembers(team, messages), event, team, kakaoUserId);
     }
 
@@ -4896,6 +5184,9 @@ async function handleKakaoSkill(req, res) {
     }
 
     if (isRankCommand(utterance)) {
+      if (!participationFeatures.realtime_ranking_enabled) {
+        return respondKakao(res, kakaoText(messages.ranking_disabled_message, menuQuickReplies), event, team, kakaoUserId);
+      }
       return respondKakao(res, await handleRanking(event.id, messages), event, team, kakaoUserId);
     }
 
@@ -5174,11 +5465,33 @@ app.get('/api/public/rankings', async (req, res) => {
     }
 
     const event = await getActiveEvent(req);
+    const [display, participationFeatures, messages] = await Promise.all([
+      getRankingDisplaySettings(event.id),
+      getParticipationFeatureSettings(event.id),
+      getMessageSettings(event.id),
+    ]);
+
+    if (!participationFeatures.realtime_ranking_enabled) {
+      return res.json({
+        ok: true,
+        enabled: false,
+        event: {
+          id: event.id,
+          event_name: event.event_name,
+          status: event.status,
+        },
+        display,
+        message: messages.ranking_disabled_message,
+        rankings: [],
+        server_time: nowIso(),
+      });
+    }
+
     const rankings = await buildRanking(event.id);
-    const display = await getRankingDisplaySettings(event.id);
 
     res.json({
       ok: true,
+      enabled: true,
       event: {
         id: event.id,
         event_name: event.event_name,
@@ -6011,6 +6324,20 @@ app.patch('/api/admin/settings/ranking-display', requireAdmin, async (req, res) 
   const event = await getActiveEvent(req);
   const settings = normalizeRankingDisplaySettings(req.body || {});
   await setSetting(event.id, 'ranking_display', settings);
+  res.json({ ok: true, settings });
+});
+
+app.get('/api/admin/settings/participation-features', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
+  const settings = await getParticipationFeatureSettings(event.id);
+  res.json({ ok: true, settings });
+});
+
+app.patch('/api/admin/settings/participation-features', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
+  const settings = normalizeParticipationFeatureSettings(req.body || {});
+  await setSetting(event.id, 'participation_features', settings);
+  rememberParticipationFeatureSettings(event.id, settings);
   res.json({ ok: true, settings });
 });
 

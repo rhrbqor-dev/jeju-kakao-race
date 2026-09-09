@@ -173,12 +173,20 @@
       const res = await fetch('/api/public/rankings' + queryString, { cache: 'no-store' });
       const data = await res.json();
       if (!res.ok || !data.ok) throw new Error(data.message || '랭킹 조회 실패');
-      const rankings = data.rankings || [];
       const display = data.display || {};
       const titleText = display.title || (data.event?.event_name ? `${data.event.event_name} 실시간 랭킹` : '실시간 랭킹');
       $('title').textContent = titleText;
       document.title = titleText;
       if ($('subtitle')) $('subtitle').textContent = display.subtitle || '점수 우선 · 동점 시 완주 소요시간 기준';
+      if (data.enabled === false) {
+        $('top3').innerHTML = '';
+        $('rankingBody').innerHTML = `<tr><td colspan="5" class="empty">${esc(data.message || '현재 실시간 랭킹은 공개하지 않습니다.')}</td></tr>`;
+        const now = new Date(data.server_time || Date.now());
+        $('updatedAt').textContent = now.toLocaleTimeString('ko-KR', { hour12: false });
+        prevSnapshot = '';
+        return;
+      }
+      const rankings = data.rankings || [];
       renderTop3(rankings);
       renderTable(rankings);
       const now = new Date(data.server_time || Date.now());
