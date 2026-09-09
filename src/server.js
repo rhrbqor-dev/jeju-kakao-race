@@ -713,6 +713,7 @@ function getEventIdentifierFromRequest(req) {
 const EVENT_CACHE_TTL_MS = 5 * 60 * 1000;
 const eventIdentifierCache = new Map();
 const kakaoEventSessionCache = new Map();
+const kakaoBotEventCache = new Map();
 let defaultEventCache = null;
 
 function timedCacheValue(entry) {
@@ -731,7 +732,45 @@ function rememberEvent(event) {
 function clearEventCaches() {
   eventIdentifierCache.clear();
   kakaoEventSessionCache.clear();
+  kakaoBotEventCache.clear();
   defaultEventCache = null;
+}
+
+function normalizeEventRoutingName(value = '') {
+  return String(value || '').trim().toLowerCase().replace(/[^0-9a-z가-힣]/gu, '');
+}
+
+async function getEventByKakaoBot(req = null) {
+  const bot = req?.body?.bot || {};
+  const botName = String(bot.name || '').trim();
+  const normalizedBotName = normalizeEventRoutingName(botName);
+  if (!normalizedBotName) return null;
+
+  const cacheKey = String(bot.id || normalizedBotName).trim();
+  const cached = kakaoBotEventCache.get(cacheKey);
+  if (cached?.expiresAt > Date.now()) return cached.value || null;
+  if (cached) kakaoBotEventCache.delete(cacheKey);
+
+  const candidates = (await query(
+    `SELECT *
+     FROM events
+     WHERE status IN ('active','paused')
+     ORDER BY CASE WHEN COALESCE(is_default, false) THEN 1 ELSE 0 END, id DESC;`
+  )).rows;
+  const exact = candidates.filter(
+    (event) => normalizeEventRoutingName(event.event_name) === normalizedBotName
+  );
+  const contained = exact.length ? exact : candidates.filter((event) => {
+    const eventName = normalizeEventRoutingName(event.event_name);
+    return eventName.length >= 4
+      && (normalizedBotName.includes(eventName) || eventName.includes(normalizedBotName));
+  });
+  const event = contained.length === 1 ? rememberEvent(contained[0]) : null;
+  kakaoBotEventCache.set(cacheKey, {
+    value: event,
+    expiresAt: Date.now() + EVENT_CACHE_TTL_MS,
+  });
+  return event;
 }
 
 async function getEventByIdentifier(identifier = '') {
@@ -820,7 +859,17 @@ async function resolveKakaoEvent(req, kakaoUserId = '') {
     return event;
   }
 
-  const sessionEvent = await getKakaoUserEventSession(kakaoUserId);
+  // 행사별 카카오 봇 이름과 관리자 행사명이 같으면 URL에 event 값이 빠져도
+  // 해당 행사로 연결합니다. 명시적인 event URL이 있으면 위 분기가 항상 우선합니다.
+  const [botEvent, sessionEvent] = await Promise.all([
+    getEventByKakaoBot(req),
+    getKakaoUserEventSession(kakaoUserId),
+  ]);
+  if (botEvent) {
+    req.selectedEvent = botEvent;
+    return botEvent;
+  }
+
   if (sessionEvent) {
     req.selectedEvent = sessionEvent;
     return sessionEvent;
@@ -5652,19 +5701,22 @@ async function handleKakaoSkill(req, res) {
     if (!team && !participationFeatures.team_setup_enabled && userState?.state === 'WAIT_AUTO_NICKNAME') {
       if (!participationFeatures.nickname_setup_enabled) {
         team = await createTeam(event.id, kakaoUserId, '', '참가자', { automatic: true });
-        return respondKakao(res, automaticParticipationResponse(req, event, team, '참가자', messages, {
-          showStartMessage: true,
-        }));
+        if (!isMissionCode(utterance)) {
+          return respondKakao(res, automaticParticipationResponse(req, event, team, '참가자', messages, {
+            showStartMessage: true,
+          }));
+        }
+      } else {
+        const memberName = cleanName(utterance);
+        if (memberName.length < 2 || isBlockedTeamName(memberName)) {
+          return respondKakao(res, kakaoText(
+            renderTemplate(messages.nickname_only_prompt_message, eventTemplateVars(event)),
+            ['취소']
+          ));
+        }
+        team = await createTeam(event.id, kakaoUserId, '', memberName, { automatic: true });
+        return respondKakao(res, automaticParticipationResponse(req, event, team, memberName, messages));
       }
-      const memberName = cleanName(utterance);
-      if (memberName.length < 2 || isBlockedTeamName(memberName)) {
-        return respondKakao(res, kakaoText(
-          renderTemplate(messages.nickname_only_prompt_message, eventTemplateVars(event)),
-          ['취소']
-        ));
-      }
-      team = await createTeam(event.id, kakaoUserId, '', memberName, { automatic: true });
-      return respondKakao(res, automaticParticipationResponse(req, event, team, memberName, messages));
     }
 
     if (
@@ -5886,6 +5938,17 @@ async function handleKakaoSkill(req, res) {
         team,
         kakaoUserId
       );
+    }
+
+    // 팀명과 닉네임 입력을 모두 끈 행사는 QR 또는 미션 코드가 첫 입력이어도
+    // 내부 참가자를 조용히 만든 뒤 해당 미션을 바로 시작합니다.
+    if (
+      !team
+      && !participationFeatures.team_setup_enabled
+      && !participationFeatures.nickname_setup_enabled
+      && isMissionCode(utterance)
+    ) {
+      team = await createTeam(event.id, kakaoUserId, '', '참가자', { automatic: true });
     }
 
     if (!team && isCreateTeamCommand(utterance)) {
