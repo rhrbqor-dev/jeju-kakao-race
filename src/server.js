@@ -111,9 +111,18 @@ function baseUrl(req) {
   return `${req.protocol}://${req.get('host')}`;
 }
 
-function secureImagePluginButton(label = '사진 업로드', messageText = '사진 인증') {
-  if (KAKAO_SECURE_IMAGE_BLOCK_ID) {
-    return { action: 'block', label, blockId: KAKAO_SECURE_IMAGE_BLOCK_ID, messageText };
+function secureImageBlockId(req = null) {
+  return String(
+    req?.participationFeatures?.secure_image_block_id
+    || KAKAO_SECURE_IMAGE_BLOCK_ID
+    || ''
+  ).trim();
+}
+
+function secureImagePluginButton(label = '사진 업로드', messageText = '사진 인증', req = null) {
+  const blockId = secureImageBlockId(req);
+  if (blockId) {
+    return { action: 'block', label, blockId, messageText };
   }
   return { action: 'message', label, messageText };
 }
@@ -997,6 +1006,7 @@ const DEFAULT_PARTICIPATION_FEATURE_SETTINGS = {
   team_setup_enabled: true,
   nickname_setup_enabled: true,
   realtime_ranking_enabled: true,
+  secure_image_block_id: '',
 };
 
 function normalizeFeatureBoolean(value, fallback) {
@@ -1021,6 +1031,10 @@ function normalizeParticipationFeatureSettings(value = {}) {
       incoming.realtime_ranking_enabled,
       DEFAULT_PARTICIPATION_FEATURE_SETTINGS.realtime_ranking_enabled
     ),
+    secure_image_block_id: String(
+      incoming.secure_image_block_id
+      ?? DEFAULT_PARTICIPATION_FEATURE_SETTINGS.secure_image_block_id
+    ).replace(/\s+/g, '').slice(0, 120),
   };
 }
 
@@ -3616,8 +3630,8 @@ function buildImageCards(title, _description, imageUrls = [], _buttons = []) {
 const startQuickReplies = ['팀 생성', '팀 참가', '도움말'];
 const automaticStartQuickReplies = ['게임 시작', '도움말'];
 const menuQuickReplies = ['미션 목록', '내 점수', '순위', '팀원 목록', '팀명 수정', '이름 수정', '도움말'];
-const approvedPhotoQuickReplies = [secureImagePluginButton('사진 다시 제출', '사진 다시 제출'), ...menuQuickReplies];
-const pendingPhotoQuickReplies = ['인증 결과 확인', secureImagePluginButton('사진 다시 제출', '사진 다시 제출'), ...menuQuickReplies];
+const approvedPhotoQuickReplies = (req = null) => [secureImagePluginButton('사진 다시 제출', '사진 다시 제출', req), ...menuQuickReplies];
+const pendingPhotoQuickReplies = (req = null) => ['인증 결과 확인', secureImagePluginButton('사진 다시 제출', '사진 다시 제출', req), ...menuQuickReplies];
 
 function isStartCommand(text) {
   return ['시작', '게임 시작', '참여하기', '참가', 'start'].includes(String(text).trim().toLowerCase());
@@ -4112,7 +4126,7 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
       ...eventTemplateVars(event, team), question: mission.question, mission_code: mission.mission_code,
       mission_name: mission.mission_name, score: mission.score,
     });
-    const buttons = [secureImagePluginButton('사진 업로드', '사진 인증')];
+    const buttons = [secureImagePluginButton('사진 업로드', '사진 인증', req)];
     if (imageUrls.length > 1) return startedResponse(kakaoCarousel(buildImageCards(title, '', imageUrls), menuQuickReplies, desc, buttons));
     return startedResponse(kakaoCard(title, desc, buttons, menuQuickReplies, imageUrls[0] || ''));
   }
@@ -4225,7 +4239,7 @@ async function handleGpsFallbackPhotoRequest(req, event, team, kakaoUserId, mess
 
   return finalizeMissionStartResponse(kakaoText(
     prompt,
-    [secureImagePluginButton('사진 올리기', 'GPS 대체 사진 업로드'), ...menuQuickReplies]
+    [secureImagePluginButton('사진 올리기', 'GPS 대체 사진 업로드', req), ...menuQuickReplies]
   ), mission, {
     currentMissionId: mission.id,
     teamStatus: team.status,
@@ -4671,7 +4685,7 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
         console.error('[kakao-secure-image] replacement save failed:', error);
       }
     });
-    return kakaoText(replacedText, existing.status === 'pending' ? pendingPhotoQuickReplies : approvedPhotoQuickReplies);
+    return kakaoText(replacedText, existing.status === 'pending' ? pendingPhotoQuickReplies(req) : approvedPhotoQuickReplies(req));
   }
 
   const autoApprove = isPhotoAutoApprovalActive(photoAutoApproval);
@@ -4710,7 +4724,7 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
         console.error('[kakao-secure-image] pending save failed:', error);
       }
     });
-    return kakaoText(pendingText, pendingPhotoQuickReplies);
+    return kakaoText(pendingText, pendingPhotoQuickReplies(req));
   }
 
   const [currentTotal, missionAdjustment, answerImages, progression] = await Promise.all([
@@ -4757,9 +4771,9 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
   });
 
   const answerImageUrls = missionImageLinks(req, answerImages);
-  if (answerImageUrls.length > 1) return markMissionCompletedResponse(kakaoCarousel(buildImageCards('', '', answerImageUrls), approvedPhotoQuickReplies, finalText, buttons));
-  if (answerImageUrls.length === 1) return markMissionCompletedResponse(kakaoCard('', finalText, buttons, approvedPhotoQuickReplies, answerImageUrls[0]));
-  return markMissionCompletedResponse(kakaoText(finalText, [...buttons, ...approvedPhotoQuickReplies]));
+  if (answerImageUrls.length > 1) return markMissionCompletedResponse(kakaoCarousel(buildImageCards('', '', answerImageUrls), approvedPhotoQuickReplies(req), finalText, buttons));
+  if (answerImageUrls.length === 1) return markMissionCompletedResponse(kakaoCard('', finalText, buttons, approvedPhotoQuickReplies(req), answerImageUrls[0]));
+  return markMissionCompletedResponse(kakaoText(finalText, [...buttons, ...approvedPhotoQuickReplies(req)]));
 }
 
 const COMPLETE_CROSSWORD_MISSION_SQL = `/* crossword-finalize-single-roundtrip */
@@ -5584,6 +5598,7 @@ async function handleKakaoSkill(req, res) {
       getParticipationFeatureSettings(event.id),
     ]);
     res.locals.participationFeatures = participationFeatures;
+    req.participationFeatures = participationFeatures;
     const initialTeam = userContext.team;
     const userState = userContext.userState;
     timeoutMessage = String(messages.skill_timeout_message || timeoutMessage).trim();
@@ -7199,7 +7214,11 @@ app.patch('/api/admin/settings/ranking-display', requireAdmin, async (req, res) 
 app.get('/api/admin/settings/participation-features', requireAdmin, async (req, res) => {
   const event = await getActiveEvent(req);
   const settings = await getParticipationFeatureSettings(event.id);
-  res.json({ ok: true, settings });
+  res.json({
+    ok: true,
+    settings,
+    secure_image_environment_fallback_configured: Boolean(KAKAO_SECURE_IMAGE_BLOCK_ID),
+  });
 });
 
 app.patch('/api/admin/settings/participation-features', requireAdmin, async (req, res) => {
@@ -7207,7 +7226,11 @@ app.patch('/api/admin/settings/participation-features', requireAdmin, async (req
   const settings = normalizeParticipationFeatureSettings(req.body || {});
   await setSetting(event.id, 'participation_features', settings);
   rememberParticipationFeatureSettings(event.id, settings);
-  res.json({ ok: true, settings });
+  res.json({
+    ok: true,
+    settings,
+    secure_image_environment_fallback_configured: Boolean(KAKAO_SECURE_IMAGE_BLOCK_ID),
+  });
 });
 
 app.get('/api/admin/settings/messages', requireAdmin, async (req, res) => {

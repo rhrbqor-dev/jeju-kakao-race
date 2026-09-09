@@ -292,6 +292,9 @@
             <p class="small">OFF이면 닉네임 입력과 이름 수정 메뉴를 숨기고 내부 이름은 자동으로 지정합니다.</p>
             <label class="inline-check"><input id="realtimeRankingEnabled" type="checkbox" /> 참가자용 실시간 랭킹 공개</label>
             <p class="small">OFF이면 챗봇의 순위 버튼·명령과 공개 /ranking 화면에서 순위 데이터를 숨깁니다.</p>
+            <label>이미지 보안전송 블록 ID</label>
+            <input id="secureImageBlockId" placeholder="예: 5ab1cb5c9418c22b668807d4" autocomplete="off" />
+            <p class="small">카카오 챗봇의 <b>사진 인증 일반 블록 ID</b>를 입력합니다. 비즈플러그인 ID가 아닙니다. 여러 행사·봇을 운영할 때는 행사마다 해당 봇의 블록 ID를 저장해야 합니다. 비워두면 Render의 KAKAO_SECURE_IMAGE_BLOCK_ID를 사용합니다.</p>
             <div style="height:12px"></div>
             <button onclick="saveParticipationFeatures()">참가 기능 설정 저장</button>
             <button class="secondary" onclick="loadParticipationFeatures()">설정 다시 불러오기</button>
@@ -586,6 +589,7 @@ let currentEventId = localStorage.getItem('currentEventId') || '';
 let knownPendingPhotoIds = new Set();
 let notificationEnabled = false;
 let crosswordEntries = [];
+let secureImageEnvironmentFallbackConfigured = false;
 
 function authHeaders() {
   const pw = adminPassword || localStorage.getItem('adminPassword') || localStorage.getItem('admin_password') || '';
@@ -770,17 +774,22 @@ function renderParticipationFeatureStatus(settings) {
   const participationMode = teamOn
     ? (nicknameOn ? '팀명과 닉네임을 모두 입력' : '팀명만 입력하고 닉네임은 자동 지정')
     : (nicknameOn ? '개인 참가로 자동 등록 후 닉네임만 입력' : '게임 시작 한 번으로 개인 참가 자동 등록');
+  const secureImageStatus = String(s.secure_image_block_id || '').trim()
+    ? '행사별 블록 ID 사용'
+    : (secureImageEnvironmentFallbackConfigured ? 'Render 공통 블록 ID 사용' : '미설정 · 버튼이 일반 메시지로 동작함');
   if ($('participationFeatureStatus')) {
-    $('participationFeatureStatus').textContent = `참가 방식: ${participationMode}\n팀 설정: ${teamOn ? 'ON' : 'OFF'}\n닉네임 설정: ${nicknameOn ? 'ON' : 'OFF'}\n참가자용 실시간 랭킹: ${rankingOn ? 'ON' : 'OFF'}\n관리자 순위표: 항상 ON`;
+    $('participationFeatureStatus').textContent = `참가 방식: ${participationMode}\n팀 설정: ${teamOn ? 'ON' : 'OFF'}\n닉네임 설정: ${nicknameOn ? 'ON' : 'OFF'}\n참가자용 실시간 랭킹: ${rankingOn ? 'ON' : 'OFF'}\n사진 플러그인: ${secureImageStatus}\n관리자 순위표: 항상 ON`;
   }
 }
 
 async function loadParticipationFeatures() {
   const data = await api('/api/admin/settings/participation-features');
   const s = data.settings || {};
+  secureImageEnvironmentFallbackConfigured = !!data.secure_image_environment_fallback_configured;
   $('teamSetupEnabled').checked = s.team_setup_enabled !== false;
   $('nicknameSetupEnabled').checked = s.nickname_setup_enabled !== false;
   $('realtimeRankingEnabled').checked = s.realtime_ranking_enabled !== false;
+  $('secureImageBlockId').value = s.secure_image_block_id || '';
   renderParticipationFeatureStatus(s);
 }
 
@@ -789,12 +798,15 @@ async function saveParticipationFeatures() {
     team_setup_enabled: $('teamSetupEnabled').checked,
     nickname_setup_enabled: $('nicknameSetupEnabled').checked,
     realtime_ranking_enabled: $('realtimeRankingEnabled').checked,
+    secure_image_block_id: $('secureImageBlockId').value.trim(),
   };
   const data = await api('/api/admin/settings/participation-features', { method:'PATCH', body: JSON.stringify(body) });
   const s = data.settings || {};
+  secureImageEnvironmentFallbackConfigured = !!data.secure_image_environment_fallback_configured;
   $('teamSetupEnabled').checked = !!s.team_setup_enabled;
   $('nicknameSetupEnabled').checked = !!s.nickname_setup_enabled;
   $('realtimeRankingEnabled').checked = !!s.realtime_ranking_enabled;
+  $('secureImageBlockId').value = s.secure_image_block_id || '';
   renderParticipationFeatureStatus(s);
   alert('참가 기능 설정이 저장되었습니다.');
 }
