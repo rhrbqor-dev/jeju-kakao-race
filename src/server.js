@@ -1016,6 +1016,14 @@ function normalizeFeatureBoolean(value, fallback) {
   return fallback;
 }
 
+function normalizeKakaoGeneralBlockId(value = '') {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (/^[0-9a-f]{24}$/i.test(text)) return text.toLowerCase();
+  const match = text.match(/\/intent\/([0-9a-f]{24})(?:[/?#]|$)/i);
+  return match ? match[1].toLowerCase() : '';
+}
+
 function normalizeParticipationFeatureSettings(value = {}) {
   const incoming = value && typeof value === 'object' ? value : {};
   return {
@@ -1031,10 +1039,10 @@ function normalizeParticipationFeatureSettings(value = {}) {
       incoming.realtime_ranking_enabled,
       DEFAULT_PARTICIPATION_FEATURE_SETTINGS.realtime_ranking_enabled
     ),
-    secure_image_block_id: String(
+    secure_image_block_id: normalizeKakaoGeneralBlockId(
       incoming.secure_image_block_id
       ?? DEFAULT_PARTICIPATION_FEATURE_SETTINGS.secure_image_block_id
-    ).replace(/\s+/g, '').slice(0, 120),
+    ),
   };
 }
 

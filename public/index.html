@@ -57,6 +57,12 @@
     .hidden { display:none !important; }
     .section { margin-top:18px; }
     .notice { background:#fff9e8; border:1px solid #ffe0a3; padding:12px 14px; border-radius:12px; color:#664700; }
+    .setup-help { margin-top:10px; padding:12px 14px; border:1px solid #cbd8f2; border-radius:12px; background:#f7f9ff; color:#31456d; }
+    .setup-help summary { cursor:pointer; font-weight:800; }
+    .setup-help ol { margin:10px 0 4px; padding-left:22px; line-height:1.7; }
+    .setup-help code { overflow-wrap:anywhere; }
+    .input-action-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:center; }
+    @media(max-width:700px){ .input-action-row { grid-template-columns:1fr; } }
     .alert { margin-top:14px; background:#fff3f3; border:1px solid #ffb2b2; color:#8a1f1f; padding:14px; border-radius:14px; display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
     .small { font-size:12px; color:var(--muted); }
     .inline-check { display:flex; align-items:center; gap:8px; color:var(--text); font-size:14px; margin:10px 0; }
@@ -292,9 +298,24 @@
             <p class="small">OFF이면 닉네임 입력과 이름 수정 메뉴를 숨기고 내부 이름은 자동으로 지정합니다.</p>
             <label class="inline-check"><input id="realtimeRankingEnabled" type="checkbox" /> 참가자용 실시간 랭킹 공개</label>
             <p class="small">OFF이면 챗봇의 순위 버튼·명령과 공개 /ranking 화면에서 순위 데이터를 숨깁니다.</p>
-            <label>이미지 보안전송 블록 ID</label>
-            <input id="secureImageBlockId" placeholder="예: 5ab1cb5c9418c22b668807d4" autocomplete="off" />
-            <p class="small">카카오 챗봇의 <b>사진 인증 일반 블록 ID</b>를 입력합니다. 비즈플러그인 ID가 아닙니다. 여러 행사·봇을 운영할 때는 행사마다 해당 봇의 블록 ID를 저장해야 합니다. 비워두면 Render의 KAKAO_SECURE_IMAGE_BLOCK_ID를 사용합니다.</p>
+            <label>이미지 보안전송 일반 블록 ID 또는 블록 편집 주소</label>
+            <div class="input-action-row">
+              <input id="secureImageBlockId" placeholder="블록 ID 또는 chatbot.kakao.com 블록 주소 붙여넣기" autocomplete="off" oninput="clearSecureImageBlockIdResult()" />
+              <button type="button" class="secondary" onclick="extractSecureImageBlockIdFromInput()">주소에서 ID 추출</button>
+            </div>
+            <p id="secureImageBlockIdResult" class="small" aria-live="polite"></p>
+            <details class="setup-help" open>
+              <summary>사진 인증 일반 블록 ID 확인 방법</summary>
+              <ol>
+                <li><a href="https://chatbot.kakao.com/" target="_blank" rel="noopener noreferrer">카카오 챗봇 관리자센터</a>에서 현재 행사에 연결된 봇을 엽니다.</li>
+                <li><b>시나리오</b>에서 이미지 보안전송 플러그인을 설정한 <b>사진 인증 일반 블록</b>을 엽니다.</li>
+                <li>브라우저 주소창의 전체 주소를 복사해서 위 입력란에 붙여넣습니다.</li>
+                <li><b>주소에서 ID 추출</b>을 누릅니다. 주소의 <code>/intent/블록ID</code> 부분만 자동으로 남습니다.</li>
+              </ol>
+              <p class="small" style="margin-bottom:0;"><b>주소 구분:</b> <code>.../bot/{봇 ID}/intent/{사진 인증 일반 블록 ID}?scenarioId=...</code><br />
+              <b>주의:</b> <code>/bot/</code> 뒤의 봇 ID, <code>scenarioId</code>, 비즈플러그인 ID가 아닙니다. 행사마다 해당 봇의 블록을 각각 등록하세요. 블록 ID만 알고 있다면 주소 대신 ID만 바로 입력해도 됩니다.</p>
+            </details>
+            <p class="small">비워두면 Render의 KAKAO_SECURE_IMAGE_BLOCK_ID를 사용하지만, 여러 행사·봇을 운영할 때는 잘못된 봇으로 연결되지 않도록 행사별 블록 ID를 저장하는 것을 권장합니다.</p>
             <div style="height:12px"></div>
             <button onclick="saveParticipationFeatures()">참가 기능 설정 저장</button>
             <button class="secondary" onclick="loadParticipationFeatures()">설정 다시 불러오기</button>
@@ -766,6 +787,51 @@ function renderRankingDisplayStatus(settings) {
   }
 }
 
+function parseKakaoGeneralBlockId(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (/^[0-9a-f]{24}$/i.test(text)) return text.toLowerCase();
+  const match = text.match(/\/intent\/([0-9a-f]{24})(?:[/?#]|$)/i);
+  return match ? match[1].toLowerCase() : null;
+}
+
+function clearSecureImageBlockIdResult() {
+  const result = $('secureImageBlockIdResult');
+  if (result) {
+    result.textContent = '';
+    result.style.color = '';
+  }
+}
+
+function extractSecureImageBlockIdFromInput(showEmptyMessage = true) {
+  const input = $('secureImageBlockId');
+  const result = $('secureImageBlockIdResult');
+  const raw = String(input?.value || '').trim();
+  const blockId = parseKakaoGeneralBlockId(raw);
+  if (!raw) {
+    if (showEmptyMessage && result) {
+      result.textContent = '카카오 블록 편집 주소 또는 24자리 블록 ID를 입력해주세요.';
+      result.style.color = '#b42323';
+    }
+    return '';
+  }
+  if (blockId === null) {
+    if (result) {
+      result.textContent = '일반 블록 ID를 찾지 못했습니다. 사진 인증 블록을 연 상태의 주소인지 확인해주세요.';
+      result.style.color = '#b42323';
+    }
+    return null;
+  }
+  input.value = blockId;
+  if (result) {
+    result.textContent = raw === blockId
+      ? `일반 블록 ID 형식이 확인되었습니다: ${blockId}`
+      : `주소에서 일반 블록 ID를 추출했습니다: ${blockId}`;
+    result.style.color = '#0f7b50';
+  }
+  return blockId;
+}
+
 function renderParticipationFeatureStatus(settings) {
   const s = settings || {};
   const teamOn = !!s.team_setup_enabled;
@@ -790,15 +856,25 @@ async function loadParticipationFeatures() {
   $('nicknameSetupEnabled').checked = s.nickname_setup_enabled !== false;
   $('realtimeRankingEnabled').checked = s.realtime_ranking_enabled !== false;
   $('secureImageBlockId').value = s.secure_image_block_id || '';
+  clearSecureImageBlockIdResult();
   renderParticipationFeatureStatus(s);
 }
 
 async function saveParticipationFeatures() {
+  const rawSecureImageBlock = $('secureImageBlockId').value.trim();
+  const secureImageBlockId = rawSecureImageBlock
+    ? extractSecureImageBlockIdFromInput(false)
+    : '';
+  if (secureImageBlockId === null) {
+    alert('사진 인증 일반 블록 ID를 확인해주세요. 블록 편집 주소에는 /intent/블록ID가 포함되어야 합니다.');
+    $('secureImageBlockId').focus();
+    return;
+  }
   const body = {
     team_setup_enabled: $('teamSetupEnabled').checked,
     nickname_setup_enabled: $('nicknameSetupEnabled').checked,
     realtime_ranking_enabled: $('realtimeRankingEnabled').checked,
-    secure_image_block_id: $('secureImageBlockId').value.trim(),
+    secure_image_block_id: secureImageBlockId,
   };
   const data = await api('/api/admin/settings/participation-features', { method:'PATCH', body: JSON.stringify(body) });
   const s = data.settings || {};
