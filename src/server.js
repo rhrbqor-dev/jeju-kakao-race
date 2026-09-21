@@ -4784,13 +4784,13 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
   return markMissionCompletedResponse(kakaoText(finalText, [...buttons, ...approvedPhotoQuickReplies(req)]));
 }
 
-const COMPLETE_CROSSWORD_MISSION_SQL = `/* crossword-finalize-single-roundtrip */
+const COMPLETE_INTERACTIVE_MISSION_SQL = `/* interactive-mission-finalize-single-roundtrip */
      WITH saved_answer AS (
        INSERT INTO submissions(
          event_id, team_id, mission_id, answer_text, actor_kakao_user_id,
          actor_name, status, score, submission_key
        )
-       SELECT $1,$2,$3,$4,$5,$6,'correct',$7,'crossword:complete'
+       SELECT $1,$2,$3,$4,$5,$6,'correct',$7,$10
        WHERE NOT EXISTS (
          SELECT 1 FROM submissions
          WHERE team_id=$2 AND mission_id=$3 AND status IN ('correct','approved')
@@ -4799,8 +4799,9 @@ const COMPLETE_CROSSWORD_MISSION_SQL = `/* crossword-finalize-single-roundtrip *
        RETURNING mission_id, score
      ), saved_state AS (
        INSERT INTO user_states(event_id, kakao_user_id, state, data, updated_at)
-       SELECT $1,$5,'RECENT_CROSSWORD_COMPLETION',$8,NOW()
+       SELECT $1,$5,$9,$8,NOW()
        FROM saved_answer
+       WHERE NULLIF(BTRIM($9), '') IS NOT NULL
        ON CONFLICT(event_id, kakao_user_id)
        DO UPDATE SET state=EXCLUDED.state, data=EXCLUDED.data, updated_at=NOW()
        RETURNING id
@@ -4911,18 +4912,34 @@ const COMPLETE_CROSSWORD_MISSION_SQL = `/* crossword-finalize-single-roundtrip *
        (SELECT to_jsonb(linked_mission) FROM linked_mission LIMIT 1) AS linked_mission
      FROM score_summary;`;
 
-async function completeCrosswordMission(event, team, mission, kakaoUserId, actorName, solvedIds, progress) {
+// 기존 테스트·도구에서 사용하던 이름을 유지하면서 순서형과 십자말풀이가
+// 같은 단일 완료 쿼리를 공유하도록 합니다.
+const COMPLETE_CROSSWORD_MISSION_SQL = COMPLETE_INTERACTIVE_MISSION_SQL;
+
+async function completeInteractiveMission(
+  event,
+  team,
+  mission,
+  kakaoUserId,
+  actorName,
+  answerText,
+  stateName,
+  stateData,
+  submissionKey
+) {
   const result = await query(
-    COMPLETE_CROSSWORD_MISSION_SQL,
+    COMPLETE_INTERACTIVE_MISSION_SQL,
     [
       event.id,
       team.id,
       mission.id,
-      JSON.stringify(solvedIds),
+      String(answerText || ''),
       kakaoUserId,
       actorName,
       Number(mission.score || 0),
-      JSON.stringify(progress),
+      JSON.stringify(stateData || {}),
+      String(stateName || ''),
+      String(submissionKey || ''),
     ]
   );
   const row = result.rows[0] || {};
@@ -4940,6 +4957,20 @@ async function completeCrosswordMission(event, team, mission, kakaoUserId, actor
     autoCompleteMission: row.auto_complete_mission || null,
     linkedMission: row.linked_mission || null,
   };
+}
+
+async function completeCrosswordMission(event, team, mission, kakaoUserId, actorName, solvedIds, progress) {
+  return completeInteractiveMission(
+    event,
+    team,
+    mission,
+    kakaoUserId,
+    actorName,
+    JSON.stringify(solvedIds),
+    'RECENT_CROSSWORD_COMPLETION',
+    progress,
+    'crossword:complete'
+  );
 }
 
 async function buildQuizMissionSuccessResponse(req, event, team, mission, kakaoUserId, actorName, messages, options = {}) {
@@ -5057,12 +5088,22 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
     const completedByCurrentUser = String(completion.actor_kakao_user_id || '').trim()
       ? String(completion.actor_kakao_user_id).trim() === String(kakaoUserId || '').trim()
       : String(completion.actor_name || '').trim() === String(actorName || '').trim();
-    const retryChoices = mission.mission_type === 'quiz' && normalizeQuizType(mission.quiz_type || 'short') === 'sequence'
+    const retryQuizType = mission.mission_type === 'quiz'
+      ? normalizeQuizType(mission.quiz_type || 'short')
+      : '';
+    const retryChoices = mission.mission_type === 'quiz'
       ? parseMissionChoices(mission.choices || '')
       : [];
-    const retriedSequenceChoice = retryChoices.length
+    const retriedSequenceChoice = retryQuizType === 'sequence' && retryChoices.length
       ? Number.isInteger(extractChoiceNumber(utterance, retryChoices))
       : false;
+    const retriedChoiceAnswer = retryQuizType === 'choice'
+      ? isChoiceCorrect(utterance, mission)
+      : false;
+    const retriedShortAnswer = retryQuizType === 'short'
+      ? splitAnswers(mission.answer).includes(normalizeAnswer(utterance))
+      : false;
+    const retriedQuizAnswer = retriedSequenceChoice || retriedChoiceAnswer || retriedShortAnswer;
     const retryCrosswordEntries = mission.mission_type === 'crossword'
       ? crosswordEntriesInPlayOrder(mission.crossword_data)
       : [];
@@ -5070,10 +5111,41 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
       (entry) => normalizeAnswer(entry.answer) === normalizeAnswer(utterance)
     );
 
-    // 마지막 순서 선택에서 안전 응답이 먼저 나간 경우 정답 저장은 이미 끝났을 수 있습니다.
-    // 같은 수행자가 바로 마지막 선택을 다시 누르면 일반 중복 안내 대신 유실된
+    // 퀴즈 정답 처리 중 안전 응답이 먼저 나간 경우 정답 저장은 이미 끝났을 수 있습니다.
+    // 같은 수행자가 5분 안에 같은 정답을 다시 보내면 일반 중복 안내 대신 유실된
     // 정답 설명과 정답 이미지를 다시 구성해 보여줍니다.
-    if (completedByCurrentUser && (retriedSequenceChoice || retriedCrosswordAnswer) && completionAgeMs >= 0 && completionAgeMs <= 5 * 60 * 1000) {
+    if (completedByCurrentUser && retriedQuizAnswer && completionAgeMs >= 0 && completionAgeMs <= 5 * 60 * 1000) {
+      const replayResult = await completeInteractiveMission(
+        event,
+        team,
+        mission,
+        kakaoUserId,
+        String(completion.actor_name || actorName).trim() || actorName,
+        '',
+        retryQuizType === 'sequence' ? 'RECENT_SEQUENCE_COMPLETION' : '',
+        { missionId: mission.id },
+        `quiz:${retryQuizType || 'short'}:complete`
+      );
+      return buildQuizMissionSuccessResponse(
+        req,
+        event,
+        team,
+        mission,
+        kakaoUserId,
+        String(completion.actor_name || actorName).trim() || actorName,
+        messages,
+        {
+          scheduleSideEffects: false,
+          submittedScore: Number(completion.score || mission.score || 0),
+          summary: replayResult.summary,
+          answerImages: replayResult.answerImages,
+          progressionResolved: true,
+          autoCompleteMission: replayResult.autoCompleteMission,
+          linkedMission: replayResult.linkedMission,
+        }
+      );
+    }
+    if (completedByCurrentUser && retriedCrosswordAnswer && completionAgeMs >= 0 && completionAgeMs <= 5 * 60 * 1000) {
       return buildQuizMissionSuccessResponse(
         req,
         event,
@@ -5364,6 +5436,39 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
     const earnedScore = isCorrect ? baseScore : 0;
     const submissionStatus = isCorrect ? 'correct' : 'wrong';
     const penaltyKey = `wrong:${mission.id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+
+    if (isCorrect) {
+      const completionResult = await completeInteractiveMission(
+        event,
+        team,
+        mission,
+        kakaoUserId,
+        actorName,
+        normalizedUtterance,
+        quizType === 'sequence' ? 'RECENT_SEQUENCE_COMPLETION' : '',
+        { missionId: mission.id },
+        `quiz:${quizType}:complete`
+      );
+      return buildQuizMissionSuccessResponse(
+        req,
+        event,
+        team,
+        mission,
+        kakaoUserId,
+        actorName,
+        messages,
+        {
+          submittedScore: earnedScore,
+          scheduleSideEffects: completionResult.answerSaved,
+          summary: completionResult.summary,
+          answerImages: completionResult.answerImages,
+          progressionResolved: true,
+          autoCompleteMission: completionResult.autoCompleteMission,
+          linkedMission: completionResult.linkedMission,
+        }
+      );
+    }
+
     const answerSave = await query(
       `WITH prior_wrong AS MATERIALIZED (
          SELECT COUNT(*)::int AS count
@@ -5404,19 +5509,6 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
       ]
     );
     const wrongCount = Number(answerSave.rows[0]?.wrong_count || 0);
-
-    if (isCorrect) {
-      return buildQuizMissionSuccessResponse(
-        req,
-        event,
-        team,
-        mission,
-        kakaoUserId,
-        actorName,
-        messages,
-        { submittedScore: earnedScore }
-      );
-    }
 
     const [totalAfterWrong, availableScore] = await Promise.all([
       teamTotalScore(team.id),
@@ -5659,6 +5751,17 @@ async function handleKakaoSkill(req, res) {
         ? String(recentMission.completed_actor_kakao_user_id).trim() === kakaoUserId
         : true;
       if (recentMission && repeatedChoice && sameActor) {
+        const replayResult = await completeInteractiveMission(
+          event,
+          team,
+          recentMission,
+          kakaoUserId,
+          String(recentMission.completed_actor_name || team.leader_name || '팀원').trim(),
+          '',
+          'RECENT_SEQUENCE_COMPLETION',
+          { missionId: recentMission.id },
+          'sequence:complete'
+        );
         const response = await buildQuizMissionSuccessResponse(
           req,
           event,
@@ -5667,7 +5770,15 @@ async function handleKakaoSkill(req, res) {
           kakaoUserId,
           String(recentMission.completed_actor_name || team.leader_name || '팀원').trim(),
           messages,
-          { scheduleSideEffects: false, submittedScore: Number(recentMission.completed_score || recentMission.score || 0) }
+          {
+            scheduleSideEffects: false,
+            submittedScore: Number(recentMission.completed_score || recentMission.score || 0),
+            summary: replayResult.summary,
+            answerImages: replayResult.answerImages,
+            progressionResolved: true,
+            autoCompleteMission: replayResult.autoCompleteMission,
+            linkedMission: replayResult.linkedMission,
+          }
         );
         return respondKakao(res, response);
       }
@@ -7766,4 +7877,5 @@ export {
   crosswordEntriesInPlayOrder,
   renderCrosswordBoardPng,
   COMPLETE_CROSSWORD_MISSION_SQL,
+  COMPLETE_INTERACTIVE_MISSION_SQL,
 };
