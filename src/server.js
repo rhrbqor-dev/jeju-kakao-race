@@ -4122,9 +4122,10 @@ async function handleMissionList(req, event, team, messages = DEFAULT_MESSAGE_SE
     ? rawTemplate
     : `${String(rawTemplate || '').trim()}\n\n{mission_list}`;
   const text = renderTemplate(template, variables).trim() || missionList;
-  const mapImageUrl = missionMapUrl(req, event, team, {
+  const mapOptions = {
     completedMissionIds: [...completedMap.keys()],
-  });
+  };
+  const mapImageUrl = missionMapUrl(req, event, team, mapOptions);
   if (!mapImageUrl) {
     return skipKakaoCommonPostProcessing(
       kakaoConfiguredMessage(req, messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list', text, menuQuickReplies, '')
@@ -4132,13 +4133,14 @@ async function handleMissionList(req, event, team, messages = DEFAULT_MESSAGE_SE
   }
   const configuredImageUrl = messageImageUrl(req, messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list');
   const imageUrls = [...new Set([configuredImageUrl, mapImageUrl].filter(Boolean))];
+  const mapButtons = missionMapViewButtons(req, event, team, mapOptions);
   const cardTitle = visibleMessageTitle(messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list', '');
   if (imageUrls.length > 1) {
     return skipKakaoCommonPostProcessing(
-      kakaoCarousel(buildImageCards(cardTitle, '', imageUrls), menuQuickReplies, text)
+      kakaoCarousel(buildImageCards(cardTitle, '', imageUrls), menuQuickReplies, text, mapButtons)
     );
   }
-  return skipKakaoCommonPostProcessing(kakaoCard(cardTitle, text, [], menuQuickReplies, imageUrls[0]));
+  return skipKakaoCommonPostProcessing(kakaoCard(cardTitle, text, mapButtons, menuQuickReplies, imageUrls[0]));
 }
 
 async function handleScore(team, messages = DEFAULT_MESSAGE_SETTINGS) {
@@ -4351,7 +4353,7 @@ function missionMapSignature(eventId, teamId, completedMissionId = 0, progressSt
     .slice(0, 32);
 }
 
-function missionMapUrl(req, event, team, options = {}) {
+function missionMapSignedLink(req, event, team, options = {}, pathname = '/api/public/mission-map.png') {
   const settings = req?.missionMapSettings || missionMapSettingsCache.get(Number(event?.id || 0));
   if (!settings?.enabled || !settings?.background_image_data || !team?.id) return '';
   const completedMissionId = Number(options.completedMissionId || 0);
@@ -4367,10 +4369,32 @@ function missionMapUrl(req, event, team, options = {}) {
   const version = createHash('sha1').update(versionSeed).digest('hex').slice(0, 10);
   const progressQuery = hasExactProgress ? `&done=${encodeURIComponent(progressState)}` : '';
   const pathValue = urlWithEvent(
-    `/api/public/mission-map.png?team=${Number(team.id)}&completed=${completedMissionId}${progressQuery}&sig=${signature}&v=${version}`,
+    `${pathname}?team=${Number(team.id)}&completed=${completedMissionId}${progressQuery}&sig=${signature}&v=${version}`,
     event
   );
   return `${baseUrl(req)}${pathValue}`;
+}
+
+function missionMapUrl(req, event, team, options = {}) {
+  return missionMapSignedLink(req, event, team, options, '/api/public/mission-map.png');
+}
+
+function missionMapViewUrl(req, event, team, options = {}, anchor = '') {
+  const url = missionMapSignedLink(req, event, team, options, '/api/public/mission-map/view');
+  return url && anchor ? `${url}#${anchor}` : url;
+}
+
+function missionMapViewButtons(req, event, team, options = {}) {
+  // 버튼 링크는 과거 응답을 다시 열어도 최신 완료 현황이 나오도록 완료 목록을
+  // URL에 고정하지 않습니다. 방금 완료한 미션만 저장 지연에 대비해 포함합니다.
+  const liveOptions = { completedMissionId: Number(options.completedMissionId || 0) };
+  const mapUrl = missionMapViewUrl(req, event, team, liveOptions, 'map');
+  const galleryUrl = missionMapViewUrl(req, event, team, liveOptions, 'gallery');
+  if (!mapUrl || !galleryUrl) return [];
+  return [
+    { action: 'webLink', label: '지도 크게 보기', webLinkUrl: mapUrl },
+    { action: 'webLink', label: '정답 이미지 모아보기', webLinkUrl: galleryUrl },
+  ];
 }
 
 function missionMapMarkerTextPath(text, x, y, fontSize, fill = '#ffffff') {
@@ -4483,11 +4507,12 @@ async function getMissionMapStaticAssets(eventId) {
     async () => {
       const result = await query(
         `SELECT m.id, m.mission_code, m.mission_name, m.map_x, m.map_y,
+                answer_image.id AS answer_image_id,
                 answer_image.image_data AS answer_image_data,
                 answer_image.image_mime AS answer_image_mime
          FROM missions m
          LEFT JOIN LATERAL (
-           SELECT mi.image_data, mi.image_mime
+           SELECT mi.id, mi.image_data, mi.image_mime
            FROM mission_images mi
            WHERE mi.mission_id=m.id AND mi.image_kind='answer'
            ORDER BY mi.sort_order ASC, mi.id ASC
@@ -4500,6 +4525,52 @@ async function getMissionMapStaticAssets(eventId) {
       return result.rows;
     }
   );
+}
+
+function missionMapRequestAccess(req, event) {
+  const teamId = Number(req.query.team || 0);
+  const completedMissionId = Number(req.query.completed || 0);
+  const hasExactProgress = Object.prototype.hasOwnProperty.call(req.query || {}, 'done');
+  const progressState = hasExactProgress ? String(req.query.done || '').trim() : '';
+  const parsedProgressIds = progressState
+    ? progressState.split('.').map((value) => Number(value))
+    : [];
+  const progressIds = canonicalMissionProgressIds(parsedProgressIds);
+  const signature = String(req.query.sig || '').trim();
+  if (!Number.isInteger(teamId) || teamId <= 0 || !Number.isInteger(completedMissionId) || completedMissionId < 0) {
+    throw new Error('invalid mission map request');
+  }
+  if (hasExactProgress && progressIds.join('.') !== progressState) {
+    throw new Error('invalid mission map progress');
+  }
+  const expectedSignature = missionMapSignature(
+    event.id,
+    teamId,
+    completedMissionId,
+    hasExactProgress ? progressState : ''
+  );
+  if (!safeSignatureEqual(signature, expectedSignature)) throw new Error('invalid mission map signature');
+  return { teamId, completedMissionId, hasExactProgress, progressIds };
+}
+
+async function resolveMissionMapProgress(eventId, access) {
+  let completedIds = canonicalMissionProgressIds(access.progressIds);
+  if (!access.hasExactProgress) {
+    const progressResult = await query(
+      `SELECT
+         EXISTS(SELECT 1 FROM teams t WHERE t.id=$2 AND t.event_id=$1) AS team_exists,
+         COALESCE(array_agg(DISTINCT s.mission_id) FILTER (WHERE s.mission_id IS NOT NULL), '{}') AS completed_ids
+       FROM submissions s
+       WHERE s.event_id=$1 AND s.team_id=$2 AND s.status IN ('correct','approved');`,
+      [eventId, access.teamId]
+    );
+    if (progressResult.rows[0]?.team_exists !== true) throw new Error('team not found');
+    completedIds = canonicalMissionProgressIds(progressResult.rows[0]?.completed_ids || []);
+  }
+  return canonicalMissionProgressIds([
+    ...completedIds,
+    ...(access.completedMissionId > 0 ? [access.completedMissionId] : []),
+  ]);
 }
 
 function crosswordBoardUrl(req, event, mission, solvedIds = []) {
@@ -4999,7 +5070,9 @@ async function missionCompletionResponse(req, event, mission, text, quickReplies
   }
 
   let response;
-  const mapImageUrl = missionMapUrl(req, event, team, { completedMissionId: mission.id });
+  const mapOptions = { completedMissionId: mission.id };
+  const mapImageUrl = missionMapUrl(req, event, team, mapOptions);
+  buttons = [...buttons, ...missionMapViewButtons(req, event, team, mapOptions)].slice(0, 3);
   const finalImageUrls = [...new Set([...(Array.isArray(imageUrls) ? imageUrls : []), mapImageUrl].filter(Boolean))];
   if (finalImageUrls.length > 1) response = kakaoCarousel(buildImageCards(cardTitle, '', finalImageUrls), quickReplies, finalText, buttons);
   else if (finalImageUrls.length === 1) response = kakaoCard(cardTitle, finalText, buttons, quickReplies, finalImageUrls[0]);
@@ -5127,11 +5200,12 @@ async function buildFinishMissionResponse(req, event, team, actorName, messages 
     : [];
   const finishImageUrl = messageImageUrl(req, messages, 'finish');
   const mapImageUrl = missionMapUrl(req, event, team);
+  const finishButtons = [...certificateButton, ...missionMapViewButtons(req, event, team)].slice(0, 3);
   const finishImageUrls = [...new Set([finishImageUrl, mapImageUrl].filter(Boolean))];
   const response = finishImageUrls.length > 1
-    ? kakaoCarousel(buildImageCards(visibleMessageTitle(messages, 'finish', '완주 완료'), '', finishImageUrls), ['순위', '내 점수'], finishText, certificateButton)
-    : certificateButton.length || finishImageUrls.length
-    ? kakaoCard(visibleMessageTitle(messages, 'finish', '완주 완료'), finishText, certificateButton, ['순위', '내 점수'], finishImageUrls[0] || '')
+    ? kakaoCarousel(buildImageCards(visibleMessageTitle(messages, 'finish', '완주 완료'), '', finishImageUrls), ['순위', '내 점수'], finishText, finishButtons)
+    : finishButtons.length || finishImageUrls.length
+    ? kakaoCard(visibleMessageTitle(messages, 'finish', '완주 완료'), finishText, finishButtons, ['순위', '내 점수'], finishImageUrls[0] || '')
     : kakaoText(finishText, ['순위', '내 점수']);
   const finishReplies = Array.isArray(response?.template?.quickReplies)
     ? response.template.quickReplies.filter(
@@ -5391,7 +5465,9 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
   });
 
   const answerImageUrls = missionImageLinks(req, answerImages);
-  const mapImageUrl = missionMapUrl(req, event, team, { completedMissionId: mission.id });
+  const mapOptions = { completedMissionId: mission.id };
+  const mapImageUrl = missionMapUrl(req, event, team, mapOptions);
+  buttons = [...buttons, ...missionMapViewButtons(req, event, team, mapOptions)].slice(0, 3);
   const completionImageUrls = [...new Set([...answerImageUrls, mapImageUrl].filter(Boolean))];
   if (completionImageUrls.length > 1) return markMissionCompletedResponse(kakaoCarousel(buildImageCards('', '', completionImageUrls), approvedPhotoQuickReplies(req), finalText, buttons));
   if (completionImageUrls.length === 1) return markMissionCompletedResponse(kakaoCard('', finalText, buttons, approvedPhotoQuickReplies(req), completionImageUrls[0]));
@@ -6797,7 +6873,7 @@ async function handleKakaoSkill(req, res) {
       // respondKakao가 읽지 않은 사진 승인/반려 알림을 이 응답 앞에 붙입니다.
       const mapImageUrl = missionMapUrl(req, event, team);
       const response = mapImageUrl
-        ? kakaoCard('', '새로운 사진 인증 결과를 확인했습니다.', [], menuQuickReplies, mapImageUrl)
+        ? kakaoCard('', '새로운 사진 인증 결과를 확인했습니다.', missionMapViewButtons(req, event, team), menuQuickReplies, mapImageUrl)
         : kakaoText('새로운 사진 인증 결과를 확인했습니다.', menuQuickReplies);
       return respondKakao(res, response, event, team, kakaoUserId);
     }
@@ -7535,48 +7611,11 @@ app.get('/api/public/missions/:id/crossword.png', async (req, res) => {
 app.get('/api/public/mission-map.png', async (req, res) => {
   try {
     const event = await getActiveEvent(req);
-    const teamId = Number(req.query.team || 0);
-    const completedMissionId = Number(req.query.completed || 0);
-    const hasExactProgress = Object.prototype.hasOwnProperty.call(req.query || {}, 'done');
-    const progressState = hasExactProgress ? String(req.query.done || '').trim() : '';
-    const parsedProgressIds = progressState
-      ? progressState.split('.').map((value) => Number(value))
-      : [];
-    const canonicalProgressIds = canonicalMissionProgressIds(parsedProgressIds);
-    const signature = String(req.query.sig || '').trim();
-    if (!Number.isInteger(teamId) || teamId <= 0 || !Number.isInteger(completedMissionId) || completedMissionId < 0) {
-      return res.status(400).send('invalid mission map request');
-    }
-    if (hasExactProgress && canonicalProgressIds.join('.') !== progressState) {
-      return res.status(400).send('invalid mission map progress');
-    }
-    const expectedSignature = missionMapSignature(
-      event.id,
-      teamId,
-      completedMissionId,
-      hasExactProgress ? progressState : ''
-    );
-    if (!safeSignatureEqual(signature, expectedSignature)) return res.status(403).send('invalid mission map signature');
+    const access = missionMapRequestAccess(req, event);
     const settings = await getMissionMapSettings(event.id);
     if (!settings.enabled || !settings.background_image_data) return res.status(404).send('mission map is not enabled');
 
-    let completedIds = canonicalProgressIds;
-    if (!hasExactProgress) {
-      const progressResult = await query(
-        `SELECT
-           EXISTS(SELECT 1 FROM teams t WHERE t.id=$2 AND t.event_id=$1) AS team_exists,
-           COALESCE(array_agg(DISTINCT s.mission_id) FILTER (WHERE s.mission_id IS NOT NULL), '{}') AS completed_ids
-         FROM submissions s
-         WHERE s.event_id=$1 AND s.team_id=$2 AND s.status IN ('correct','approved');`,
-        [event.id, teamId]
-      );
-      if (progressResult.rows[0]?.team_exists !== true) return res.status(404).send('team not found');
-      completedIds = canonicalMissionProgressIds(progressResult.rows[0]?.completed_ids || []);
-    }
-    completedIds = canonicalMissionProgressIds([
-      ...completedIds,
-      ...(completedMissionId > 0 ? [completedMissionId] : []),
-    ]);
+    const completedIds = await resolveMissionMapProgress(event.id, access);
     const epoch = Number(missionMapCacheEpoch.get(Number(event.id)) || 0);
     // 지도에는 팀 고유 정보가 그려지지 않으므로 같은 행사에서 완료 조합이 같으면
     // 여러 팀이 하나의 결과 이미지를 공유할 수 있습니다.
@@ -7599,11 +7638,154 @@ app.get('/api/public/mission-map.png', async (req, res) => {
       }
     );
     res.set('Content-Type', 'image/jpeg');
-    res.set('Cache-Control', hasExactProgress ? 'public, max-age=300, immutable' : 'private, max-age=60');
+    res.set('Cache-Control', access.hasExactProgress ? 'public, max-age=300, immutable' : 'private, max-age=60');
     res.send(image);
   } catch (error) {
     console.error('[mission-map render error]', error);
     res.status(400).send(error.message || 'mission map render failed');
+  }
+});
+
+app.get('/api/public/mission-map/view', async (req, res) => {
+  try {
+    const event = await getActiveEvent(req);
+    const access = missionMapRequestAccess(req, event);
+    const settings = await getMissionMapSettings(event.id);
+    if (!settings.enabled || !settings.background_image_data) return res.status(404).send('mission map is not enabled');
+    const completedIds = await resolveMissionMapProgress(event.id, access);
+    const completedSet = new Set(completedIds);
+    const linkOptions = access.hasExactProgress
+      ? { completedMissionId: access.completedMissionId, completedMissionIds: access.progressIds }
+      : { completedMissionId: access.completedMissionId };
+    const teamRef = { id: access.teamId };
+    const mapImageUrl = missionMapUrl(req, event, teamRef, linkOptions);
+    const missions = await getMissions(event.id);
+    const completedMissions = missions.filter((mission) => completedSet.has(Number(mission.id)));
+    const galleryItems = completedMissions.flatMap((mission) => {
+      const images = Array.isArray(mission.answer_images) ? mission.answer_images : [];
+      return images.map((image, index) => ({
+        imageUrl: `${baseUrl(req)}/api/public/mission-images/${encodeURIComponent(image.id)}`,
+        missionCode: String(mission.mission_code || ''),
+        missionName: String(mission.mission_name || ''),
+        index: index + 1,
+        count: images.length,
+      }));
+    });
+    const galleryHtml = galleryItems.length
+      ? galleryItems.map((item) => `
+        <article class="gallery-card">
+          <a href="${escapeHtml(item.imageUrl)}" target="_blank" rel="noopener">
+            <img src="${escapeHtml(item.imageUrl)}" alt="${escapeHtml(`${item.missionCode} ${item.missionName} 정답 설명 이미지`)}" loading="lazy" />
+          </a>
+          <div class="gallery-label">
+            <strong>${escapeHtml(item.missionCode)} ${escapeHtml(item.missionName)}</strong>
+            ${item.count > 1 ? `<span>${item.index}/${item.count}</span>` : ''}
+          </div>
+        </article>`).join('')
+      : '<div class="gallery-empty">아직 모은 정답 설명 이미지가 없습니다.<br>미션을 완료하면 이곳에 차곡차곡 추가됩니다.</div>';
+
+    res.set('Cache-Control', 'private, max-age=30');
+    res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    res.set('Content-Security-Policy', "default-src 'self'; img-src 'self' https: data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'self'");
+    return res.type('html').send(`<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, user-scalable=yes" />
+  <title>${escapeHtml(event.event_name)} 진행 지도</title>
+  <style>
+    :root { color-scheme:light; --ink:#18212f; --muted:#667085; --line:#d9dee8; --brand:#0f9960; --paper:#fff; --bg:#f2f5f7; }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; }
+    body { margin:0; font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:var(--bg); }
+    header { padding:18px 18px 14px; background:#fff; border-bottom:1px solid var(--line); }
+    header h1 { margin:0 0 5px; font-size:20px; line-height:1.35; }
+    header p { margin:0; color:var(--muted); font-size:14px; }
+    nav { position:sticky; top:0; z-index:20; display:flex; gap:8px; padding:10px 14px; background:rgba(255,255,255,.94); border-bottom:1px solid var(--line); backdrop-filter:blur(8px); }
+    nav a { flex:1; padding:10px 8px; border-radius:10px; background:#eef2f5; color:var(--ink); font-size:14px; font-weight:750; text-align:center; text-decoration:none; }
+    main { width:min(100%, 1080px); margin:0 auto; padding:14px; }
+    section { margin-bottom:18px; padding:14px; border:1px solid var(--line); border-radius:16px; background:var(--paper); box-shadow:0 3px 16px rgba(16,24,40,.06); }
+    .section-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:12px; }
+    h2 { margin:0; font-size:18px; }
+    .count { color:var(--muted); font-size:13px; white-space:nowrap; }
+    .zoom-tools { display:flex; align-items:center; gap:7px; margin-bottom:10px; }
+    .zoom-tools button { min-width:42px; height:40px; border:1px solid var(--line); border-radius:10px; background:#fff; color:var(--ink); font-size:18px; font-weight:800; }
+    .zoom-tools button:last-child { margin-left:auto; padding:0 12px; font-size:13px; }
+    #zoomLabel { min-width:56px; text-align:center; font-size:14px; font-weight:800; }
+    .map-viewport { width:100%; max-height:70vh; overflow:auto; border:1px solid #cfd5df; border-radius:12px; background:#e8edf1; overscroll-behavior:contain; touch-action:pan-x pan-y; }
+    .map-viewport img { display:block; width:100%; max-width:none; height:auto; cursor:zoom-in; user-select:none; -webkit-user-drag:none; transform-origin:0 0; }
+    .map-help { margin:9px 2px 0; color:var(--muted); font-size:13px; line-height:1.5; }
+    .gallery-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+    .gallery-card { overflow:hidden; border:1px solid var(--line); border-radius:12px; background:#fff; }
+    .gallery-card a { display:block; aspect-ratio:1/1; background:#eef1f4; }
+    .gallery-card img { width:100%; height:100%; object-fit:cover; display:block; }
+    .gallery-label { display:flex; justify-content:space-between; gap:8px; padding:9px 10px; font-size:13px; line-height:1.35; }
+    .gallery-label span { color:var(--muted); white-space:nowrap; }
+    .gallery-empty { padding:36px 14px; border:1px dashed var(--line); border-radius:12px; color:var(--muted); text-align:center; line-height:1.7; }
+    @media (min-width:720px) { .gallery-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } header, main { padding-left:22px; padding-right:22px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>${escapeHtml(event.event_name)}</h1>
+    <p>진행 지도를 확대해서 보고, 모은 정답 설명 이미지를 한곳에서 확인하세요.</p>
+  </header>
+  <nav><a href="#map">진행 지도</a><a href="#gallery">정답 이미지</a></nav>
+  <main>
+    <section id="map">
+      <div class="section-head"><h2>미션 진행 지도</h2><span class="count">완료 ${completedIds.length}곳</span></div>
+      <div class="zoom-tools">
+        <button type="button" id="zoomOut" aria-label="축소">−</button>
+        <span id="zoomLabel">100%</span>
+        <button type="button" id="zoomIn" aria-label="확대">＋</button>
+        <button type="button" id="zoomReset">화면 맞춤</button>
+      </div>
+      <div class="map-viewport" id="mapViewport">
+        <img id="missionMap" src="${escapeHtml(mapImageUrl)}" alt="미션 진행 지도" />
+      </div>
+      <p class="map-help">지도를 누르면 2배로 확대됩니다. 확대 후 손가락으로 움직이거나 ＋/− 버튼을 사용하세요.</p>
+    </section>
+    <section id="gallery">
+      <div class="section-head"><h2>모은 정답 설명 이미지</h2><span class="count">${galleryItems.length}장</span></div>
+      <div class="gallery-grid">${galleryHtml}</div>
+    </section>
+  </main>
+  <script>
+    (() => {
+      const image = document.getElementById('missionMap');
+      const viewport = document.getElementById('mapViewport');
+      const label = document.getElementById('zoomLabel');
+      let zoom = 100;
+      const applyZoom = (next, focusX = .5, focusY = .5) => {
+        const oldWidth = Math.max(1, image.getBoundingClientRect().width);
+        const contentX = viewport.scrollLeft + viewport.clientWidth * focusX;
+        const contentY = viewport.scrollTop + viewport.clientHeight * focusY;
+        zoom = Math.min(400, Math.max(100, Math.round(next / 25) * 25));
+        image.style.width = zoom + '%';
+        label.textContent = zoom + '%';
+        requestAnimationFrame(() => {
+          const ratio = image.getBoundingClientRect().width / oldWidth;
+          viewport.scrollLeft = contentX * ratio - viewport.clientWidth * focusX;
+          viewport.scrollTop = contentY * ratio - viewport.clientHeight * focusY;
+          image.style.cursor = zoom > 100 ? 'zoom-out' : 'zoom-in';
+        });
+      };
+      document.getElementById('zoomIn').addEventListener('click', () => applyZoom(zoom + 50));
+      document.getElementById('zoomOut').addEventListener('click', () => applyZoom(zoom - 50));
+      document.getElementById('zoomReset').addEventListener('click', () => applyZoom(100));
+      image.addEventListener('click', (event) => {
+        const rect = image.getBoundingClientRect();
+        const focusX = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+        const focusY = Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height));
+        applyZoom(zoom === 100 ? 200 : 100, focusX, focusY);
+      });
+    })();
+  </script>
+</body>
+</html>`);
+  } catch (error) {
+    console.error('[mission-map view error]', error);
+    return res.status(400).type('html').send('<!doctype html><meta charset="utf-8"><p>지도를 불러오지 못했습니다. 카카오톡에서 미션 목록을 다시 열어주세요.</p>');
   }
 });
 
