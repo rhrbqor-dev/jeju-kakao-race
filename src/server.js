@@ -4125,22 +4125,15 @@ async function handleMissionList(req, event, team, messages = DEFAULT_MESSAGE_SE
   const mapOptions = {
     completedMissionIds: [...completedMap.keys()],
   };
-  const mapImageUrl = missionMapUrl(req, event, team, mapOptions);
-  if (!mapImageUrl) {
+  const mapButtons = missionMapViewButtons(req, event, team, mapOptions);
+  if (!mapButtons.length) {
     return skipKakaoCommonPostProcessing(
       kakaoConfiguredMessage(req, messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list', text, menuQuickReplies, '')
     );
   }
   const configuredImageUrl = messageImageUrl(req, messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list');
-  const imageUrls = [...new Set([configuredImageUrl, mapImageUrl].filter(Boolean))];
-  const mapButtons = missionMapViewButtons(req, event, team, mapOptions);
   const cardTitle = visibleMessageTitle(messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list', '');
-  if (imageUrls.length > 1) {
-    return skipKakaoCommonPostProcessing(
-      kakaoCarousel(buildImageCards(cardTitle, '', imageUrls), menuQuickReplies, text, mapButtons)
-    );
-  }
-  return skipKakaoCommonPostProcessing(kakaoCard(cardTitle, text, mapButtons, menuQuickReplies, imageUrls[0]));
+  return skipKakaoCommonPostProcessing(kakaoCard(cardTitle, text, mapButtons, menuQuickReplies, configuredImageUrl));
 }
 
 async function handleScore(team, messages = DEFAULT_MESSAGE_SETTINGS) {
@@ -4388,13 +4381,10 @@ function missionMapViewButtons(req, event, team, options = {}) {
   // 버튼 링크는 과거 응답을 다시 열어도 최신 완료 현황이 나오도록 완료 목록을
   // URL에 고정하지 않습니다. 방금 완료한 미션만 저장 지연에 대비해 포함합니다.
   const liveOptions = { completedMissionId: Number(options.completedMissionId || 0) };
-  const mapUrl = missionMapViewUrl(req, event, team, liveOptions, 'map');
-  const galleryUrl = missionMapViewUrl(req, event, team, liveOptions, 'gallery');
-  if (!mapUrl || !galleryUrl) return [];
-  return [
-    { action: 'webLink', label: '지도 크게 보기', webLinkUrl: mapUrl },
-    { action: 'webLink', label: '정답 이미지 모아보기', webLinkUrl: galleryUrl },
-  ];
+  const viewUrl = missionMapViewUrl(req, event, team, liveOptions);
+  if (!viewUrl) return [];
+  // 카카오 버튼 label 제한(14자) 안에서 지도와 정답 이미지가 한 페이지임을 안내합니다.
+  return [{ action: 'webLink', label: '지도·정답 이미지 모아보기', webLinkUrl: viewUrl }];
 }
 
 function missionMapMarkerTextPath(text, x, y, fontSize, fill = '#ffffff') {
@@ -5071,9 +5061,8 @@ async function missionCompletionResponse(req, event, mission, text, quickReplies
 
   let response;
   const mapOptions = { completedMissionId: mission.id };
-  const mapImageUrl = missionMapUrl(req, event, team, mapOptions);
   buttons = [...buttons, ...missionMapViewButtons(req, event, team, mapOptions)].slice(0, 3);
-  const finalImageUrls = [...new Set([...(Array.isArray(imageUrls) ? imageUrls : []), mapImageUrl].filter(Boolean))];
+  const finalImageUrls = [...new Set((Array.isArray(imageUrls) ? imageUrls : []).filter(Boolean))];
   if (finalImageUrls.length > 1) response = kakaoCarousel(buildImageCards(cardTitle, '', finalImageUrls), quickReplies, finalText, buttons);
   else if (finalImageUrls.length === 1) response = kakaoCard(cardTitle, finalText, buttons, quickReplies, finalImageUrls[0]);
   else if (buttons.length && options.buttonsAsQuickReplies) response = kakaoText(finalText, [...buttons, ...quickReplies]);
@@ -5199,9 +5188,8 @@ async function buildFinishMissionResponse(req, event, team, actorName, messages 
     ? [{ action: 'webLink', label: '수료증 보기', webLinkUrl: certificateUrl(req, event, team, actorName) }]
     : [];
   const finishImageUrl = messageImageUrl(req, messages, 'finish');
-  const mapImageUrl = missionMapUrl(req, event, team);
   const finishButtons = [...certificateButton, ...missionMapViewButtons(req, event, team)].slice(0, 3);
-  const finishImageUrls = [...new Set([finishImageUrl, mapImageUrl].filter(Boolean))];
+  const finishImageUrls = [...new Set([finishImageUrl].filter(Boolean))];
   const response = finishImageUrls.length > 1
     ? kakaoCarousel(buildImageCards(visibleMessageTitle(messages, 'finish', '완주 완료'), '', finishImageUrls), ['순위', '내 점수'], finishText, finishButtons)
     : finishButtons.length || finishImageUrls.length
@@ -5466,9 +5454,8 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
 
   const answerImageUrls = missionImageLinks(req, answerImages);
   const mapOptions = { completedMissionId: mission.id };
-  const mapImageUrl = missionMapUrl(req, event, team, mapOptions);
   buttons = [...buttons, ...missionMapViewButtons(req, event, team, mapOptions)].slice(0, 3);
-  const completionImageUrls = [...new Set([...answerImageUrls, mapImageUrl].filter(Boolean))];
+  const completionImageUrls = [...new Set(answerImageUrls.filter(Boolean))];
   if (completionImageUrls.length > 1) return markMissionCompletedResponse(kakaoCarousel(buildImageCards('', '', completionImageUrls), approvedPhotoQuickReplies(req), finalText, buttons));
   if (completionImageUrls.length === 1) return markMissionCompletedResponse(kakaoCard('', finalText, buttons, approvedPhotoQuickReplies(req), completionImageUrls[0]));
   return markMissionCompletedResponse(kakaoText(finalText, [...buttons, ...approvedPhotoQuickReplies(req)]));
@@ -6871,9 +6858,9 @@ async function handleKakaoSkill(req, res) {
 
     if (isPhotoResultCommand(utterance)) {
       // respondKakao가 읽지 않은 사진 승인/반려 알림을 이 응답 앞에 붙입니다.
-      const mapImageUrl = missionMapUrl(req, event, team);
-      const response = mapImageUrl
-        ? kakaoCard('', '새로운 사진 인증 결과를 확인했습니다.', missionMapViewButtons(req, event, team), menuQuickReplies, mapImageUrl)
+      const mapButtons = missionMapViewButtons(req, event, team);
+      const response = mapButtons.length
+        ? kakaoCard('', '새로운 사진 인증 결과를 확인했습니다.', mapButtons, menuQuickReplies)
         : kakaoText('새로운 사진 인증 결과를 확인했습니다.', menuQuickReplies);
       return respondKakao(res, response, event, team, kakaoUserId);
     }
