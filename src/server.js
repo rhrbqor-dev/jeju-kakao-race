@@ -1049,6 +1049,7 @@ const missionImageBinaryCache = new Map();
 const missionMapStaticAssetsCache = new Map();
 const missionMapRenderCache = new Map();
 const missionMapCacheEpoch = new Map();
+const MISSION_MAP_RENDER_VERSION = 2;
 
 function getFreshCacheEntry(cache, key) {
   const entry = cache.get(key);
@@ -4358,7 +4359,7 @@ function missionMapSignedLink(req, event, team, options = {}, pathname = '/api/p
   const progressState = hasExactProgress ? progressIds.join('.') : '';
   const signature = missionMapSignature(event.id, team.id, completedMissionId, progressState);
   const epoch = Number(missionMapCacheEpoch.get(Number(event.id)) || 0);
-  const versionSeed = `${epoch}:${completedMissionId}:${progressState || 'dynamic'}`;
+  const versionSeed = `${MISSION_MAP_RENDER_VERSION}:${epoch}:${completedMissionId}:${progressState || 'dynamic'}`;
   const version = createHash('sha1').update(versionSeed).digest('hex').slice(0, 10);
   const progressQuery = hasExactProgress ? `&done=${encodeURIComponent(progressState)}` : '';
   const pathValue = urlWithEvent(
@@ -4404,10 +4405,9 @@ async function renderMissionMapMarker(mission, size) {
   const completed = mission?.completed === true;
   const labelFontSize = Math.max(16, Math.round(size * (missionCode.length > 5 ? 0.16 : 0.21)));
   const labelHeight = Math.max(27, Math.round(size * 0.25));
+  const labelGap = Math.max(4, Math.round(size * 0.04));
   const borderWidth = Math.max(4, Math.round(size * 0.045));
   const checkSize = Math.max(24, Math.round(size * 0.3));
-  const labelY = size - labelHeight / 2 - 2;
-  const codePath = missionMapMarkerTextPath(missionCode, size / 2, labelY, labelFontSize);
 
   if (!completed) {
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
@@ -4415,7 +4415,13 @@ async function renderMissionMapMarker(mission, size) {
       <circle cx="${size / 2}" cy="${size / 2}" r="${size * 0.34}" fill="#f59e0b"/>
       ${missionMapMarkerTextPath(missionCode, size / 2, size / 2, Math.max(18, Math.round(size * 0.25)))}
     </svg>`;
-    return sharp(Buffer.from(svg)).png().toBuffer();
+    return {
+      input: await sharp(Buffer.from(svg)).png().toBuffer(),
+      width: size,
+      height: size,
+      anchorX: size / 2,
+      anchorY: size / 2,
+    };
   }
 
   let stamp;
@@ -4440,14 +4446,36 @@ async function renderMissionMapMarker(mission, size) {
     stamp = await sharp(Buffer.from(fallback)).png().toBuffer();
   }
 
-  const frame = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+  // 완료 미션의 코드는 정답 이미지 위를 가리지 않도록 원 아래의 별도 라벨에 표시합니다.
+  const canvasHeight = size + labelGap + labelHeight;
+  const labelTop = size + labelGap;
+  const labelY = labelTop + labelHeight / 2 - 2;
+  const codePath = missionMapMarkerTextPath(missionCode, size / 2, labelY, labelFontSize);
+  const frame = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${canvasHeight}" viewBox="0 0 ${size} ${canvasHeight}">
     <circle cx="${size / 2}" cy="${size / 2}" r="${size * 0.46}" fill="none" stroke="#0f9960" stroke-width="${borderWidth}"/>
-    <rect x="${size * 0.16}" y="${size - labelHeight - 4}" width="${size * 0.68}" height="${labelHeight}" rx="${labelHeight / 2}" fill="#0f9960"/>
+    <rect x="${size * 0.12}" y="${labelTop}" width="${size * 0.76}" height="${labelHeight}" rx="${labelHeight / 2}" fill="#0f9960"/>
     ${codePath}
     <circle cx="${size - checkSize * 0.48}" cy="${checkSize * 0.48}" r="${checkSize * 0.45}" fill="#0f9960" stroke="#fff" stroke-width="${Math.max(2, borderWidth / 2)}"/>
     <path d="M ${size - checkSize * 0.68} ${checkSize * 0.47} L ${size - checkSize * 0.54} ${checkSize * 0.61} L ${size - checkSize * 0.28} ${checkSize * 0.31}" fill="none" stroke="#fff" stroke-width="${Math.max(3, checkSize * 0.11)}" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>`);
-  return sharp(stamp).composite([{ input: frame }]).png().toBuffer();
+  const marker = await sharp({
+    create: {
+      width: size,
+      height: canvasHeight,
+      channels: 4,
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    },
+  }).composite([
+    { input: stamp, left: 0, top: 0 },
+    { input: frame, left: 0, top: 0 },
+  ]).png().toBuffer();
+  return {
+    input: marker,
+    width: size,
+    height: canvasHeight,
+    anchorX: size / 2,
+    anchorY: size / 2,
+  };
 }
 
 async function renderMissionProgressMap(settings, missions = []) {
@@ -4473,9 +4501,9 @@ async function renderMissionProgressMap(settings, missions = []) {
     const centerX = width * Math.min(100, Math.max(0, mapX)) / 100;
     const centerY = height * Math.min(100, Math.max(0, mapY)) / 100;
     return {
-      input: marker,
-      left: Math.max(0, Math.min(width - markerSize, Math.round(centerX - markerSize / 2))),
-      top: Math.max(0, Math.min(height - markerSize, Math.round(centerY - markerSize / 2))),
+      input: marker.input,
+      left: Math.max(0, Math.min(width - marker.width, Math.round(centerX - marker.anchorX))),
+      top: Math.max(0, Math.min(height - marker.height, Math.round(centerY - marker.anchorY))),
     };
   }))).filter(Boolean);
 
@@ -7606,7 +7634,7 @@ app.get('/api/public/mission-map.png', async (req, res) => {
     const epoch = Number(missionMapCacheEpoch.get(Number(event.id)) || 0);
     // 지도에는 팀 고유 정보가 그려지지 않으므로 같은 행사에서 완료 조합이 같으면
     // 여러 팀이 하나의 결과 이미지를 공유할 수 있습니다.
-    const renderCacheKey = `${Number(event.id)}:${epoch}:${completedIds.join('.') || 'none'}`;
+    const renderCacheKey = `${MISSION_MAP_RENDER_VERSION}:${Number(event.id)}:${epoch}:${completedIds.join('.') || 'none'}`;
     const image = await loadBoundedCache(
       missionMapRenderCache,
       renderCacheKey,
