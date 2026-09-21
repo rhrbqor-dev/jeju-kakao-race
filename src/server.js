@@ -4,20 +4,15 @@ import { Pool } from 'pg';
 import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { readFileSync } from 'fs';
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'crypto';
 import sharp from 'sharp';
+import TextToSVG from 'text-to-svg';
 import { createClient } from '@supabase/supabase-js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, '..', 'public');
-let crosswordFontDataUri = '';
-try {
-  crosswordFontDataUri = `data:font/truetype;base64,${readFileSync(path.join(__dirname, '..', 'fonts', 'GyeonggiBatang_Bold.ttf')).toString('base64')}`;
-} catch (error) {
-  console.warn('WARNING: Crossword image font could not be loaded:', error.message);
-}
+const crosswordTextToSvg = TextToSVG.loadSync(path.join(__dirname, '..', 'fonts', 'GyeonggiBatang_Bold.ttf'));
 
 const PORT = Number(process.env.PORT || 3000);
 const DATABASE_URL = process.env.DATABASE_URL || '';
@@ -319,15 +314,19 @@ async function renderCrosswordBoardPng(value = {}, solvedIds = []) {
         grid.push(`<text class="clue-number" x="${x + Math.max(5, cellSize * 0.08)}" y="${y + Math.max(16, cellSize * 0.23)}" font-size="${numberSize}">${escapeSvgText(numberText)}</text>`);
       }
       if (cell?.revealed) {
-        grid.push(`<text class="answer-letter" x="${x + cellSize / 2}" y="${y + cellSize * 0.68}" font-size="${letterSize}">${escapeSvgText(cell.letter)}</text>`);
+        grid.push(crosswordTextToSvg.getPath(cell.letter, {
+          x: x + cellSize / 2,
+          y: y + cellSize / 2,
+          fontSize: letterSize,
+          anchor: 'center middle',
+          attributes: { fill: '#172033' },
+        }));
       }
     }
   }
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
     <style>
-      ${crosswordFontDataUri ? `@font-face { font-family: 'CrosswordKorean'; src: url('${crosswordFontDataUri}') format('truetype'); }` : ''}
       .clue-number { font-family: Arial, sans-serif; font-weight: 700; fill: #2b2118; }
-      .answer-letter { font-family: 'CrosswordKorean', 'Noto Sans KR', 'Malgun Gothic', sans-serif; font-weight: 700; fill: #172033; text-anchor: middle; }
     </style>
     <rect width="100%" height="100%" fill="#6b3d22"/>
     ${grid.join('\n')}
@@ -3988,7 +3987,7 @@ function crosswordBoardUrl(req, event, mission, solvedIds = []) {
   const solved = crosswordSolvedIndexText(mission, solvedIds);
   const signature = crosswordImageSignature(event?.id, mission?.id, solved);
   const version = createHash('sha1')
-    .update(`${JSON.stringify(normalizeCrosswordData(mission?.crossword_data))}:${solved}`)
+    .update(`outline-v1:${JSON.stringify(normalizeCrosswordData(mission?.crossword_data))}:${solved}`)
     .digest('hex')
     .slice(0, 12);
   const pathValue = urlWithEvent(
