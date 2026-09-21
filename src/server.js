@@ -27,6 +27,18 @@ const configuredDbPoolMax = Number(process.env.DB_POOL_MAX || 10);
 const DB_POOL_MAX = Number.isFinite(configuredDbPoolMax)
   ? Math.min(20, Math.max(5, Math.floor(configuredDbPoolMax)))
   : 10;
+const configuredMissionCacheTtl = Number(process.env.MISSION_CACHE_TTL_MS || 5 * 60 * 1000);
+const MISSION_CACHE_TTL_MS = Number.isFinite(configuredMissionCacheTtl)
+  ? Math.min(30 * 60 * 1000, Math.max(30 * 1000, configuredMissionCacheTtl))
+  : 5 * 60 * 1000;
+const configuredMissionImageCacheTtl = Number(process.env.MISSION_IMAGE_CACHE_TTL_MS || 10 * 60 * 1000);
+const MISSION_IMAGE_CACHE_TTL_MS = Number.isFinite(configuredMissionImageCacheTtl)
+  ? Math.min(60 * 60 * 1000, Math.max(60 * 1000, configuredMissionImageCacheTtl))
+  : 10 * 60 * 1000;
+const configuredMissionMapCacheTtl = Number(process.env.MISSION_MAP_CACHE_TTL_MS || 10 * 60 * 1000);
+const MISSION_MAP_CACHE_TTL_MS = Number.isFinite(configuredMissionMapCacheTtl)
+  ? Math.min(60 * 60 * 1000, Math.max(60 * 1000, configuredMissionMapCacheTtl))
+  : 10 * 60 * 1000;
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
 const SUPABASE_URL = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const SUPABASE_SERVICE_ROLE_KEY = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
@@ -746,6 +758,8 @@ const EVENT_CACHE_TTL_MS = 5 * 60 * 1000;
 const eventIdentifierCache = new Map();
 const kakaoEventSessionCache = new Map();
 const kakaoBotEventCache = new Map();
+const pendingKakaoEventSessions = new Map();
+let kakaoEventSessionFlushTimer = null;
 let defaultEventCache = null;
 
 function timedCacheValue(entry) {
@@ -868,17 +882,52 @@ async function getKakaoUserEventSession(kakaoUserId = '') {
   return event;
 }
 
-async function setKakaoUserEventSession(kakaoUserId = '', eventId = null) {
+async function flushKakaoEventSessions() {
+  kakaoEventSessionFlushTimer = null;
+  const entries = [...pendingKakaoEventSessions.entries()].slice(0, 200);
+  if (!entries.length) return;
+  for (const [userId] of entries) pendingKakaoEventSessions.delete(userId);
+  try {
+    await query(
+      `INSERT INTO user_event_sessions(kakao_user_id, event_id, updated_at)
+       SELECT pending.kakao_user_id, pending.event_id, NOW()
+       FROM UNNEST($1::text[], $2::integer[]) AS pending(kakao_user_id, event_id)
+       ON CONFLICT(kakao_user_id)
+       DO UPDATE SET event_id=EXCLUDED.event_id, updated_at=NOW()
+       WHERE user_event_sessions.event_id IS DISTINCT FROM EXCLUDED.event_id;`,
+      [entries.map(([userId]) => userId), entries.map(([, eventId]) => eventId)]
+    );
+  } catch (error) {
+    console.error('[kakao-event-session batch error]', error.message);
+    for (const [userId, eventId] of entries) pendingKakaoEventSessions.set(userId, eventId);
+  } finally {
+    if (pendingKakaoEventSessions.size && !kakaoEventSessionFlushTimer) {
+      kakaoEventSessionFlushTimer = setTimeout(() => flushKakaoEventSessions(), 1000);
+      kakaoEventSessionFlushTimer.unref?.();
+    }
+  }
+}
+
+function setKakaoUserEventSession(kakaoUserId = '', eventId = null, event = null) {
   if (!kakaoUserId || !eventId) return;
-  await query(
-    `INSERT INTO user_event_sessions(kakao_user_id, event_id, updated_at)
-     VALUES ($1,$2,NOW())
-     ON CONFLICT(kakao_user_id)
-     DO UPDATE SET event_id=$2, updated_at=NOW();`,
-    [kakaoUserId, eventId]
-  );
-  const event = timedCacheValue(eventIdentifierCache.get(String(eventId)));
-  if (event) kakaoEventSessionCache.set(kakaoUserId, { value: event, expiresAt: Date.now() + EVENT_CACHE_TTL_MS });
+  const numericEventId = Number(eventId);
+  const cachedEntry = kakaoEventSessionCache.get(kakaoUserId);
+  const cachedEventId = Number(cachedEntry?.value?.id || 0);
+  const rememberedEvent = event || timedCacheValue(eventIdentifierCache.get(String(numericEventId)));
+  if (rememberedEvent) {
+    kakaoEventSessionCache.set(kakaoUserId, {
+      value: rememberedEvent,
+      expiresAt: Date.now() + EVENT_CACHE_TTL_MS,
+    });
+  }
+  // 같은 행사로 들어오는 모든 메시지마다 UPSERT를 기다리지 않습니다. 변경된 세션만
+  // 메모리에 즉시 반영하고 짧은 시간 동안 모아 한 번의 DB 명령으로 저장합니다.
+  if (cachedEventId === numericEventId || pendingKakaoEventSessions.get(kakaoUserId) === numericEventId) return;
+  pendingKakaoEventSessions.set(kakaoUserId, numericEventId);
+  if (!kakaoEventSessionFlushTimer) {
+    kakaoEventSessionFlushTimer = setTimeout(() => flushKakaoEventSessions(), 3000);
+    kakaoEventSessionFlushTimer.unref?.();
+  }
 }
 
 async function resolveKakaoEvent(req, kakaoUserId = '') {
@@ -886,7 +935,7 @@ async function resolveKakaoEvent(req, kakaoUserId = '') {
   if (identifier) {
     const event = await getEventByIdentifier(identifier);
     if (!event) throw new Error(`미션레이스를 찾을 수 없습니다: ${identifier}`);
-    await setKakaoUserEventSession(kakaoUserId, event.id);
+    setKakaoUserEventSession(kakaoUserId, event.id, event);
     req.selectedEvent = event;
     return event;
   }
@@ -974,6 +1023,7 @@ async function copyEventContent(sourceEventId, targetEventId) {
   messageSettingsCache.delete(Number(targetEventId));
   participationFeatureSettingsCache.delete(Number(targetEventId));
   missionMapSettingsCache.delete(Number(targetEventId));
+  invalidateMissionContentCache(targetEventId);
 }
 
 async function ensureAppSettingsTable() {
@@ -993,6 +1043,67 @@ async function ensureAppSettingsTable() {
 const messageSettingsCache = new Map();
 const participationFeatureSettingsCache = new Map();
 const missionMapSettingsCache = new Map();
+const missionDefinitionCache = new Map();
+const missionImageMetadataCache = new Map();
+const missionImageBinaryCache = new Map();
+const missionMapStaticAssetsCache = new Map();
+const missionMapRenderCache = new Map();
+const missionMapCacheEpoch = new Map();
+
+function getFreshCacheEntry(cache, key) {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (entry.promise) return entry;
+  if (entry.expiresAt > Date.now()) {
+    cache.delete(key);
+    cache.set(key, entry);
+    return entry;
+  }
+  cache.delete(key);
+  return null;
+}
+
+async function loadBoundedCache(cache, key, ttlMs, maxEntries, loader) {
+  const cached = getFreshCacheEntry(cache, key);
+  if (cached?.promise) return cached.promise;
+  if (cached) return cached.value;
+  const promise = Promise.resolve().then(loader);
+  cache.set(key, { promise, expiresAt: Date.now() + ttlMs });
+  try {
+    const value = await promise;
+    cache.set(key, { value, expiresAt: Date.now() + ttlMs });
+    while (cache.size > maxEntries) cache.delete(cache.keys().next().value);
+    return value;
+  } catch (error) {
+    cache.delete(key);
+    throw error;
+  }
+}
+
+function invalidateMissionMapRenderCache(eventId) {
+  const eventKey = Number(eventId || 0);
+  missionMapStaticAssetsCache.delete(eventKey);
+  missionMapCacheEpoch.set(eventKey, Number(missionMapCacheEpoch.get(eventKey) || 0) + 1);
+  for (const key of missionMapRenderCache.keys()) {
+    if (String(key).startsWith(`${eventKey}:`)) missionMapRenderCache.delete(key);
+  }
+}
+
+function invalidateMissionContentCache(eventId, missionId = null) {
+  missionDefinitionCache.delete(Number(eventId || 0));
+  if (missionId) {
+    const prefix = `${Number(missionId)}:`;
+    for (const key of missionImageMetadataCache.keys()) {
+      if (String(key).startsWith(prefix)) missionImageMetadataCache.delete(key);
+    }
+  } else {
+    missionImageMetadataCache.clear();
+  }
+  // 이미지 추가·삭제·종류 변경은 개별 이미지 ID와 첫 안내 이미지 결과를 모두
+  // 바꿀 수 있으므로 작은 LRU 바이너리 캐시는 통째로 비웁니다.
+  missionImageBinaryCache.clear();
+  invalidateMissionMapRenderCache(eventId);
+}
 
 async function getSetting(eventId, settingKey, defaultValue = {}) {
   // app_settings는 서버 시작 시 initDb에서 생성합니다. 매 챗봇 요청마다
@@ -1023,7 +1134,10 @@ async function setSetting(eventId, settingKey, settingValue = {}) {
   );
   if (settingKey === 'chatbot_messages') messageSettingsCache.delete(Number(eventId));
   if (settingKey === 'participation_features') participationFeatureSettingsCache.delete(Number(eventId));
-  if (settingKey === 'mission_map') missionMapSettingsCache.delete(Number(eventId));
+  if (settingKey === 'mission_map') {
+    missionMapSettingsCache.delete(Number(eventId));
+    invalidateMissionMapRenderCache(eventId);
+  }
 }
 
 
@@ -2462,40 +2576,80 @@ async function initDb() {
     getMessageSettings(row.id),
     getParticipationFeatureSettings(row.id),
     getMissionMapSettings(row.id),
+    getMissions(row.id),
+    getMissionMapStaticAssets(row.id),
   ]));
 }
 
 
 async function getMissions(eventId) {
-  const result = await query(
-    `SELECT
-       m.id, m.event_id, m.mission_code, m.mission_name, m.mission_type, m.question, m.answer,
-       m.quiz_type, m.choices, m.sequence_answer, m.crossword_data,
-       m.answer_explanation, m.wrong_message, m.wrong_penalty, m.hint_penalty, m.score, m.hint, m.location_name, m.latitude, m.longitude,
-       m.radius_m, m.map_x, m.map_y, m.sort_order, m.is_required, m.created_at,
-       m.next_mission_id, m.next_mission_button_label, m.next_mission_message_template,
-       nm.mission_code AS next_mission_code, nm.mission_name AS next_mission_name,
-       COALESCE(mi.mission_image_count, 0)::int AS mission_image_count,
-       COALESCE(ai.answer_image_count, 0)::int AS answer_image_count,
-       (COALESCE(mi.mission_image_count, 0) > 0) AS has_mission_image,
-       (COALESCE(ai.answer_image_count, 0) > 0) AS has_answer_image
-     FROM missions m
-     LEFT JOIN missions nm ON nm.id=m.next_mission_id AND nm.event_id=m.event_id
-     LEFT JOIN (SELECT mission_id, COUNT(*)::int AS mission_image_count FROM mission_images WHERE image_kind='mission' GROUP BY mission_id) mi ON mi.mission_id=m.id
-     LEFT JOIN (SELECT mission_id, COUNT(*)::int AS answer_image_count FROM mission_images WHERE image_kind='answer' GROUP BY mission_id) ai ON ai.mission_id=m.id
-     WHERE m.event_id=$1
-     ORDER BY m.sort_order ASC, m.id ASC;`,
-    [eventId]
+  const cacheKey = Number(eventId);
+  const rows = await loadBoundedCache(
+    missionDefinitionCache,
+    cacheKey,
+    MISSION_CACHE_TTL_MS,
+    50,
+    async () => {
+      const result = await query(
+        `SELECT
+           m.id, m.event_id, m.mission_code, m.mission_name, m.mission_type, m.question, m.answer,
+           m.quiz_type, m.choices, m.sequence_answer, m.crossword_data,
+           m.answer_explanation, m.wrong_message, m.wrong_penalty, m.hint_penalty, m.score, m.hint, m.location_name, m.latitude, m.longitude,
+           m.radius_m, m.map_x, m.map_y, m.sort_order, m.is_required, m.created_at,
+           m.next_mission_id, m.next_mission_button_label, m.next_mission_message_template,
+           nm.mission_code AS next_mission_code, nm.mission_name AS next_mission_name,
+           COALESCE(images.mission_image_count, 0)::int AS mission_image_count,
+           COALESCE(images.answer_image_count, 0)::int AS answer_image_count,
+           (COALESCE(images.mission_image_count, 0) > 0) AS has_mission_image,
+           (COALESCE(images.answer_image_count, 0) > 0) AS has_answer_image,
+           COALESCE(images.mission_images, '[]'::jsonb) AS mission_images,
+           COALESCE(images.answer_images, '[]'::jsonb) AS answer_images
+         FROM missions m
+         LEFT JOIN missions nm ON nm.id=m.next_mission_id AND nm.event_id=m.event_id
+         LEFT JOIN (
+           SELECT mi.mission_id,
+                  COUNT(*) FILTER (WHERE mi.image_kind='mission')::int AS mission_image_count,
+                  COUNT(*) FILTER (WHERE mi.image_kind='answer')::int AS answer_image_count,
+                  COALESCE(
+                    jsonb_agg(to_jsonb(mi) - 'image_data' ORDER BY mi.sort_order, mi.id)
+                      FILTER (WHERE mi.image_kind='mission'),
+                    '[]'::jsonb
+                  ) AS mission_images,
+                  COALESCE(
+                    jsonb_agg(to_jsonb(mi) - 'image_data' ORDER BY mi.sort_order, mi.id)
+                      FILTER (WHERE mi.image_kind='answer'),
+                    '[]'::jsonb
+                  ) AS answer_images
+           FROM mission_images mi
+           JOIN missions image_mission ON image_mission.id=mi.mission_id AND image_mission.event_id=$1
+           GROUP BY mi.mission_id
+         ) images ON images.mission_id=m.id
+         WHERE m.event_id=$1
+         ORDER BY m.sort_order ASC, m.id ASC;`,
+        [eventId]
+      );
+      for (const mission of result.rows) {
+        missionImageMetadataCache.set(`${Number(mission.id)}:mission`, {
+          value: Array.isArray(mission.mission_images) ? mission.mission_images : [],
+          expiresAt: Date.now() + MISSION_CACHE_TTL_MS,
+        });
+        missionImageMetadataCache.set(`${Number(mission.id)}:answer`, {
+          value: Array.isArray(mission.answer_images) ? mission.answer_images : [],
+          expiresAt: Date.now() + MISSION_CACHE_TTL_MS,
+        });
+      }
+      return result.rows;
+    }
   );
-  return result.rows;
+  // 십자말풀이 진행 처리 등에서 미션 객체를 수정할 수 있으므로 캐시 원본을 직접
+  // 반환하지 않습니다.
+  return structuredClone(rows);
 }
 
 async function getMissionByCode(eventId, code) {
-  const result = await query(
-    `SELECT * FROM missions WHERE event_id=$1 AND UPPER(mission_code)=UPPER($2) LIMIT 1;`,
-    [eventId, code]
-  );
-  return result.rows[0] || null;
+  const normalizedCode = String(code || '').trim().toUpperCase();
+  const missions = await getMissions(eventId);
+  return missions.find((mission) => String(mission.mission_code || '').toUpperCase() === normalizedCode) || null;
 }
 
 async function getTeamByKakaoUser(eventId, kakaoUserId) {
@@ -2624,14 +2778,24 @@ function missionImagePublicUrl(req, imageId) {
 
 async function getMissionImages(missionId, kind = 'mission') {
   const imageKind = normalizeMissionImageKind(kind);
-  const result = await query(
-    `SELECT id, mission_id, image_kind, image_mime, file_name, sort_order, created_at
-     FROM mission_images
-     WHERE mission_id=$1 AND image_kind=$2
-     ORDER BY sort_order ASC, id ASC;`,
-    [missionId, imageKind]
+  const cacheKey = `${Number(missionId)}:${imageKind}`;
+  const images = await loadBoundedCache(
+    missionImageMetadataCache,
+    cacheKey,
+    MISSION_CACHE_TTL_MS,
+    1000,
+    async () => {
+      const result = await query(
+        `SELECT id, event_id, mission_id, image_kind, image_mime, file_name, sort_order, created_at
+         FROM mission_images
+         WHERE mission_id=$1 AND image_kind=$2
+         ORDER BY sort_order ASC, id ASC;`,
+        [missionId, imageKind]
+      );
+      return result.rows;
+    }
   );
-  return result.rows;
+  return structuredClone(images);
 }
 
 async function getMissionImageCount(missionId, kind = 'mission') {
@@ -2664,6 +2828,7 @@ async function removeMissionAnswerImageDuplicates(eventId, missionId = null) {
        );`,
     params
   );
+  invalidateMissionContentCache(eventId, missionId);
 }
 
 async function addMissionImages(eventId, missionId, kind, images = []) {
@@ -2687,6 +2852,8 @@ async function addMissionImages(eventId, missionId, kind, images = []) {
   // 정답 이미지 업로드 중 mission 쪽에 만들어진 동일 이미지 중복본은 질문 이미지 목록에서 제거합니다.
   if (imageKind === 'answer' && inserted.length) {
     await removeMissionAnswerImageDuplicates(eventId, missionId);
+  } else if (inserted.length) {
+    invalidateMissionContentCache(eventId, missionId);
   }
 
   return inserted;
@@ -3448,6 +3615,68 @@ async function getMissionCompletion(teamId, missionId) {
   return result.rows[0] || null;
 }
 
+async function beginMissionAttempt(eventId, teamId, missionId, kakaoUserId = '', stateName = '', stateValue = {}) {
+  const result = await query(
+    `/* mission-start-single-roundtrip */
+     WITH completion AS MATERIALIZED (
+       SELECT s.id, s.actor_kakao_user_id, s.actor_name, s.status, s.score, s.submitted_at
+       FROM submissions s
+       WHERE s.team_id=$2 AND s.mission_id=$3 AND s.status IN ('correct','approved')
+       ORDER BY s.score DESC, s.submitted_at ASC, s.id ASC
+       LIMIT 1
+     ), updated_team AS (
+       UPDATE teams t
+       SET current_mission_id=$3
+       WHERE t.id=$2 AND t.event_id=$1
+         AND NOT EXISTS (SELECT 1 FROM completion)
+       RETURNING t.id
+     ), saved_state AS (
+       INSERT INTO user_states(event_id, kakao_user_id, state, data, updated_at)
+       SELECT $1,$4,$5,$6::jsonb,NOW()
+       FROM updated_team
+       WHERE NULLIF(BTRIM($5), '') IS NOT NULL
+       ON CONFLICT(event_id, kakao_user_id)
+       DO UPDATE SET state=EXCLUDED.state, data=EXCLUDED.data, updated_at=NOW()
+       RETURNING id
+     ), mission_scores AS (
+       SELECT s.mission_id, MAX(s.score)::int AS score
+       FROM submissions s
+       WHERE s.team_id=$2 AND s.status IN ('correct','approved')
+       GROUP BY s.mission_id
+     ), score_summary AS (
+       SELECT (
+         COALESCE((SELECT SUM(score) FROM mission_scores), 0)
+         + COALESCE((
+           SELECT SUM(se.score_delta)
+           FROM score_events se
+           WHERE se.team_id=$2
+             AND (
+               se.event_type NOT IN ('hint','wrong')
+               OR EXISTS (
+                 SELECT 1 FROM mission_scores completed
+                 WHERE completed.mission_id=se.mission_id
+               )
+             )
+         ), 0)
+       )::int AS total
+     )
+     SELECT
+       (SELECT to_jsonb(completion) FROM completion LIMIT 1) AS completion,
+       EXISTS(SELECT 1 FROM updated_team) AS mission_started,
+       EXISTS(SELECT 1 FROM saved_state) AS state_saved,
+       CASE WHEN EXISTS(SELECT 1 FROM completion) THEN score_summary.total ELSE NULL END AS total
+     FROM score_summary;`,
+    [eventId, teamId, missionId, kakaoUserId, String(stateName || ''), JSON.stringify(stateValue || {})]
+  );
+  const row = result.rows[0] || {};
+  return {
+    completion: row.completion || null,
+    missionStarted: row.mission_started === true,
+    stateSaved: row.state_saved === true,
+    total: row.total === null || row.total === undefined ? null : Number(row.total),
+  };
+}
+
 async function maybeMarkFinished(team, eventId) {
   const [missions, completed] = await Promise.all([
     getMissions(eventId),
@@ -3844,10 +4073,8 @@ async function completedMissionDetails(teamId) {
   const result = await query(
     `WITH best AS (
        SELECT DISTINCT ON (s.mission_id)
-         s.mission_id, s.score, s.actor_name, s.submitted_at,
-         m.mission_code, m.mission_name, m.sort_order
+         s.mission_id, s.score, s.actor_name, s.submitted_at
        FROM submissions s
-       JOIN missions m ON m.id=s.mission_id
        WHERE s.team_id=$1 AND s.status IN ('correct', 'approved') AND s.score > 0
        ORDER BY s.mission_id, s.score DESC, s.submitted_at ASC
      ), adjustments AS (
@@ -3895,15 +4122,23 @@ async function handleMissionList(req, event, team, messages = DEFAULT_MESSAGE_SE
     ? rawTemplate
     : `${String(rawTemplate || '').trim()}\n\n{mission_list}`;
   const text = renderTemplate(template, variables).trim() || missionList;
-  const mapImageUrl = missionMapUrl(req, event, team);
+  const mapImageUrl = missionMapUrl(req, event, team, {
+    completedMissionIds: [...completedMap.keys()],
+  });
   if (!mapImageUrl) {
-    return kakaoConfiguredMessage(req, messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list', text, menuQuickReplies, '');
+    return skipKakaoCommonPostProcessing(
+      kakaoConfiguredMessage(req, messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list', text, menuQuickReplies, '')
+    );
   }
   const configuredImageUrl = messageImageUrl(req, messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list');
   const imageUrls = [...new Set([configuredImageUrl, mapImageUrl].filter(Boolean))];
   const cardTitle = visibleMessageTitle(messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list', '');
-  if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(cardTitle, '', imageUrls), menuQuickReplies, text);
-  return kakaoCard(cardTitle, text, [], menuQuickReplies, imageUrls[0]);
+  if (imageUrls.length > 1) {
+    return skipKakaoCommonPostProcessing(
+      kakaoCarousel(buildImageCards(cardTitle, '', imageUrls), menuQuickReplies, text)
+    );
+  }
+  return skipKakaoCommonPostProcessing(kakaoCard(cardTitle, text, [], menuQuickReplies, imageUrls[0]));
 }
 
 async function handleScore(team, messages = DEFAULT_MESSAGE_SETTINGS) {
@@ -4100,10 +4335,18 @@ function safeSignatureEqual(actual = '', expected = '') {
     && timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
-function missionMapSignature(eventId, teamId, completedMissionId = 0) {
+function canonicalMissionProgressIds(values = []) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0))]
+    .sort((a, b) => a - b);
+}
+
+function missionMapSignature(eventId, teamId, completedMissionId = 0, progressState = '') {
   const secret = KAKAO_SKILL_KEY || ADMIN_PASSWORD;
+  const stateSuffix = progressState === '' ? '' : `:done:${progressState}`;
   return createHmac('sha256', secret)
-    .update(`mission-map:${Number(eventId || 0)}:${Number(teamId || 0)}:${Number(completedMissionId || 0)}`)
+    .update(`mission-map:${Number(eventId || 0)}:${Number(teamId || 0)}:${Number(completedMissionId || 0)}${stateSuffix}`)
     .digest('hex')
     .slice(0, 32);
 }
@@ -4112,10 +4355,19 @@ function missionMapUrl(req, event, team, options = {}) {
   const settings = req?.missionMapSettings || missionMapSettingsCache.get(Number(event?.id || 0));
   if (!settings?.enabled || !settings?.background_image_data || !team?.id) return '';
   const completedMissionId = Number(options.completedMissionId || 0);
-  const signature = missionMapSignature(event.id, team.id, completedMissionId);
-  const version = Date.now().toString(36);
+  const hasExactProgress = Array.isArray(options.completedMissionIds);
+  const progressIds = canonicalMissionProgressIds([
+    ...(hasExactProgress ? options.completedMissionIds : []),
+    ...(completedMissionId > 0 ? [completedMissionId] : []),
+  ]);
+  const progressState = hasExactProgress ? progressIds.join('.') : '';
+  const signature = missionMapSignature(event.id, team.id, completedMissionId, progressState);
+  const epoch = Number(missionMapCacheEpoch.get(Number(event.id)) || 0);
+  const versionSeed = `${epoch}:${completedMissionId}:${progressState || 'dynamic'}`;
+  const version = createHash('sha1').update(versionSeed).digest('hex').slice(0, 10);
+  const progressQuery = hasExactProgress ? `&done=${encodeURIComponent(progressState)}` : '';
   const pathValue = urlWithEvent(
-    `/api/public/mission-map.png?team=${Number(team.id)}&completed=${completedMissionId}&sig=${signature}&v=${version}`,
+    `/api/public/mission-map.png?team=${Number(team.id)}&completed=${completedMissionId}${progressQuery}&sig=${signature}&v=${version}`,
     event
   );
   return `${baseUrl(req)}${pathValue}`;
@@ -4189,6 +4441,8 @@ async function renderMissionProgressMap(settings, missions = []) {
   const background = Buffer.from(settings.background_image_data, 'base64');
   const normalized = await sharp(background)
     .rotate()
+    .toColorspace('srgb')
+    .flatten({ background: '#ffffff' })
     .resize({ width: 1200, height: 1200, fit: 'inside', withoutEnlargement: true })
     .png()
     .toBuffer({ resolveWithObject: true });
@@ -4213,8 +4467,39 @@ async function renderMissionProgressMap(settings, missions = []) {
 
   return sharp(normalized.data)
     .composite(overlays)
-    .jpeg({ quality: 88, mozjpeg: true })
+    // 일부 카카오톡 Android 클라이언트가 점진식 JPEG를 검은 사각형으로 표시하는
+    // 경우를 피하기 위해 RGB 기반의 일반(baseline) JPEG로 반환합니다.
+    .jpeg({ quality: 88, progressive: false, chromaSubsampling: '4:4:4' })
     .toBuffer();
+}
+
+async function getMissionMapStaticAssets(eventId) {
+  const cacheKey = Number(eventId);
+  return loadBoundedCache(
+    missionMapStaticAssetsCache,
+    cacheKey,
+    MISSION_CACHE_TTL_MS,
+    50,
+    async () => {
+      const result = await query(
+        `SELECT m.id, m.mission_code, m.mission_name, m.map_x, m.map_y,
+                answer_image.image_data AS answer_image_data,
+                answer_image.image_mime AS answer_image_mime
+         FROM missions m
+         LEFT JOIN LATERAL (
+           SELECT mi.image_data, mi.image_mime
+           FROM mission_images mi
+           WHERE mi.mission_id=m.id AND mi.image_kind='answer'
+           ORDER BY mi.sort_order ASC, mi.id ASC
+           LIMIT 1
+         ) answer_image ON TRUE
+         WHERE m.event_id=$1 AND m.map_x IS NOT NULL AND m.map_y IS NOT NULL
+         ORDER BY m.sort_order ASC, m.id ASC;`,
+        [eventId]
+      );
+      return result.rows;
+    }
+  );
 }
 
 function crosswordBoardUrl(req, event, mission, solvedIds = []) {
@@ -4347,32 +4632,11 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
   }
 
   const messageSettings = providedMessages || await getMessageSettings(event.id);
-  const [completion, missionImages] = await Promise.all([
-    getMissionCompletion(team.id, mission.id),
-    mission.mission_type === 'crossword' ? Promise.resolve([]) : getMissionImages(mission.id, 'mission'),
-  ]);
-  if (completion) {
-    const [actor, total] = await Promise.all([
-      resolveActorForTeam(event.id, team.id, kakaoUserId, team.leader_name || '팀원'),
-      teamTotalScore(team.id),
-    ]);
-    const response = await kakaoAlreadyCompletedMissionMessage(req, event, team, mission, {
-      currentActorName: actor.actor_name,
-      currentKakaoUserId: kakaoUserId,
-      settings: messageSettings,
-      completion,
-      total,
-    });
-    return finalizeMissionStartResponse(response, mission, {
-      completed: true,
-      currentMissionId: team.current_mission_id,
-      teamStatus: team.status,
-    });
-  }
-
   const quizType = normalizeQuizType(mission.quiz_type || 'short');
   let crosswordEntries = [];
   let crosswordProgress = { missionId: mission.id, solved: [], currentEntryId: '' };
+  let nextStateName = '';
+  let nextStateData = {};
   if (mission.mission_type === 'crossword') {
     try {
       mission.crossword_data = validateCrosswordData(mission.crossword_data);
@@ -4395,19 +4659,46 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
       solved,
       currentEntryId: crosswordEntryKey(savedCurrent || firstUnsolved),
     };
+    nextStateName = 'WAIT_CROSSWORD_ANSWER';
+    nextStateData = crosswordProgress;
+  } else if (mission.mission_type === 'quiz' && quizType === 'sequence') {
+    nextStateName = 'WAIT_SEQUENCE_ANSWER';
+    nextStateData = { missionId: mission.id, selected: [] };
   }
 
-  const startMissionUpdates = [
-    query(`UPDATE teams SET current_mission_id=$1 WHERE id=$2;`, [mission.id, team.id]),
-  ];
-  if (mission.mission_type === 'quiz' && quizType === 'sequence') {
-    startMissionUpdates.push(setUserState(event.id, kakaoUserId, 'WAIT_SEQUENCE_ANSWER', { missionId: mission.id, selected: [] }));
+  // 완료 여부 확인, 현재 미션 변경, 순서형/십자말풀이 상태 저장을 한 번의
+  // DB 명령으로 처리합니다. 미션 정의와 이미지 메타데이터는 행사 캐시를 사용합니다.
+  const startResult = await beginMissionAttempt(
+    event.id,
+    team.id,
+    mission.id,
+    kakaoUserId,
+    nextStateName,
+    nextStateData
+  );
+  if (startResult.completion) {
+    const currentActorName = String(
+      req?.kakaoUserContext?.member?.member_name
+      || team.leader_name
+      || '팀원'
+    ).trim();
+    const response = await kakaoAlreadyCompletedMissionMessage(req, event, team, mission, {
+      currentActorName,
+      currentKakaoUserId: kakaoUserId,
+      settings: messageSettings,
+      completion: startResult.completion,
+      total: Number(startResult.total || 0),
+    });
+    return finalizeMissionStartResponse(response, mission, {
+      completed: true,
+      currentMissionId: team.current_mission_id,
+      teamStatus: team.status,
+    });
   }
-  if (mission.mission_type === 'crossword') {
-    startMissionUpdates.push(setUserState(event.id, kakaoUserId, 'WAIT_CROSSWORD_ANSWER', crosswordProgress));
-  }
-  await Promise.all(startMissionUpdates);
 
+  const missionImages = mission.mission_type === 'crossword'
+    ? []
+    : (Array.isArray(mission.mission_images) ? mission.mission_images : await getMissionImages(mission.id, 'mission'));
   const imageUrls = missionImageLinks(req, missionImages);
   const startedResponse = (response) => finalizeMissionStartResponse(response, mission, {
     completed: false,
@@ -6062,6 +6353,7 @@ async function handleKakaoSkill(req, res) {
     res.locals.participationFeatures = participationFeatures;
     req.participationFeatures = participationFeatures;
     req.missionMapSettings = missionMapSettings;
+    req.kakaoUserContext = userContext;
     const initialTeam = userContext.team;
     const userState = userContext.userState;
     timeoutMessage = String(messages.skill_timeout_message || timeoutMessage).trim();
@@ -7245,54 +7537,69 @@ app.get('/api/public/mission-map.png', async (req, res) => {
     const event = await getActiveEvent(req);
     const teamId = Number(req.query.team || 0);
     const completedMissionId = Number(req.query.completed || 0);
+    const hasExactProgress = Object.prototype.hasOwnProperty.call(req.query || {}, 'done');
+    const progressState = hasExactProgress ? String(req.query.done || '').trim() : '';
+    const parsedProgressIds = progressState
+      ? progressState.split('.').map((value) => Number(value))
+      : [];
+    const canonicalProgressIds = canonicalMissionProgressIds(parsedProgressIds);
     const signature = String(req.query.sig || '').trim();
     if (!Number.isInteger(teamId) || teamId <= 0 || !Number.isInteger(completedMissionId) || completedMissionId < 0) {
       return res.status(400).send('invalid mission map request');
     }
-    const expectedSignature = missionMapSignature(event.id, teamId, completedMissionId);
+    if (hasExactProgress && canonicalProgressIds.join('.') !== progressState) {
+      return res.status(400).send('invalid mission map progress');
+    }
+    const expectedSignature = missionMapSignature(
+      event.id,
+      teamId,
+      completedMissionId,
+      hasExactProgress ? progressState : ''
+    );
     if (!safeSignatureEqual(signature, expectedSignature)) return res.status(403).send('invalid mission map signature');
     const settings = await getMissionMapSettings(event.id);
     if (!settings.enabled || !settings.background_image_data) return res.status(404).send('mission map is not enabled');
 
-    const result = await query(
-      `WITH selected_team AS MATERIALIZED (
-         SELECT id FROM teams WHERE id=$2 AND event_id=$1 LIMIT 1
-       ), completed AS MATERIALIZED (
-         SELECT DISTINCT s.mission_id
+    let completedIds = canonicalProgressIds;
+    if (!hasExactProgress) {
+      const progressResult = await query(
+        `SELECT
+           EXISTS(SELECT 1 FROM teams t WHERE t.id=$2 AND t.event_id=$1) AS team_exists,
+           COALESCE(array_agg(DISTINCT s.mission_id) FILTER (WHERE s.mission_id IS NOT NULL), '{}') AS completed_ids
          FROM submissions s
-         JOIN selected_team t ON t.id=s.team_id
-         WHERE s.event_id=$1 AND s.status IN ('correct','approved')
-         UNION
-         SELECT m.id
-         FROM missions m, selected_team t
-         WHERE $3::integer > 0 AND m.id=$3 AND m.event_id=$1
-       )
-       SELECT m.id, m.mission_code, m.mission_name, m.map_x, m.map_y,
-              (completed.mission_id IS NOT NULL) AS completed,
-              answer_image.image_data AS answer_image_data,
-              answer_image.image_mime AS answer_image_mime
-       FROM missions m
-       JOIN selected_team ON TRUE
-       LEFT JOIN completed ON completed.mission_id=m.id
-       LEFT JOIN LATERAL (
-         SELECT mi.image_data, mi.image_mime
-         FROM mission_images mi
-         WHERE mi.mission_id=m.id AND mi.image_kind='answer'
-           AND completed.mission_id IS NOT NULL
-         ORDER BY mi.sort_order ASC, mi.id ASC
-         LIMIT 1
-       ) answer_image ON TRUE
-       WHERE m.event_id=$1 AND m.map_x IS NOT NULL AND m.map_y IS NOT NULL
-       ORDER BY m.sort_order ASC, m.id ASC;`,
-      [event.id, teamId, completedMissionId]
-    );
-    if (!result.rows.length) {
-      const teamExists = await getTeamById(event.id, teamId);
-      if (!teamExists) return res.status(404).send('team not found');
+         WHERE s.event_id=$1 AND s.team_id=$2 AND s.status IN ('correct','approved');`,
+        [event.id, teamId]
+      );
+      if (progressResult.rows[0]?.team_exists !== true) return res.status(404).send('team not found');
+      completedIds = canonicalMissionProgressIds(progressResult.rows[0]?.completed_ids || []);
     }
-    const image = await renderMissionProgressMap(settings, result.rows);
+    completedIds = canonicalMissionProgressIds([
+      ...completedIds,
+      ...(completedMissionId > 0 ? [completedMissionId] : []),
+    ]);
+    const epoch = Number(missionMapCacheEpoch.get(Number(event.id)) || 0);
+    // 지도에는 팀 고유 정보가 그려지지 않으므로 같은 행사에서 완료 조합이 같으면
+    // 여러 팀이 하나의 결과 이미지를 공유할 수 있습니다.
+    const renderCacheKey = `${Number(event.id)}:${epoch}:${completedIds.join('.') || 'none'}`;
+    const image = await loadBoundedCache(
+      missionMapRenderCache,
+      renderCacheKey,
+      MISSION_MAP_CACHE_TTL_MS,
+      150,
+      async () => {
+        const completedSet = new Set(completedIds);
+        const assets = await getMissionMapStaticAssets(event.id);
+        const missions = assets.map((mission) => ({
+          ...mission,
+          completed: completedSet.has(Number(mission.id)),
+          answer_image_data: completedSet.has(Number(mission.id)) ? mission.answer_image_data : null,
+          answer_image_mime: completedSet.has(Number(mission.id)) ? mission.answer_image_mime : null,
+        }));
+        return renderMissionProgressMap(settings, missions);
+      }
+    );
     res.set('Content-Type', 'image/jpeg');
-    res.set('Cache-Control', 'private, max-age=60');
+    res.set('Cache-Control', hasExactProgress ? 'public, max-age=300, immutable' : 'private, max-age=60');
     res.send(image);
   } catch (error) {
     console.error('[mission-map render error]', error);
@@ -7302,23 +7609,41 @@ app.get('/api/public/mission-map.png', async (req, res) => {
 
 app.get('/api/public/missions/:id/image', async (req, res) => {
   try {
-    const imageResult = await query(`SELECT image_data, image_mime FROM mission_images WHERE mission_id=$1 AND image_kind='mission' ORDER BY sort_order ASC, id ASC LIMIT 1;`, [req.params.id]);
-    const row = imageResult.rows[0];
-    if (!row || !row.image_data) return res.status(404).send('mission image not found');
+    const row = await loadBoundedCache(
+      missionImageBinaryCache,
+      `mission:${Number(req.params.id)}`,
+      MISSION_IMAGE_CACHE_TTL_MS,
+      100,
+      async () => {
+        const imageResult = await query(`SELECT image_data, image_mime FROM mission_images WHERE mission_id=$1 AND image_kind='mission' ORDER BY sort_order ASC, id ASC LIMIT 1;`, [req.params.id]);
+        const image = imageResult.rows[0];
+        return image?.image_data ? { image_mime: image.image_mime, buffer: Buffer.from(image.image_data, 'base64') } : null;
+      }
+    );
+    if (!row?.buffer) return res.status(404).send('mission image not found');
     res.set('Content-Type', row.image_mime || 'image/jpeg');
     res.set('Cache-Control', 'public, max-age=300');
-    res.send(Buffer.from(row.image_data, 'base64'));
+    res.send(row.buffer);
   } catch (error) { res.status(500).send(error.message); }
 });
 
 app.get('/api/public/mission-images/:id', async (req, res) => {
   try {
-    const result = await query(`SELECT image_data, image_mime FROM mission_images WHERE id=$1 LIMIT 1;`, [req.params.id]);
-    const row = result.rows[0];
-    if (!row || !row.image_data) return res.status(404).send('mission image not found');
+    const row = await loadBoundedCache(
+      missionImageBinaryCache,
+      `image:${Number(req.params.id)}`,
+      MISSION_IMAGE_CACHE_TTL_MS,
+      200,
+      async () => {
+        const result = await query(`SELECT image_data, image_mime FROM mission_images WHERE id=$1 LIMIT 1;`, [req.params.id]);
+        const image = result.rows[0];
+        return image?.image_data ? { image_mime: image.image_mime, buffer: Buffer.from(image.image_data, 'base64') } : null;
+      }
+    );
+    if (!row?.buffer) return res.status(404).send('mission image not found');
     res.set('Content-Type', row.image_mime || 'image/jpeg');
     res.set('Cache-Control', 'public, max-age=300');
-    res.send(Buffer.from(row.image_data, 'base64'));
+    res.send(row.buffer);
   } catch (error) { res.status(500).send(error.message); }
 });
 
@@ -7970,6 +8295,7 @@ app.patch('/api/admin/missions/:id/map-position', requireAdmin, async (req, res)
     [mapX, mapY, req.params.id, event.id]
   );
   if (!result.rows[0]) return res.status(404).json({ ok: false, message: '미션을 찾을 수 없습니다.' });
+  invalidateMissionContentCache(event.id, result.rows[0].id);
   res.json({ ok: true, mission: result.rows[0] });
 });
 
@@ -7995,6 +8321,7 @@ app.post('/api/admin/missions', requireAdmin, async (req, res) => {
      RETURNING id, mission_code, mission_name;`,
     [event.id, m.mission_code, m.mission_name, missionType, quizType, m.choices || '', m.sequence_answer || '', crosswordData, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty ?? -5), Number(m.hint_penalty ?? -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, nextMissionId, nextButtonLabel, nextMessageTemplate]
   );
+  invalidateMissionContentCache(event.id, result.rows[0]?.id);
   res.json({ ok: true, mission: result.rows[0] });
 });
 
@@ -8019,6 +8346,7 @@ app.patch('/api/admin/missions/:id', requireAdmin, async (req, res) => {
     [m.mission_code, m.mission_name, missionType, quizType, m.choices || '', m.sequence_answer || '', crosswordData, m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty ?? -5), Number(m.hint_penalty ?? -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude || null, m.longitude || null, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, nextMissionId, nextButtonLabel, nextMessageTemplate, req.params.id, event.id]
   );
   if (!result.rows[0]) return res.status(404).json({ ok: false, message: '미션을 찾을 수 없습니다.' });
+  invalidateMissionContentCache(event.id, result.rows[0].id);
   res.json({ ok: true, mission: result.rows[0] });
 });
 
@@ -8040,7 +8368,8 @@ app.post('/api/admin/missions/:id/images', requireAdmin, async (req, res) => {
 });
 
 app.delete('/api/admin/mission-images/:id', requireAdmin, async (req, res) => {
-  await query(`DELETE FROM mission_images WHERE id=$1;`, [req.params.id]);
+  const deleted = await query(`DELETE FROM mission_images WHERE id=$1 RETURNING event_id, mission_id;`, [req.params.id]);
+  if (deleted.rows[0]) invalidateMissionContentCache(deleted.rows[0].event_id, deleted.rows[0].mission_id);
   res.json({ ok: true });
 });
 
@@ -8051,7 +8380,7 @@ app.patch('/api/admin/mission-images/:id/kind', requireAdmin, async (req, res) =
     return res.status(400).json({ ok: false, message: '이미지 종류는 mission 또는 answer여야 합니다.' });
   }
   const current = (await query(
-    `SELECT mi.id, mi.mission_id
+    `SELECT mi.id, mi.event_id, mi.mission_id
      FROM mission_images mi
      JOIN missions m ON m.id=mi.mission_id
      WHERE mi.id=$1 AND m.event_id=$2
@@ -8067,6 +8396,7 @@ app.patch('/api/admin/mission-images/:id/kind', requireAdmin, async (req, res) =
     `UPDATE mission_images SET image_kind=$1, sort_order=$2 WHERE id=$3 RETURNING id, mission_id, image_kind;`,
     [kind, count, req.params.id]
   );
+  invalidateMissionContentCache(current.event_id, current.mission_id);
   res.json({ ok: true, image: updated.rows[0] });
 });
 
@@ -8084,6 +8414,7 @@ app.delete('/api/admin/missions/:id', requireAdmin, async (req, res) => {
   }
   await query(`UPDATE missions SET next_mission_id=NULL WHERE event_id=$1 AND next_mission_id=$2;`, [event.id, req.params.id]);
   await query(`DELETE FROM missions WHERE id=$1 AND event_id=$2;`, [req.params.id, event.id]);
+  invalidateMissionContentCache(event.id, req.params.id);
   res.json({ ok: true });
 });
 
