@@ -4,13 +4,20 @@ import { Pool } from 'pg';
 import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createHash, randomUUID } from 'crypto';
+import { readFileSync } from 'fs';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'crypto';
 import sharp from 'sharp';
 import { createClient } from '@supabase/supabase-js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, '..', 'public');
+let crosswordFontDataUri = '';
+try {
+  crosswordFontDataUri = `data:font/truetype;base64,${readFileSync(path.join(__dirname, '..', 'fonts', 'GyeonggiBatang_Bold.ttf')).toString('base64')}`;
+} catch (error) {
+  console.warn('WARNING: Crossword image font could not be loaded:', error.message);
+}
 
 const PORT = Number(process.env.PORT || 3000);
 const DATABASE_URL = process.env.DATABASE_URL || '';
@@ -258,16 +265,24 @@ function parseCrosswordSelection(text = '', entries = []) {
   return entries.find((entry) => entry.direction === direction && Number(entry.number) === number) || null;
 }
 
-function crosswordCellMap(value = {}) {
+function crosswordCellMap(value = {}, solvedIds = []) {
   const data = validateCrosswordData(value);
+  const validEntryIds = new Set(data.entries.map(crosswordEntryKey));
+  const solved = new Set(
+    (Array.isArray(solvedIds) ? solvedIds : [])
+      .map((item) => String(item || '').trim())
+      .filter((item) => validEntryIds.has(item))
+  );
   const cells = new Map();
   for (const entry of data.entries) {
+    const revealed = solved.has(crosswordEntryKey(entry));
     [...entry.answer].forEach((letter, offset) => {
       const row = entry.row + (entry.direction === 'down' ? offset : 0);
       const col = entry.col + (entry.direction === 'across' ? offset : 0);
       const key = `${row}:${col}`;
-      const current = cells.get(key) || { letter, numbers: [] };
+      const current = cells.get(key) || { letter, numbers: [], revealed: false };
       current.letter = letter;
+      current.revealed = current.revealed || revealed;
       if (offset === 0 && !current.numbers.includes(entry.number)) current.numbers.push(entry.number);
       cells.set(key, current);
     });
@@ -284,13 +299,14 @@ function escapeSvgText(value = '') {
     .replace(/'/g, '&apos;');
 }
 
-async function renderCrosswordBoardPng(value = {}) {
-  const { data, cells } = crosswordCellMap(value);
+async function renderCrosswordBoardPng(value = {}, solvedIds = []) {
+  const { data, cells } = crosswordCellMap(value, solvedIds);
   const cellSize = Math.max(48, Math.min(100, Math.floor(1120 / Math.max(data.rows, data.cols))));
   const margin = Math.max(24, Math.round(cellSize * 0.45));
   const width = data.cols * cellSize + margin * 2;
   const height = data.rows * cellSize + margin * 2;
   const numberSize = Math.max(12, Math.round(cellSize * 0.19));
+  const letterSize = Math.max(24, Math.round(cellSize * 0.53));
   const grid = [];
   for (let row = 1; row <= data.rows; row += 1) {
     for (let col = 1; col <= data.cols; col += 1) {
@@ -300,11 +316,19 @@ async function renderCrosswordBoardPng(value = {}) {
       grid.push(`<rect x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" fill="${cell ? '#fffdf6' : '#f2b544'}" stroke="#392a1c" stroke-width="2"/>`);
       if (cell?.numbers?.length) {
         const numberText = [...cell.numbers].sort((a, b) => a - b).join('·');
-        grid.push(`<text x="${x + Math.max(5, cellSize * 0.08)}" y="${y + Math.max(16, cellSize * 0.23)}" font-family="Arial, sans-serif" font-size="${numberSize}" font-weight="700" fill="#2b2118">${escapeSvgText(numberText)}</text>`);
+        grid.push(`<text class="clue-number" x="${x + Math.max(5, cellSize * 0.08)}" y="${y + Math.max(16, cellSize * 0.23)}" font-size="${numberSize}">${escapeSvgText(numberText)}</text>`);
+      }
+      if (cell?.revealed) {
+        grid.push(`<text class="answer-letter" x="${x + cellSize / 2}" y="${y + cellSize * 0.68}" font-size="${letterSize}">${escapeSvgText(cell.letter)}</text>`);
       }
     }
   }
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+    <style>
+      ${crosswordFontDataUri ? `@font-face { font-family: 'CrosswordKorean'; src: url('${crosswordFontDataUri}') format('truetype'); }` : ''}
+      .clue-number { font-family: Arial, sans-serif; font-weight: 700; fill: #2b2118; }
+      .answer-letter { font-family: 'CrosswordKorean', 'Noto Sans KR', 'Malgun Gothic', sans-serif; font-weight: 700; fill: #172033; text-anchor: middle; }
+    </style>
     <rect width="100%" height="100%" fill="#6b3d22"/>
     ${grid.join('\n')}
   </svg>`;
@@ -3935,12 +3959,42 @@ function sequenceQuickReplies(mission, selectedNumbers = []) {
   return [...buttons, '처음부터 다시', ...menuQuickReplies].slice(0, 10);
 }
 
-function crosswordBoardUrl(req, event, mission) {
+function crosswordSolvedIndexText(mission, solvedIds = []) {
+  const entries = crosswordEntriesInPlayOrder(mission?.crossword_data);
+  const solved = new Set((Array.isArray(solvedIds) ? solvedIds : []).map(String));
+  return entries
+    .map((entry, index) => solved.has(crosswordEntryKey(entry)) ? index : null)
+    .filter((index) => index !== null)
+    .join('.');
+}
+
+function crosswordImageSignature(eventId, missionId, solvedIndexText = '') {
+  const secret = KAKAO_SKILL_KEY || ADMIN_PASSWORD;
+  return createHmac('sha256', secret)
+    .update(`${Number(eventId || 0)}:${Number(missionId || 0)}:${String(solvedIndexText || '')}`)
+    .digest('hex')
+    .slice(0, 32);
+}
+
+function safeSignatureEqual(actual = '', expected = '') {
+  const actualBuffer = Buffer.from(String(actual || ''), 'utf8');
+  const expectedBuffer = Buffer.from(String(expected || ''), 'utf8');
+  return actualBuffer.length === expectedBuffer.length
+    && actualBuffer.length > 0
+    && timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+function crosswordBoardUrl(req, event, mission, solvedIds = []) {
+  const solved = crosswordSolvedIndexText(mission, solvedIds);
+  const signature = crosswordImageSignature(event?.id, mission?.id, solved);
   const version = createHash('sha1')
-    .update(JSON.stringify(normalizeCrosswordData(mission?.crossword_data)))
+    .update(`${JSON.stringify(normalizeCrosswordData(mission?.crossword_data))}:${solved}`)
     .digest('hex')
     .slice(0, 12);
-  const pathValue = urlWithEvent(`/api/public/missions/${Number(mission?.id || 0)}/crossword.png?v=${version}`, event);
+  const pathValue = urlWithEvent(
+    `/api/public/missions/${Number(mission?.id || 0)}/crossword.png?v=${version}&solved=${encodeURIComponent(solved)}&sig=${signature}`,
+    event
+  );
   return `${baseUrl(req)}${pathValue}`;
 }
 
@@ -4013,7 +4067,7 @@ function crosswordQuestionResponse(req, event, team, mission, entry, solvedIds, 
     text,
     [],
     crosswordQuickReplies(entries, solvedIds, crosswordEntryKey(entry)),
-    crosswordBoardUrl(req, event, mission)
+    crosswordBoardUrl(req, event, mission, solvedIds)
   );
 }
 
@@ -5320,7 +5374,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
         wrongText,
         [],
         crosswordQuickReplies(entries, solvedIds, crosswordEntryKey(currentEntry)),
-        crosswordBoardUrl(req, event, mission)
+        crosswordBoardUrl(req, event, mission, solvedIds)
       ));
     }
 
@@ -6828,7 +6882,7 @@ app.get('/api/public/missions/:id/crossword.png', async (req, res) => {
   try {
     const event = await getActiveEvent(req);
     const result = await query(
-      `SELECT crossword_data
+      `SELECT id, crossword_data
        FROM missions
        WHERE id=$1 AND event_id=$2 AND mission_type='crossword'
        LIMIT 1;`,
@@ -6836,7 +6890,26 @@ app.get('/api/public/missions/:id/crossword.png', async (req, res) => {
     );
     const mission = result.rows[0];
     if (!mission) return res.status(404).send('crossword mission not found');
-    const png = await renderCrosswordBoardPng(mission.crossword_data);
+    let solvedIds = [];
+    const hasProgressParameters = req.query.solved !== undefined || req.query.sig !== undefined;
+    if (hasProgressParameters) {
+      const solvedIndexText = String(req.query.solved || '').trim();
+      const signature = String(req.query.sig || '').trim();
+      const entries = crosswordEntriesInPlayOrder(mission.crossword_data);
+      const indexes = solvedIndexText
+        ? solvedIndexText.split('.').map((item) => Number(item))
+        : [];
+      const isCanonical = indexes.every((index) => Number.isInteger(index) && index >= 0 && index < entries.length)
+        && new Set(indexes).size === indexes.length
+        && indexes.every((index, position) => position === 0 || indexes[position - 1] < index)
+        && indexes.join('.') === solvedIndexText;
+      const expectedSignature = crosswordImageSignature(event.id, mission.id, solvedIndexText);
+      if (!isCanonical || !safeSignatureEqual(signature, expectedSignature)) {
+        return res.status(403).send('invalid crossword progress signature');
+      }
+      solvedIds = indexes.map((index) => crosswordEntryKey(entries[index]));
+    }
+    const png = await renderCrosswordBoardPng(mission.crossword_data, solvedIds);
     res.set('Content-Type', 'image/png');
     res.set('Cache-Control', 'public, max-age=300, immutable');
     res.send(png);
