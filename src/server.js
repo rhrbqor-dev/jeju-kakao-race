@@ -933,10 +933,10 @@ async function copyEventContent(sourceEventId, targetEventId) {
   );
   for (const m of missions.rows) {
     const inserted = await query(
-      `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, quiz_type, choices, sequence_answer, crossword_data, question, answer, answer_explanation, wrong_message, wrong_penalty, hint_penalty, score, hint, location_name, latitude, longitude, radius_m, sort_order, is_required, next_mission_button_label, next_mission_message_template)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+      `INSERT INTO missions(event_id, mission_code, mission_name, mission_type, quiz_type, choices, sequence_answer, crossword_data, question, answer, answer_explanation, wrong_message, wrong_penalty, hint_penalty, score, hint, location_name, latitude, longitude, radius_m, map_x, map_y, sort_order, is_required, next_mission_button_label, next_mission_message_template)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
        RETURNING id;`,
-      [targetEventId, m.mission_code, m.mission_name, m.mission_type, normalizeQuizType(m.quiz_type || 'short'), String(m.choices || ''), String(m.sequence_answer || ''), normalizeCrosswordData(m.crossword_data), m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty ?? -5), Number(m.hint_penalty ?? -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude, m.longitude, Number(m.radius_m || 80), Number(m.sort_order || 0), m.is_required !== false, String(m.next_mission_button_label || ''), String(m.next_mission_message_template || '')]
+      [targetEventId, m.mission_code, m.mission_name, m.mission_type, normalizeQuizType(m.quiz_type || 'short'), String(m.choices || ''), String(m.sequence_answer || ''), normalizeCrosswordData(m.crossword_data), m.question || '', m.answer || '', m.answer_explanation || '', m.wrong_message || '', Number(m.wrong_penalty ?? -5), Number(m.hint_penalty ?? -10), Number(m.score || 0), m.hint || '', m.location_name || '', m.latitude, m.longitude, Number(m.radius_m || 80), m.map_x, m.map_y, Number(m.sort_order || 0), m.is_required !== false, String(m.next_mission_button_label || ''), String(m.next_mission_message_template || '')]
     );
     missionMap.set(Number(m.id), Number(inserted.rows[0].id));
   }
@@ -973,6 +973,7 @@ async function copyEventContent(sourceEventId, targetEventId) {
   );
   messageSettingsCache.delete(Number(targetEventId));
   participationFeatureSettingsCache.delete(Number(targetEventId));
+  missionMapSettingsCache.delete(Number(targetEventId));
 }
 
 async function ensureAppSettingsTable() {
@@ -991,6 +992,7 @@ async function ensureAppSettingsTable() {
 
 const messageSettingsCache = new Map();
 const participationFeatureSettingsCache = new Map();
+const missionMapSettingsCache = new Map();
 
 async function getSetting(eventId, settingKey, defaultValue = {}) {
   // app_settings는 서버 시작 시 initDb에서 생성합니다. 매 챗봇 요청마다
@@ -1021,6 +1023,7 @@ async function setSetting(eventId, settingKey, settingValue = {}) {
   );
   if (settingKey === 'chatbot_messages') messageSettingsCache.delete(Number(eventId));
   if (settingKey === 'participation_features') participationFeatureSettingsCache.delete(Number(eventId));
+  if (settingKey === 'mission_map') missionMapSettingsCache.delete(Number(eventId));
 }
 
 
@@ -1083,6 +1086,81 @@ async function getParticipationFeatureSettings(eventId) {
 function rememberParticipationFeatureSettings(eventId, settings) {
   participationFeatureSettingsCache.set(Number(eventId), settings);
   return settings;
+}
+
+const DEFAULT_MISSION_MAP_SETTINGS = Object.freeze({
+  enabled: false,
+  background_image_data: '',
+  background_image_mime: '',
+  background_file_name: '',
+  stamp_size_percent: 12,
+});
+
+function normalizeMissionMapSettings(value = {}, existing = DEFAULT_MISSION_MAP_SETTINGS) {
+  const incoming = value && typeof value === 'object' ? value : {};
+  const previous = existing && typeof existing === 'object' ? existing : DEFAULT_MISSION_MAP_SETTINGS;
+  const removeBackground = normalizeFeatureBoolean(incoming.remove_background, false);
+  const hasNewBackground = typeof incoming.background_image_data === 'string'
+    && incoming.background_image_data.trim() !== '';
+  const requestedSize = Number(incoming.stamp_size_percent ?? previous.stamp_size_percent ?? 12);
+  const stampSizePercent = Number.isFinite(requestedSize)
+    ? Math.min(22, Math.max(7, requestedSize))
+    : 12;
+  let backgroundImageData = removeBackground ? '' : String(previous.background_image_data || '');
+  let backgroundImageMime = removeBackground ? '' : String(previous.background_image_mime || '');
+  let backgroundFileName = removeBackground ? '' : String(previous.background_file_name || '');
+
+  if (hasNewBackground) {
+    backgroundImageData = incoming.background_image_data
+      .replace(/^data:[^;]+;base64,/, '')
+      .replace(/\s/g, '');
+    backgroundImageMime = String(incoming.background_image_mime || 'image/jpeg').trim().toLowerCase();
+    backgroundFileName = String(incoming.background_file_name || 'mission-map').trim().slice(0, 200);
+  }
+
+  if (backgroundImageData) {
+    if (!ALLOWED_MISSION_IMAGE_MIMES.has(backgroundImageMime)) {
+      throw new Error('미션 지도는 JPG, PNG, WEBP 이미지만 업로드할 수 있습니다.');
+    }
+    if (base64ByteLength(backgroundImageData) > MAX_MISSION_IMAGE_BYTES) {
+      throw new Error('미션 지도 이미지는 최대 5MB까지 업로드할 수 있습니다.');
+    }
+  }
+
+  return {
+    enabled: normalizeFeatureBoolean(incoming.enabled, Boolean(previous.enabled)),
+    background_image_data: backgroundImageData,
+    background_image_mime: backgroundImageData ? backgroundImageMime : '',
+    background_file_name: backgroundImageData ? backgroundFileName : '',
+    stamp_size_percent: stampSizePercent,
+  };
+}
+
+async function getMissionMapSettings(eventId) {
+  const cacheKey = Number(eventId);
+  if (missionMapSettingsCache.has(cacheKey)) return missionMapSettingsCache.get(cacheKey);
+  const saved = await getSetting(eventId, 'mission_map', DEFAULT_MISSION_MAP_SETTINGS);
+  const settings = normalizeMissionMapSettings(saved, DEFAULT_MISSION_MAP_SETTINGS);
+  missionMapSettingsCache.set(cacheKey, settings);
+  return settings;
+}
+
+function rememberMissionMapSettings(eventId, settings) {
+  missionMapSettingsCache.set(Number(eventId), settings);
+  return settings;
+}
+
+function publicMissionMapSettings(req, settings = {}) {
+  const hasBackground = Boolean(settings.background_image_data);
+  return {
+    enabled: Boolean(settings.enabled),
+    has_background_image: hasBackground,
+    background_file_name: hasBackground ? String(settings.background_file_name || '') : '',
+    background_image_url: hasBackground
+      ? `${baseUrl(req)}${urlWithEvent('/api/public/settings/mission-map/background', req.selectedEvent)}`
+      : '',
+    stamp_size_percent: Number(settings.stamp_size_percent || 12),
+  };
 }
 
 
@@ -2034,6 +2112,8 @@ async function initDb() {
   await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS choices TEXT NOT NULL DEFAULT '';`);
   await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS sequence_answer TEXT NOT NULL DEFAULT '';`);
   await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS crossword_data JSONB NOT NULL DEFAULT '{"rows":8,"cols":8,"entries":[]}'::jsonb;`);
+  await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS map_x DOUBLE PRECISION;`);
+  await query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS map_y DOUBLE PRECISION;`);
   await query(`
     DO $$
     DECLARE
@@ -2372,15 +2452,16 @@ async function initDb() {
   const settingsEvents = await query(`
     SELECT id
     FROM events
+    WHERE status IN ('active', 'paused')
     ORDER BY
       CASE WHEN COALESCE(is_default, false) THEN 0 ELSE 1 END,
       CASE WHEN status='active' THEN 0 WHEN status='paused' THEN 1 ELSE 2 END,
       id DESC
-    LIMIT 1;
   `);
   await Promise.all(settingsEvents.rows.flatMap((row) => [
     getMessageSettings(row.id),
     getParticipationFeatureSettings(row.id),
+    getMissionMapSettings(row.id),
   ]));
 }
 
@@ -2391,7 +2472,7 @@ async function getMissions(eventId) {
        m.id, m.event_id, m.mission_code, m.mission_name, m.mission_type, m.question, m.answer,
        m.quiz_type, m.choices, m.sequence_answer, m.crossword_data,
        m.answer_explanation, m.wrong_message, m.wrong_penalty, m.hint_penalty, m.score, m.hint, m.location_name, m.latitude, m.longitude,
-       m.radius_m, m.sort_order, m.is_required, m.created_at,
+       m.radius_m, m.map_x, m.map_y, m.sort_order, m.is_required, m.created_at,
        m.next_mission_id, m.next_mission_button_label, m.next_mission_message_template,
        nm.mission_code AS next_mission_code, nm.mission_name AS next_mission_name,
        COALESCE(mi.mission_image_count, 0)::int AS mission_image_count,
@@ -3814,7 +3895,15 @@ async function handleMissionList(req, event, team, messages = DEFAULT_MESSAGE_SE
     ? rawTemplate
     : `${String(rawTemplate || '').trim()}\n\n{mission_list}`;
   const text = renderTemplate(template, variables).trim() || missionList;
-  return kakaoConfiguredMessage(req, messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list', text, menuQuickReplies, '');
+  const mapImageUrl = missionMapUrl(req, event, team);
+  if (!mapImageUrl) {
+    return kakaoConfiguredMessage(req, messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list', text, menuQuickReplies, '');
+  }
+  const configuredImageUrl = messageImageUrl(req, messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list');
+  const imageUrls = [...new Set([configuredImageUrl, mapImageUrl].filter(Boolean))];
+  const cardTitle = visibleMessageTitle(messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list', '');
+  if (imageUrls.length > 1) return kakaoCarousel(buildImageCards(cardTitle, '', imageUrls), menuQuickReplies, text);
+  return kakaoCard(cardTitle, text, [], menuQuickReplies, imageUrls[0]);
 }
 
 async function handleScore(team, messages = DEFAULT_MESSAGE_SETTINGS) {
@@ -4009,6 +4098,123 @@ function safeSignatureEqual(actual = '', expected = '') {
   return actualBuffer.length === expectedBuffer.length
     && actualBuffer.length > 0
     && timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+function missionMapSignature(eventId, teamId, completedMissionId = 0) {
+  const secret = KAKAO_SKILL_KEY || ADMIN_PASSWORD;
+  return createHmac('sha256', secret)
+    .update(`mission-map:${Number(eventId || 0)}:${Number(teamId || 0)}:${Number(completedMissionId || 0)}`)
+    .digest('hex')
+    .slice(0, 32);
+}
+
+function missionMapUrl(req, event, team, options = {}) {
+  const settings = req?.missionMapSettings || missionMapSettingsCache.get(Number(event?.id || 0));
+  if (!settings?.enabled || !settings?.background_image_data || !team?.id) return '';
+  const completedMissionId = Number(options.completedMissionId || 0);
+  const signature = missionMapSignature(event.id, team.id, completedMissionId);
+  const version = Date.now().toString(36);
+  const pathValue = urlWithEvent(
+    `/api/public/mission-map.png?team=${Number(team.id)}&completed=${completedMissionId}&sig=${signature}&v=${version}`,
+    event
+  );
+  return `${baseUrl(req)}${pathValue}`;
+}
+
+function missionMapMarkerTextPath(text, x, y, fontSize, fill = '#ffffff') {
+  const safeText = String(text || '').slice(0, 12);
+  if (!safeText) return '';
+  return crosswordTextToSvg.getPath(safeText, {
+    x,
+    y,
+    fontSize,
+    anchor: 'center middle',
+    attributes: { fill },
+  });
+}
+
+async function renderMissionMapMarker(mission, size) {
+  const missionCode = String(mission?.mission_code || '').trim();
+  const completed = mission?.completed === true;
+  const labelFontSize = Math.max(16, Math.round(size * (missionCode.length > 5 ? 0.16 : 0.21)));
+  const labelHeight = Math.max(27, Math.round(size * 0.25));
+  const borderWidth = Math.max(4, Math.round(size * 0.045));
+  const checkSize = Math.max(24, Math.round(size * 0.3));
+  const labelY = size - labelHeight / 2 - 2;
+  const codePath = missionMapMarkerTextPath(missionCode, size / 2, labelY, labelFontSize);
+
+  if (!completed) {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+      <circle cx="${size / 2}" cy="${size / 2}" r="${size * 0.45}" fill="#ffffff" fill-opacity="0.93" stroke="#f59e0b" stroke-width="${borderWidth}"/>
+      <circle cx="${size / 2}" cy="${size / 2}" r="${size * 0.34}" fill="#f59e0b"/>
+      ${missionMapMarkerTextPath(missionCode, size / 2, size / 2, Math.max(18, Math.round(size * 0.25)))}
+    </svg>`;
+    return sharp(Buffer.from(svg)).png().toBuffer();
+  }
+
+  let stamp;
+  if (mission.answer_image_data) {
+    try {
+      const mask = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}"><circle cx="${size / 2}" cy="${size / 2}" r="${size * 0.46}" fill="#fff"/></svg>`);
+      stamp = await sharp(Buffer.from(mission.answer_image_data, 'base64'))
+        .rotate()
+        .resize(size, size, { fit: 'cover', position: 'centre' })
+        .composite([{ input: mask, blend: 'dest-in' }])
+        .png()
+        .toBuffer();
+    } catch (error) {
+      console.warn(`[mission-map] answer image skipped for mission ${Number(mission?.id || 0)}: ${error.message}`);
+    }
+  }
+  if (!stamp) {
+    const fallback = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}">
+      <circle cx="${size / 2}" cy="${size / 2}" r="${size * 0.46}" fill="#dff8eb"/>
+      ${missionMapMarkerTextPath('완료', size / 2, size * 0.44, Math.max(18, Math.round(size * 0.22)), '#087443')}
+    </svg>`;
+    stamp = await sharp(Buffer.from(fallback)).png().toBuffer();
+  }
+
+  const frame = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+    <circle cx="${size / 2}" cy="${size / 2}" r="${size * 0.46}" fill="none" stroke="#0f9960" stroke-width="${borderWidth}"/>
+    <rect x="${size * 0.16}" y="${size - labelHeight - 4}" width="${size * 0.68}" height="${labelHeight}" rx="${labelHeight / 2}" fill="#0f9960"/>
+    ${codePath}
+    <circle cx="${size - checkSize * 0.48}" cy="${checkSize * 0.48}" r="${checkSize * 0.45}" fill="#0f9960" stroke="#fff" stroke-width="${Math.max(2, borderWidth / 2)}"/>
+    <path d="M ${size - checkSize * 0.68} ${checkSize * 0.47} L ${size - checkSize * 0.54} ${checkSize * 0.61} L ${size - checkSize * 0.28} ${checkSize * 0.31}" fill="none" stroke="#fff" stroke-width="${Math.max(3, checkSize * 0.11)}" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`);
+  return sharp(stamp).composite([{ input: frame }]).png().toBuffer();
+}
+
+async function renderMissionProgressMap(settings, missions = []) {
+  if (!settings?.background_image_data) throw new Error('미션 지도 배경 이미지가 없습니다.');
+  const background = Buffer.from(settings.background_image_data, 'base64');
+  const normalized = await sharp(background)
+    .rotate()
+    .resize({ width: 1200, height: 1200, fit: 'inside', withoutEnlargement: true })
+    .png()
+    .toBuffer({ resolveWithObject: true });
+  const width = normalized.info.width;
+  const height = normalized.info.height;
+  const shortestSide = Math.min(width, height);
+  const requestedSize = Math.round(shortestSide * (Number(settings.stamp_size_percent || 12) / 100));
+  const markerSize = Math.min(Math.max(64, requestedSize), Math.max(64, Math.round(shortestSide * 0.24)));
+  const overlays = (await Promise.all(missions.map(async (mission) => {
+    const mapX = Number(mission.map_x);
+    const mapY = Number(mission.map_y);
+    if (!Number.isFinite(mapX) || !Number.isFinite(mapY)) return null;
+    const marker = await renderMissionMapMarker(mission, markerSize);
+    const centerX = width * Math.min(100, Math.max(0, mapX)) / 100;
+    const centerY = height * Math.min(100, Math.max(0, mapY)) / 100;
+    return {
+      input: marker,
+      left: Math.max(0, Math.min(width - markerSize, Math.round(centerX - markerSize / 2))),
+      top: Math.max(0, Math.min(height - markerSize, Math.round(centerY - markerSize / 2))),
+    };
+  }))).filter(Boolean);
+
+  return sharp(normalized.data)
+    .composite(overlays)
+    .jpeg({ quality: 88, mozjpeg: true })
+    .toBuffer();
 }
 
 function crosswordBoardUrl(req, event, mission, solvedIds = []) {
@@ -4502,8 +4708,10 @@ async function missionCompletionResponse(req, event, mission, text, quickReplies
   }
 
   let response;
-  if (imageUrls.length > 1) response = kakaoCarousel(buildImageCards(cardTitle, '', imageUrls), quickReplies, finalText, buttons);
-  else if (imageUrls.length === 1) response = kakaoCard(cardTitle, finalText, buttons, quickReplies, imageUrls[0]);
+  const mapImageUrl = missionMapUrl(req, event, team, { completedMissionId: mission.id });
+  const finalImageUrls = [...new Set([...(Array.isArray(imageUrls) ? imageUrls : []), mapImageUrl].filter(Boolean))];
+  if (finalImageUrls.length > 1) response = kakaoCarousel(buildImageCards(cardTitle, '', finalImageUrls), quickReplies, finalText, buttons);
+  else if (finalImageUrls.length === 1) response = kakaoCard(cardTitle, finalText, buttons, quickReplies, finalImageUrls[0]);
   else if (buttons.length && options.buttonsAsQuickReplies) response = kakaoText(finalText, [...buttons, ...quickReplies]);
   else if (buttons.length) response = kakaoCard(cardTitle, finalText, buttons, quickReplies);
   else response = kakaoText(finalText, quickReplies);
@@ -4627,8 +4835,12 @@ async function buildFinishMissionResponse(req, event, team, actorName, messages 
     ? [{ action: 'webLink', label: '수료증 보기', webLinkUrl: certificateUrl(req, event, team, actorName) }]
     : [];
   const finishImageUrl = messageImageUrl(req, messages, 'finish');
-  const response = certificateButton.length || finishImageUrl
-    ? kakaoCard(visibleMessageTitle(messages, 'finish', '완주 완료'), finishText, certificateButton, ['순위', '내 점수'], finishImageUrl)
+  const mapImageUrl = missionMapUrl(req, event, team);
+  const finishImageUrls = [...new Set([finishImageUrl, mapImageUrl].filter(Boolean))];
+  const response = finishImageUrls.length > 1
+    ? kakaoCarousel(buildImageCards(visibleMessageTitle(messages, 'finish', '완주 완료'), '', finishImageUrls), ['순위', '내 점수'], finishText, certificateButton)
+    : certificateButton.length || finishImageUrls.length
+    ? kakaoCard(visibleMessageTitle(messages, 'finish', '완주 완료'), finishText, certificateButton, ['순위', '내 점수'], finishImageUrls[0] || '')
     : kakaoText(finishText, ['순위', '내 점수']);
   const finishReplies = Array.isArray(response?.template?.quickReplies)
     ? response.template.quickReplies.filter(
@@ -4888,8 +5100,10 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
   });
 
   const answerImageUrls = missionImageLinks(req, answerImages);
-  if (answerImageUrls.length > 1) return markMissionCompletedResponse(kakaoCarousel(buildImageCards('', '', answerImageUrls), approvedPhotoQuickReplies(req), finalText, buttons));
-  if (answerImageUrls.length === 1) return markMissionCompletedResponse(kakaoCard('', finalText, buttons, approvedPhotoQuickReplies(req), answerImageUrls[0]));
+  const mapImageUrl = missionMapUrl(req, event, team, { completedMissionId: mission.id });
+  const completionImageUrls = [...new Set([...answerImageUrls, mapImageUrl].filter(Boolean))];
+  if (completionImageUrls.length > 1) return markMissionCompletedResponse(kakaoCarousel(buildImageCards('', '', completionImageUrls), approvedPhotoQuickReplies(req), finalText, buttons));
+  if (completionImageUrls.length === 1) return markMissionCompletedResponse(kakaoCard('', finalText, buttons, approvedPhotoQuickReplies(req), completionImageUrls[0]));
   return markMissionCompletedResponse(kakaoText(finalText, [...buttons, ...approvedPhotoQuickReplies(req)]));
 }
 
@@ -5839,13 +6053,15 @@ async function handleKakaoSkill(req, res) {
     }
 
     const event = await resolveKakaoEvent(req, kakaoUserId);
-    const [messages, userContext, participationFeatures] = await Promise.all([
+    const [messages, userContext, participationFeatures, missionMapSettings] = await Promise.all([
       getMessageSettings(event.id),
       getKakaoUserContext(event.id, kakaoUserId),
       getParticipationFeatureSettings(event.id),
+      getMissionMapSettings(event.id),
     ]);
     res.locals.participationFeatures = participationFeatures;
     req.participationFeatures = participationFeatures;
+    req.missionMapSettings = missionMapSettings;
     const initialTeam = userContext.team;
     const userState = userContext.userState;
     timeoutMessage = String(messages.skill_timeout_message || timeoutMessage).trim();
@@ -6287,7 +6503,11 @@ async function handleKakaoSkill(req, res) {
 
     if (isPhotoResultCommand(utterance)) {
       // respondKakao가 읽지 않은 사진 승인/반려 알림을 이 응답 앞에 붙입니다.
-      return respondKakao(res, kakaoText('새로운 사진 인증 결과를 확인했습니다.', menuQuickReplies), event, team, kakaoUserId);
+      const mapImageUrl = missionMapUrl(req, event, team);
+      const response = mapImageUrl
+        ? kakaoCard('', '새로운 사진 인증 결과를 확인했습니다.', [], menuQuickReplies, mapImageUrl)
+        : kakaoText('새로운 사진 인증 결과를 확인했습니다.', menuQuickReplies);
+      return respondKakao(res, response, event, team, kakaoUserId);
     }
 
     if (isGpsVerificationResultCommand(utterance)) {
@@ -7020,6 +7240,66 @@ app.get('/api/public/missions/:id/crossword.png', async (req, res) => {
   }
 });
 
+app.get('/api/public/mission-map.png', async (req, res) => {
+  try {
+    const event = await getActiveEvent(req);
+    const teamId = Number(req.query.team || 0);
+    const completedMissionId = Number(req.query.completed || 0);
+    const signature = String(req.query.sig || '').trim();
+    if (!Number.isInteger(teamId) || teamId <= 0 || !Number.isInteger(completedMissionId) || completedMissionId < 0) {
+      return res.status(400).send('invalid mission map request');
+    }
+    const expectedSignature = missionMapSignature(event.id, teamId, completedMissionId);
+    if (!safeSignatureEqual(signature, expectedSignature)) return res.status(403).send('invalid mission map signature');
+    const settings = await getMissionMapSettings(event.id);
+    if (!settings.enabled || !settings.background_image_data) return res.status(404).send('mission map is not enabled');
+
+    const result = await query(
+      `WITH selected_team AS MATERIALIZED (
+         SELECT id FROM teams WHERE id=$2 AND event_id=$1 LIMIT 1
+       ), completed AS MATERIALIZED (
+         SELECT DISTINCT s.mission_id
+         FROM submissions s
+         JOIN selected_team t ON t.id=s.team_id
+         WHERE s.event_id=$1 AND s.status IN ('correct','approved')
+         UNION
+         SELECT m.id
+         FROM missions m, selected_team t
+         WHERE $3::integer > 0 AND m.id=$3 AND m.event_id=$1
+       )
+       SELECT m.id, m.mission_code, m.mission_name, m.map_x, m.map_y,
+              (completed.mission_id IS NOT NULL) AS completed,
+              answer_image.image_data AS answer_image_data,
+              answer_image.image_mime AS answer_image_mime
+       FROM missions m
+       JOIN selected_team ON TRUE
+       LEFT JOIN completed ON completed.mission_id=m.id
+       LEFT JOIN LATERAL (
+         SELECT mi.image_data, mi.image_mime
+         FROM mission_images mi
+         WHERE mi.mission_id=m.id AND mi.image_kind='answer'
+           AND completed.mission_id IS NOT NULL
+         ORDER BY mi.sort_order ASC, mi.id ASC
+         LIMIT 1
+       ) answer_image ON TRUE
+       WHERE m.event_id=$1 AND m.map_x IS NOT NULL AND m.map_y IS NOT NULL
+       ORDER BY m.sort_order ASC, m.id ASC;`,
+      [event.id, teamId, completedMissionId]
+    );
+    if (!result.rows.length) {
+      const teamExists = await getTeamById(event.id, teamId);
+      if (!teamExists) return res.status(404).send('team not found');
+    }
+    const image = await renderMissionProgressMap(settings, result.rows);
+    res.set('Content-Type', 'image/jpeg');
+    res.set('Cache-Control', 'private, max-age=60');
+    res.send(image);
+  } catch (error) {
+    console.error('[mission-map render error]', error);
+    res.status(400).send(error.message || 'mission map render failed');
+  }
+});
+
 app.get('/api/public/missions/:id/image', async (req, res) => {
   try {
     const imageResult = await query(`SELECT image_data, image_mime FROM mission_images WHERE mission_id=$1 AND image_kind='mission' ORDER BY sort_order ASC, id ASC LIMIT 1;`, [req.params.id]);
@@ -7053,6 +7333,19 @@ app.get('/api/public/settings/messages/:key/image', async (req, res) => {
     res.set('Content-Type', mime);
     res.set('Cache-Control', 'public, max-age=120');
     res.send(Buffer.from(data, 'base64'));
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
+
+app.get('/api/public/settings/mission-map/background', async (req, res) => {
+  try {
+    const event = await getActiveEvent(req);
+    const settings = await getMissionMapSettings(event.id);
+    if (!settings.background_image_data) return res.status(404).send('mission map background not found');
+    res.set('Content-Type', settings.background_image_mime || 'image/jpeg');
+    res.set('Cache-Control', 'public, max-age=120');
+    res.send(Buffer.from(settings.background_image_data, 'base64'));
   } catch (error) {
     res.status(500).send(error.message);
   }
@@ -7505,6 +7798,32 @@ app.patch('/api/admin/settings/ranking-display', requireAdmin, async (req, res) 
   res.json({ ok: true, settings });
 });
 
+app.get('/api/admin/settings/mission-map', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
+  const settings = await getMissionMapSettings(event.id);
+  res.json({
+    ok: true,
+    settings: publicMissionMapSettings(req, settings),
+    limits: { max_bytes: MAX_MISSION_IMAGE_BYTES, allowed_mimes: [...ALLOWED_MISSION_IMAGE_MIMES] },
+  });
+});
+
+app.patch('/api/admin/settings/mission-map', requireAdmin, async (req, res) => {
+  try {
+    const event = await getActiveEvent(req);
+    const current = await getMissionMapSettings(event.id);
+    const settings = normalizeMissionMapSettings(req.body || {}, current);
+    if (settings.background_image_data && settings.background_image_data !== current.background_image_data) {
+      await sharp(Buffer.from(settings.background_image_data, 'base64')).metadata();
+    }
+    await setSetting(event.id, 'mission_map', settings);
+    rememberMissionMapSettings(event.id, settings);
+    res.json({ ok: true, settings: publicMissionMapSettings(req, settings) });
+  } catch (error) {
+    res.status(400).json({ ok: false, message: error.message || '미션 지도 설정을 저장하지 못했습니다.' });
+  }
+});
+
 app.get('/api/admin/settings/participation-features', requireAdmin, async (req, res) => {
   const event = await getActiveEvent(req);
   const settings = await getParticipationFeatureSettings(event.id);
@@ -7630,6 +7949,28 @@ app.get('/api/admin/teams/:id/members', requireAdmin, async (req, res) => {
 app.get('/api/admin/missions', requireAdmin, async (req, res) => {
   const event = await getActiveEvent(req);
   res.json({ ok: true, missions: await getMissions(event.id) });
+});
+
+app.patch('/api/admin/missions/:id/map-position', requireAdmin, async (req, res) => {
+  const event = await getActiveEvent(req);
+  const clear = req.body?.clear === true || req.body?.clear === 'true';
+  let mapX = null;
+  let mapY = null;
+  if (!clear) {
+    mapX = Number(req.body?.map_x);
+    mapY = Number(req.body?.map_y);
+    if (!Number.isFinite(mapX) || !Number.isFinite(mapY) || mapX < 0 || mapX > 100 || mapY < 0 || mapY > 100) {
+      return res.status(400).json({ ok: false, message: '지도 위치를 다시 찍어주세요.' });
+    }
+  }
+  const result = await query(
+    `UPDATE missions SET map_x=$1, map_y=$2
+     WHERE id=$3 AND event_id=$4
+     RETURNING id, mission_code, mission_name, map_x, map_y;`,
+    [mapX, mapY, req.params.id, event.id]
+  );
+  if (!result.rows[0]) return res.status(404).json({ ok: false, message: '미션을 찾을 수 없습니다.' });
+  res.json({ ok: true, mission: result.rows[0] });
 });
 
 app.post('/api/admin/missions', requireAdmin, async (req, res) => {
@@ -8051,6 +8392,7 @@ export {
   validateCrosswordData,
   crosswordEntriesInPlayOrder,
   renderCrosswordBoardPng,
+  renderMissionProgressMap,
   COMPLETE_CROSSWORD_MISSION_SQL,
   COMPLETE_INTERACTIVE_MISSION_SQL,
 };

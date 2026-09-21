@@ -78,6 +78,11 @@
     .crossword-cell-number { position:absolute; left:3px; top:1px; font-size:9px; line-height:1; font-weight:800; }
     .crossword-entry-list { margin-top:12px; }
     .crossword-entry-list table { min-width:620px; background:#fff; }
+    .mission-map-canvas { position:relative; width:100%; max-width:900px; margin:12px auto 0; border:1px solid var(--line); border-radius:14px; overflow:hidden; background:#eef2f7; cursor:crosshair; line-height:0; }
+    .mission-map-canvas img { width:100%; height:auto; display:block; user-select:none; pointer-events:none; }
+    .mission-map-marker { position:absolute; transform:translate(-50%,-50%); min-width:38px; height:38px; padding:0 8px; border:3px solid #fff; border-radius:999px; background:#f59e0b; color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; line-height:1; font-weight:900; box-shadow:0 3px 10px rgba(0,0,0,.32); pointer-events:none; }
+    .mission-map-marker.selected { background:#2f6df6; outline:4px solid rgba(47,109,246,.25); }
+    .mission-map-empty { min-height:280px; padding:28px; display:flex; align-items:center; justify-content:center; color:var(--muted); text-align:center; line-height:1.7; cursor:default; }
     @media(max-width:700px){ .crossword-fields,.crossword-entry-fields { grid-template-columns:1fr 1fr; } .crossword-board { --cw-cell:38px; } .crossword-cell { font-size:18px; } }
     @media (max-width:900px) { .stats,.two { grid-template-columns:1fr; } table { min-width:960px; } }
   </style>
@@ -136,6 +141,7 @@
         <button class="secondary" onclick="showTab('certificate')">수료증 설정</button>
         <button class="secondary" onclick="showTab('submissions')">제출내역</button>
         <button class="secondary" onclick="showTab('missions')">미션설정</button>
+        <button class="secondary" onclick="showTab('missionMap')">미션 지도 설정</button>
         <button class="secondary" onclick="showTab('settings')">사진 자동 승인</button>
         <button class="secondary" onclick="showTab('messages')">챗봇 문구 설정</button>
         <button class="secondary" onclick="enableNotifications()">브라우저 알림 허용</button>
@@ -170,7 +176,7 @@
       <section id="tab-missions" class="section grid two hidden">
         <div class="card mission-list-card">
           <h2>미션 목록</h2>
-          <div class="table-wrap mission-list-wrap"><table><thead><tr><th>코드</th><th>미션명</th><th>유형</th><th>퀴즈방식</th><th>완주조건</th><th>점수</th><th>오답감점</th><th>힌트감점</th><th>연결 미션</th><th>연결 안내문</th><th>미션 이미지</th><th>정답 설명 이미지</th><th>오답멘트</th><th>정답설명</th><th>관리</th></tr></thead><tbody id="missionBody"></tbody></table></div>
+          <div class="table-wrap mission-list-wrap"><table><thead><tr><th>코드</th><th>미션명</th><th>유형</th><th>퀴즈방식</th><th>완주조건</th><th>지도</th><th>점수</th><th>오답감점</th><th>힌트감점</th><th>연결 미션</th><th>연결 안내문</th><th>미션 이미지</th><th>정답 설명 이미지</th><th>오답멘트</th><th>정답설명</th><th>관리</th></tr></thead><tbody id="missionBody"></tbody></table></div>
         </div>
         <div class="card mission-form-card">
           <h2 id="missionFormTitle">미션 추가/수정</h2>
@@ -259,6 +265,37 @@
           <button onclick="saveMission()">미션 저장</button>
           <button class="secondary" onclick="clearMissionForm()">새 미션 입력</button>
         </div>
+      </section>
+
+      <section id="tab-missionMap" class="section card hidden">
+        <h2>미션 지도 설정</h2>
+        <p class="small">행사장 안내도 이미지를 올린 뒤, 미션을 선택하고 지도에서 위치를 눌러 저장하세요. 참가자가 미션 목록을 보거나 미션을 완료하면 현재 진행 지도가 카카오톡에 표시됩니다. 완료 지점에는 해당 미션의 첫 번째 정답 설명 이미지가 원형 스탬프로 표시됩니다.</p>
+        <div class="grid two">
+          <div>
+            <label class="inline-check"><input id="missionMapEnabled" type="checkbox" /> 카카오톡에 미션 지도 표시</label>
+            <label>행사장 안내도 / 미션 구역 지도</label>
+            <input id="missionMapBackground" type="file" accept="image/jpeg,image/png,image/webp" />
+            <label class="inline-check"><input id="missionMapRemoveBackground" type="checkbox" /> 현재 지도 이미지 삭제</label>
+            <p class="small">JPG, PNG, WEBP 파일을 사용할 수 있습니다. 최대 5MB이며 큰 이미지는 저장 전에 자동 최적화됩니다.</p>
+            <label>완료 스탬프 크기</label>
+            <input id="missionMapStampSize" type="range" min="7" max="22" step="1" value="12" oninput="updateMissionMapStampLabel()" />
+            <p id="missionMapStampLabel" class="small">12%</p>
+            <button onclick="saveMissionMapSettings()">지도 설정 저장</button>
+            <button class="secondary" onclick="loadMissionMapSettings()">다시 불러오기</button>
+            <p id="missionMapSettingsStatus" class="small"></p>
+          </div>
+          <div>
+            <label>위치를 지정할 미션</label>
+            <select id="missionMapMission" onchange="selectMissionMapMission()"></select>
+            <p class="small">아래 지도에서 미션 위치의 중심을 누른 다음 저장하세요. 주황 표시는 저장된 위치, 파란 표시는 현재 선택/수정 중인 위치입니다.</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button onclick="saveMissionMapPosition()">선택 미션 위치 저장</button>
+              <button class="danger" onclick="clearMissionMapPosition()">선택 미션 위치 삭제</button>
+            </div>
+            <p id="missionMapPositionStatus" class="small"></p>
+          </div>
+        </div>
+        <div id="missionMapCanvas" class="mission-map-canvas mission-map-empty" onclick="placeMissionMapPosition(event)">먼저 행사장 안내도 이미지를 업로드하고 지도 설정을 저장해주세요.</div>
       </section>
 
       <section id="tab-settings" class="section card hidden">
@@ -611,6 +648,8 @@ let knownPendingPhotoIds = new Set();
 let notificationEnabled = false;
 let crosswordEntries = [];
 let secureImageEnvironmentFallbackConfigured = false;
+let missionMapSettings = null;
+let pendingMissionMapPosition = null;
 
 function authHeaders() {
   const pw = adminPassword || localStorage.getItem('adminPassword') || localStorage.getItem('admin_password') || '';
@@ -1256,6 +1295,144 @@ async function resetMessageSettings() {
   $('messageSettingsStatus').textContent = '기본 문구로 채웠습니다. 저장 버튼을 눌러야 실제 반영됩니다. 이미지는 삭제 체크를 하지 않으면 유지됩니다.';
 }
 
+function updateMissionMapStampLabel() {
+  if ($('missionMapStampLabel')) $('missionMapStampLabel').textContent = `${Number($('missionMapStampSize')?.value || 12)}%`;
+}
+
+function renderMissionMapMissionOptions() {
+  const select = $('missionMapMission');
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = missionsCache.length
+    ? missionsCache.map(m => `<option value="${m.id}">${esc(m.mission_code)} ${esc(m.mission_name)}</option>`).join('')
+    : '<option value="">등록된 미션 없음</option>';
+  if (missionsCache.some(m => String(m.id) === String(previous))) select.value = previous;
+  else if (missionsCache[0]) select.value = String(missionsCache[0].id);
+}
+
+function selectedMissionMapMission() {
+  const id = Number($('missionMapMission')?.value || 0);
+  return missionsCache.find(m => Number(m.id) === id) || null;
+}
+
+function selectMissionMapMission() {
+  const mission = selectedMissionMapMission();
+  pendingMissionMapPosition = mission && Number.isFinite(Number(mission.map_x)) && Number.isFinite(Number(mission.map_y))
+    && mission.map_x != null && mission.map_y != null
+    ? { x:Number(mission.map_x), y:Number(mission.map_y) }
+    : null;
+  if ($('missionMapPositionStatus')) {
+    $('missionMapPositionStatus').textContent = pendingMissionMapPosition
+      ? `${mission.mission_code} 저장 위치: 가로 ${pendingMissionMapPosition.x.toFixed(1)}% / 세로 ${pendingMissionMapPosition.y.toFixed(1)}%`
+      : `${mission?.mission_code || '선택 미션'}의 위치가 아직 지정되지 않았습니다.`;
+  }
+  renderMissionMapEditor();
+}
+
+function renderMissionMapEditor() {
+  const canvas = $('missionMapCanvas');
+  if (!canvas) return;
+  const imageUrl = missionMapSettings?.background_image_url || '';
+  if (!imageUrl) {
+    canvas.className = 'mission-map-canvas mission-map-empty';
+    canvas.innerHTML = '먼저 행사장 안내도 이미지를 업로드하고 지도 설정을 저장해주세요.';
+    return;
+  }
+  canvas.className = 'mission-map-canvas';
+  const selected = selectedMissionMapMission();
+  const markers = missionsCache.map(m => {
+    const isSelected = selected && Number(m.id) === Number(selected.id);
+    const pos = isSelected && pendingMissionMapPosition
+      ? pendingMissionMapPosition
+      : (m.map_x != null && m.map_y != null ? { x:Number(m.map_x), y:Number(m.map_y) } : null);
+    if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y)) return '';
+    return `<span class="mission-map-marker${isSelected ? ' selected' : ''}" style="left:${pos.x}%;top:${pos.y}%;" title="${esc(m.mission_name)}">${esc(m.mission_code)}</span>`;
+  }).join('');
+  canvas.innerHTML = `<img src="${esc(imageUrl)}" alt="행사장 미션 지도" draggable="false" />${markers}`;
+}
+
+function placeMissionMapPosition(event) {
+  const image = $('missionMapCanvas')?.querySelector('img');
+  const mission = selectedMissionMapMission();
+  if (!image || !mission) return;
+  const rect = image.getBoundingClientRect();
+  if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) return;
+  pendingMissionMapPosition = {
+    x: Math.min(100, Math.max(0, ((event.clientX - rect.left) / rect.width) * 100)),
+    y: Math.min(100, Math.max(0, ((event.clientY - rect.top) / rect.height) * 100)),
+  };
+  $('missionMapPositionStatus').textContent = `${mission.mission_code} 새 위치: 가로 ${pendingMissionMapPosition.x.toFixed(1)}% / 세로 ${pendingMissionMapPosition.y.toFixed(1)}% · 위치 저장 버튼을 눌러주세요.`;
+  renderMissionMapEditor();
+}
+
+async function loadMissionMapSettings() {
+  const data = await api('/api/admin/settings/mission-map');
+  missionMapSettings = data.settings || {};
+  if (missionMapSettings.background_image_url) {
+    missionMapSettings.background_image_url += `${missionMapSettings.background_image_url.includes('?') ? '&' : '?'}v=${Date.now()}`;
+  }
+  $('missionMapEnabled').checked = Boolean(missionMapSettings.enabled);
+  $('missionMapStampSize').value = Number(missionMapSettings.stamp_size_percent || 12);
+  $('missionMapRemoveBackground').checked = false;
+  $('missionMapBackground').value = '';
+  updateMissionMapStampLabel();
+  $('missionMapSettingsStatus').textContent = missionMapSettings.has_background_image
+    ? `등록된 지도: ${missionMapSettings.background_file_name || '지도 이미지'}${missionMapSettings.enabled ? ' · 카카오톡 표시 ON' : ' · 카카오톡 표시 OFF'}`
+    : '등록된 지도 이미지가 없습니다.';
+  renderMissionMapMissionOptions();
+  selectMissionMapMission();
+}
+
+async function saveMissionMapSettings() {
+  try {
+    $('missionMapSettingsStatus').textContent = '지도 설정을 저장하는 중입니다...';
+    const body = {
+      enabled: $('missionMapEnabled').checked,
+      stamp_size_percent: Number($('missionMapStampSize').value || 12),
+      remove_background: $('missionMapRemoveBackground').checked,
+    };
+    const file = $('missionMapBackground').files[0];
+    if (file) {
+      const prepared = await prepareMissionImageFile(file);
+      body.background_image_data = await fileToBase64(prepared.file);
+      body.background_image_mime = prepared.file.type;
+      body.background_file_name = prepared.file.name;
+    }
+    const data = await api('/api/admin/settings/mission-map', { method:'PATCH', body:JSON.stringify(body) });
+    missionMapSettings = data.settings || {};
+    await loadMissionMapSettings();
+    alert('미션 지도 설정이 저장되었습니다.');
+  } catch (error) {
+    $('missionMapSettingsStatus').textContent = error.message;
+    alert(error.message || '미션 지도 설정을 저장하지 못했습니다.');
+  }
+}
+
+async function saveMissionMapPosition() {
+  const mission = selectedMissionMapMission();
+  if (!mission) return alert('위치를 저장할 미션을 선택해주세요.');
+  if (!pendingMissionMapPosition) return alert('지도에서 미션 위치를 먼저 눌러주세요.');
+  await api(`/api/admin/missions/${mission.id}/map-position`, {
+    method:'PATCH',
+    body:JSON.stringify({ map_x:pendingMissionMapPosition.x, map_y:pendingMissionMapPosition.y }),
+  });
+  await loadMissions();
+  $('missionMapMission').value = String(mission.id);
+  selectMissionMapMission();
+  alert(`${mission.mission_code} 위치가 저장되었습니다.`);
+}
+
+async function clearMissionMapPosition() {
+  const mission = selectedMissionMapMission();
+  if (!mission) return;
+  if (!confirm(`${mission.mission_code}의 지도 위치를 삭제할까요?`)) return;
+  await api(`/api/admin/missions/${mission.id}/map-position`, { method:'PATCH', body:JSON.stringify({ clear:true }) });
+  pendingMissionMapPosition = null;
+  await loadMissions();
+  $('missionMapMission').value = String(mission.id);
+  selectMissionMapMission();
+}
+
 
 async function loadEvents() {
   const data = await api('/api/admin/events', { noEvent:true });
@@ -1287,6 +1464,7 @@ async function changeSelectedEvent() {
   await loadRankingDisplaySettings();
   await loadCertificateSettings();
   await loadMessageSettings();
+  await loadMissionMapSettings();
 }
 function fillEventFormFromSelected() {
   const ev = currentEvent();
@@ -1343,6 +1521,7 @@ async function login() {
     await loadPhotoAutoApproval();
     await loadMessageSettings();
     await loadCertificateSettings();
+    await loadMissionMapSettings();
   } catch(e) { $('loginMsg').textContent = e.message; }
 }
 function logout() {
@@ -1711,9 +1890,12 @@ async function loadMissions() {
     const nextMission = m.next_mission_code ? `${esc(m.next_mission_code)}<br><span class="small">${esc(m.next_mission_name || '')}</span>` : '-';
     const crosswordCount = Array.isArray(m.crossword_data?.entries) ? m.crossword_data.entries.length : 0;
     const quizMethod = m.mission_type === 'quiz' ? quizTypeLabel(m.quiz_type) : (m.mission_type === 'crossword' ? `${crosswordCount}문제` : '-');
-    return `<tr><td>${esc(m.mission_code)}</td><td>${esc(m.mission_name)}</td><td>${esc(missionTypeLabel(m.mission_type))}</td><td>${quizMethod}</td><td>${m.mission_type === 'complete' ? '완주' : (m.is_required === false ? '제외' : '포함')}</td><td>${m.score}</td><td>${m.wrong_penalty ?? -5}</td><td>${m.hint_penalty ?? -10}</td><td>${nextMission}</td><td>${m.next_mission_message_template ? '사용자 문구' : '-'}</td><td>${missionImg}</td><td>${answerImg}</td><td>${m.wrong_message ? '있음' : '-'}</td><td>${m.answer_explanation ? '있음' : '-'}</td><td><button class="secondary" onclick="editMission(${m.id})">수정</button> <button class="danger" onclick="deleteMission(${m.id})">삭제</button></td></tr>`;
+    const mapPosition = m.map_x != null && m.map_y != null ? '설정' : '-';
+    return `<tr><td>${esc(m.mission_code)}</td><td>${esc(m.mission_name)}</td><td>${esc(missionTypeLabel(m.mission_type))}</td><td>${quizMethod}</td><td>${m.mission_type === 'complete' ? '완주' : (m.is_required === false ? '제외' : '포함')}</td><td>${mapPosition}</td><td>${m.score}</td><td>${m.wrong_penalty ?? -5}</td><td>${m.hint_penalty ?? -10}</td><td>${nextMission}</td><td>${m.next_mission_message_template ? '사용자 문구' : '-'}</td><td>${missionImg}</td><td>${answerImg}</td><td>${m.wrong_message ? '있음' : '-'}</td><td>${m.answer_explanation ? '있음' : '-'}</td><td><button class="secondary" onclick="editMission(${m.id})">수정</button> <button class="danger" onclick="deleteMission(${m.id})">삭제</button></td></tr>`;
   }).join('');
   fillNextMissionOptions($('missionNextId')?.value || '', $('missionId')?.value || '');
+  renderMissionMapMissionOptions();
+  renderMissionMapEditor();
 }
 async function review(id, decision) {
   const note = prompt(decision === 'approved' ? '승인 메모(선택)' : '반려 사유(선택)', '') || '';
@@ -1721,7 +1903,7 @@ async function review(id, decision) {
   await loadAll();
 }
 function showTab(name) {
-  ['ranking','submissions','missions','settings','rankingSettings','certificate','messages'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
+  ['ranking','submissions','missions','missionMap','settings','rankingSettings','certificate','messages'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== name));
   if (name === 'settings') {
     loadPhotoAutoApproval().catch(e => alert(e.message));
   }
@@ -1730,6 +1912,7 @@ function showTab(name) {
   }
   if (name === 'certificate') loadCertificateSettings().catch(e => alert(e.message));
   if (name === 'messages') loadMessageSettings().catch(e => alert(e.message));
+  if (name === 'missionMap') loadMissionMapSettings().catch(e => alert(e.message));
 }
 
 function fillNextMissionOptions(selectedValue = '', currentMissionId = '') {
