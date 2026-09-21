@@ -2437,33 +2437,61 @@ async function getTeamByKakaoUser(eventId, kakaoUserId) {
 
 async function getKakaoUserContext(eventId, kakaoUserId) {
   const result = await query(
-    `SELECT
-       (
-         SELECT to_jsonb(candidate) - 'priority'
-         FROM (
-           SELECT t.*, 0 AS priority
-           FROM team_members tm
-           JOIN teams t ON t.id=tm.team_id
-           WHERE tm.event_id=$1 AND tm.kakao_user_id=$2
-           UNION ALL
-           SELECT t.*, 1 AS priority
-           FROM teams t
-           WHERE t.event_id=$1 AND t.kakao_user_id=$2
-         ) candidate
-         ORDER BY candidate.priority ASC
-         LIMIT 1
-       ) AS team,
+    `WITH selected_team AS MATERIALIZED (
+       SELECT candidate.*
+       FROM (
+         SELECT t.*, 0 AS priority
+         FROM team_members tm
+         JOIN teams t ON t.id=tm.team_id
+         WHERE tm.event_id=$1 AND tm.kakao_user_id=$2
+         UNION ALL
+         SELECT t.*, 1 AS priority
+         FROM teams t
+         WHERE t.event_id=$1 AND t.kakao_user_id=$2
+       ) candidate
+       ORDER BY candidate.priority ASC
+       LIMIT 1
+     )
+     SELECT
+       (SELECT to_jsonb(selected_team) - 'priority' FROM selected_team) AS team,
        (
          SELECT to_jsonb(s)
          FROM user_states s
          WHERE s.event_id=$1 AND s.kakao_user_id=$2
          LIMIT 1
-       ) AS user_state;`,
+       ) AS user_state,
+       (
+         SELECT to_jsonb(tm)
+         FROM team_members tm
+         JOIN selected_team t ON t.id=tm.team_id AND t.event_id=tm.event_id
+         WHERE tm.event_id=$1 AND tm.kakao_user_id=$2
+         LIMIT 1
+       ) AS member,
+       (
+         SELECT to_jsonb(m)
+         FROM missions m
+         JOIN selected_team t ON t.current_mission_id=m.id AND t.event_id=m.event_id
+         LIMIT 1
+       ) AS current_mission,
+       (
+         SELECT to_jsonb(completed)
+         FROM (
+           SELECT s.id, s.actor_kakao_user_id, s.actor_name, s.status, s.score, s.submitted_at
+           FROM submissions s
+           JOIN selected_team t ON t.id=s.team_id AND t.current_mission_id=s.mission_id
+           WHERE s.status IN ('correct', 'approved')
+           ORDER BY s.score DESC, s.submitted_at ASC, s.id ASC
+           LIMIT 1
+         ) completed
+       ) AS current_mission_completion;`,
     [eventId, kakaoUserId]
   );
   return {
     team: result.rows[0]?.team || null,
     userState: result.rows[0]?.user_state || null,
+    member: result.rows[0]?.member || null,
+    currentMission: result.rows[0]?.current_mission || null,
+    currentMissionCompletion: result.rows[0]?.current_mission_completion || null,
   };
 }
 
@@ -4613,15 +4641,21 @@ async function buildFinishMissionResponse(req, event, team, actorName, messages 
 }
 
 
-async function handleHintRequest(event, team, kakaoUserId) {
+async function handleHintRequest(event, team, kakaoUserId, providedContext = {}) {
   const teamReload = team;
+  const context = providedContext && typeof providedContext === 'object' ? providedContext : {};
+  const hasPrefetchedMission = Object.prototype.hasOwnProperty.call(context, 'currentMission');
+  const hasPrefetchedMember = Object.prototype.hasOwnProperty.call(context, 'member');
+  const hasPrefetchedCompletion = Object.prototype.hasOwnProperty.call(context, 'currentMissionCompletion');
   const [member, missionResult] = await Promise.all([
-    getTeamMember(event.id, kakaoUserId),
-    teamReload.current_mission_id
+    hasPrefetchedMember ? Promise.resolve(context.member) : getTeamMember(event.id, kakaoUserId),
+    hasPrefetchedMission
+      ? Promise.resolve({ rows: context.currentMission ? [context.currentMission] : [] })
+      : teamReload.current_mission_id
       ? query(`SELECT * FROM missions WHERE id=$1 AND event_id=$2;`, [teamReload.current_mission_id, event.id])
       : Promise.resolve({ rows: [] }),
   ]);
-  const actorName = member?.member_name || '팀원';
+  const actorName = member?.member_name || team.leader_name || '팀원';
 
   if (!teamReload.current_mission_id) {
     return skipKakaoCommonPostProcessing(kakaoText('먼저 QR코드를 스캔한 뒤 힌트를 사용할 수 있습니다.', ['미션 목록', ...menuQuickReplies]));
@@ -4638,7 +4672,9 @@ async function handleHintRequest(event, team, kakaoUserId) {
     });
   }
 
-  const already = await isMissionAlreadyCompleted(team.id, mission.id);
+  const already = hasPrefetchedCompletion
+    ? Boolean(context.currentMissionCompletion)
+    : await isMissionAlreadyCompleted(team.id, mission.id);
   if (already) {
     return finalizeMissionStartResponse(kakaoText(`이미 완료한 미션입니다.
 
@@ -4654,18 +4690,38 @@ ${mission.mission_code} ${mission.mission_name}
   const penaltyRaw = Number(mission.hint_penalty ?? -10);
   const penalty = penaltyRaw > 0 ? -penaltyRaw : penaltyRaw;
   const eventKey = `hint:${mission.id}`;
-  const inserted = await addScoreEvent({
-    eventId: event.id,
-    teamId: team.id,
-    missionId: mission.id,
-    kakaoUserId,
-    actorName,
-    eventType: 'hint',
-    eventKey,
-    scoreDelta: penalty,
-    memo: '힌트 사용',
-  });
-  const availableScore = await missionAvailableScore(team.id, mission);
+  const hintResult = await query(
+    `WITH prior_penalty AS MATERIALIZED (
+       SELECT COALESCE(SUM(score_delta), 0)::int AS total
+       FROM score_events
+       WHERE team_id=$2 AND mission_id=$3 AND event_type IN ('hint', 'wrong')
+     ), prior_hint AS MATERIALIZED (
+       SELECT EXISTS (
+         SELECT 1
+         FROM score_events
+         WHERE event_id=$1 AND team_id=$2 AND mission_id=$3
+           AND event_type='hint' AND event_key=$6
+       ) AS existed
+     ), inserted AS (
+       INSERT INTO score_events(
+         event_id, team_id, mission_id, actor_kakao_user_id, actor_name,
+         event_type, event_key, score_delta, memo
+       )
+       VALUES ($1,$2,$3,$4,$5,'hint',$6,$7,'힌트 사용')
+       ON CONFLICT(event_id, team_id, mission_id, event_type, event_key) WHERE event_key <> '' DO NOTHING
+       RETURNING id, score_delta
+     )
+     SELECT
+       EXISTS(SELECT 1 FROM inserted) AS inserted,
+       (
+         $8::integer
+         + (SELECT total FROM prior_penalty)
+         + CASE WHEN (SELECT existed FROM prior_hint) THEN 0 ELSE $7::integer END
+       )::int AS available_score;`,
+    [event.id, team.id, mission.id, kakaoUserId, actorName, eventKey, penalty, Number(mission.score || 0)]
+  );
+  const inserted = hintResult.rows[0]?.inserted === true;
+  const availableScore = Number(hintResult.rows[0]?.available_score ?? mission.score ?? 0);
 
   if (inserted) {
     setImmediate(() => {
@@ -5090,23 +5146,28 @@ async function buildQuizMissionSuccessResponse(req, event, team, mission, kakaoU
   );
 }
 
-async function handleAnswer(req, event, team, utterance, kakaoUserId, messages = DEFAULT_MESSAGE_SETTINGS, providedUserState = null) {
+async function handleAnswer(req, event, team, utterance, kakaoUserId, messages = DEFAULT_MESSAGE_SETTINGS, providedContext = {}) {
   const teamReload = team;
-  const [missionResult, member] = await Promise.all([
-    teamReload.current_mission_id
-      ? query(`SELECT * FROM missions WHERE id=$1 AND event_id=$2;`, [teamReload.current_mission_id, event.id])
-      : Promise.resolve({ rows: [] }),
-    getTeamMember(event.id, kakaoUserId),
-  ]);
-  const actorName = member?.member_name || '팀원';
-
   if (!teamReload.current_mission_id) {
     return skipKakaoCommonPostProcessing(
       kakaoText('먼저 QR코드를 스캔해주세요.', ['미션 목록', ...menuQuickReplies])
     );
   }
 
-  const mission = missionResult.rows[0];
+  const context = providedContext && typeof providedContext === 'object' ? providedContext : {};
+  const hasPrefetchedMission = Object.prototype.hasOwnProperty.call(context, 'currentMission');
+  const hasPrefetchedMember = Object.prototype.hasOwnProperty.call(context, 'member');
+  const hasPrefetchedCompletion = Object.prototype.hasOwnProperty.call(context, 'currentMissionCompletion');
+  const providedUserState = context.userState || null;
+  const [mission, member] = await Promise.all([
+    hasPrefetchedMission
+      ? Promise.resolve(context.currentMission)
+      : query(`SELECT * FROM missions WHERE id=$1 AND event_id=$2;`, [teamReload.current_mission_id, event.id]).then((result) => result.rows[0] || null),
+    hasPrefetchedMember
+      ? Promise.resolve(context.member)
+      : getTeamMember(event.id, kakaoUserId),
+  ]);
+  const actorName = member?.member_name || team.leader_name || '팀원';
   if (!mission) return skipKakaoCommonPostProcessing(kakaoText('진행 중인 미션 정보를 찾을 수 없습니다. 미션 목록에서 다시 선택해주세요.', menuQuickReplies));
   const activeMissionResponse = (response) => finalizeMissionStartResponse(response, mission, {
     currentMissionId: mission.id,
@@ -5118,7 +5179,9 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
     teamStatus: team.status,
   });
 
-  const completion = await getMissionCompletion(team.id, mission.id);
+  const completion = hasPrefetchedCompletion
+    ? context.currentMissionCompletion
+    : await getMissionCompletion(team.id, mission.id);
   if (completion) {
     // 완주 처리 직후 카카오 응답이 유실되더라도 같은 정답을 다시 입력하면
     // 일반 중복 안내 대신 완주 점수/순위 응답을 복구해서 보여줍니다.
@@ -5331,6 +5394,32 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
            SELECT COUNT(*)::int AS count
            FROM submissions
            WHERE team_id=$2 AND mission_id=$3 AND status='wrong'
+         ), prior_mission_penalty AS MATERIALIZED (
+           SELECT COALESCE(SUM(score_delta), 0)::int AS total
+           FROM score_events
+           WHERE team_id=$2 AND mission_id=$3 AND event_type IN ('hint', 'wrong')
+         ), team_total AS MATERIALIZED (
+           WITH mission_scores AS (
+             SELECT mission_id, MAX(score)::int AS score
+             FROM submissions
+             WHERE team_id=$2 AND status IN ('correct', 'approved')
+             GROUP BY mission_id
+           )
+           SELECT (
+             COALESCE((SELECT SUM(score) FROM mission_scores), 0)
+             + COALESCE((
+               SELECT SUM(se.score_delta)
+               FROM score_events se
+               WHERE se.team_id=$2
+                 AND (
+                   se.event_type NOT IN ('hint', 'wrong')
+                   OR EXISTS (
+                     SELECT 1 FROM mission_scores completed
+                     WHERE completed.mission_id=se.mission_id
+                   )
+                 )
+             ), 0)
+           )::int AS total
          ), saved_answer AS (
            INSERT INTO submissions(event_id, team_id, mission_id, answer_text, actor_kakao_user_id, actor_name, status, score)
            VALUES ($1,$2,$3,$4,$5,$6,'wrong',0)
@@ -5341,7 +5430,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
            FROM saved_answer
            WHERE $8::integer <> 0
            ON CONFLICT(event_id, team_id, mission_id, event_type, event_key) WHERE event_key <> '' DO NOTHING
-           RETURNING id
+           RETURNING id, score_delta
          ), saved_state AS (
            INSERT INTO user_states(event_id, kakao_user_id, state, data, updated_at)
            VALUES ($1,$5,'WAIT_CROSSWORD_ANSWER',$9,NOW())
@@ -5349,14 +5438,19 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
            DO UPDATE SET state=EXCLUDED.state, data=EXCLUDED.data, updated_at=NOW()
            RETURNING id
          )
-         SELECT (SELECT count FROM prior_wrong)::int AS wrong_count;`,
-        [event.id, team.id, mission.id, normalizeSubmissionUtteranceForDisplay(utterance), kakaoUserId, actorName, penaltyKey, wrongPenalty, JSON.stringify(progress)]
+         SELECT
+           ((SELECT count FROM prior_wrong) + 1)::int AS wrong_count,
+           (SELECT total FROM team_total)::int AS team_total,
+           (
+             $10::integer
+             + (SELECT total FROM prior_mission_penalty)
+             + COALESCE((SELECT SUM(score_delta) FROM saved_penalty), 0)
+           )::int AS available_score;`,
+        [event.id, team.id, mission.id, normalizeSubmissionUtteranceForDisplay(utterance), kakaoUserId, actorName, penaltyKey, wrongPenalty, JSON.stringify(progress), Number(mission.score || 0)]
       );
-      const wrongCount = Number(answerSave.rows[0]?.wrong_count || 0) + 1;
-      const [totalAfterWrong, availableScore] = await Promise.all([
-        teamTotalScore(team.id),
-        missionAvailableScore(team.id, mission),
-      ]);
+      const wrongCount = Number(answerSave.rows[0]?.wrong_count || 1);
+      const totalAfterWrong = Number(answerSave.rows[0]?.team_total || 0);
+      const availableScore = Number(answerSave.rows[0]?.available_score ?? mission.score ?? 0);
       const wrongTemplate = String(mission.wrong_message || messages?.crossword_wrong_message || DEFAULT_MESSAGE_SETTINGS.crossword_wrong_message).trim();
       const variables = crosswordPromptVariables(event, team, mission, currentEntry, solvedIds, actorName, {
         wrong_count: wrongCount,
@@ -6211,7 +6305,11 @@ async function handleKakaoSkill(req, res) {
     }
 
     if (isHintCommand(utterance)) {
-      return respondKakao(res, await handleHintRequest(event, team, kakaoUserId), event, team, kakaoUserId);
+      return respondKakao(res, await handleHintRequest(event, team, kakaoUserId, {
+        member: userContext.member,
+        currentMission: userContext.currentMission,
+        currentMissionCompletion: userContext.currentMissionCompletion,
+      }), event, team, kakaoUserId);
     }
 
     if (isScoreCommand(utterance)) {
@@ -6232,7 +6330,12 @@ async function handleKakaoSkill(req, res) {
       return respondKakao(res, response, event, team, kakaoUserId);
     }
 
-    return respondKakao(res, await handleAnswer(req, event, team, utterance, kakaoUserId, messages, userState), event, team, kakaoUserId);
+    return respondKakao(res, await handleAnswer(req, event, team, utterance, kakaoUserId, messages, {
+      userState,
+      member: userContext.member,
+      currentMission: userContext.currentMission,
+      currentMissionCompletion: userContext.currentMissionCompletion,
+    }), event, team, kakaoUserId);
   } catch (error) {
     console.error('Kakao skill error:', error);
     if (res.headersSent || res.writableEnded) return res;
