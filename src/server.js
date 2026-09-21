@@ -754,7 +754,9 @@ function getEventIdentifierFromRequest(req) {
   return extractEventIdentifierFromText(qrText);
 }
 
-const EVENT_CACHE_TTL_MS = 5 * 60 * 1000;
+// 행사 정보는 관리자 변경 시 즉시 무효화되므로 운영 중 반복 조회를 줄이기 위해
+// 참가 흐름 동안 충분히 유지합니다.
+const EVENT_CACHE_TTL_MS = 30 * 60 * 1000;
 const eventIdentifierCache = new Map();
 const kakaoEventSessionCache = new Map();
 const kakaoBotEventCache = new Map();
@@ -1046,10 +1048,17 @@ const missionMapSettingsCache = new Map();
 const missionDefinitionCache = new Map();
 const missionImageMetadataCache = new Map();
 const missionImageBinaryCache = new Map();
+const crosswordBoardRenderCache = new Map();
+const crosswordProgressHotCache = new Map();
+const crosswordProgressWriteChains = new Map();
+const crosswordRuntimeContextCache = new Map();
+const crosswordRuntimeTeamKeys = new Map();
 const missionMapStaticAssetsCache = new Map();
 const missionMapRenderCache = new Map();
 const missionMapCacheEpoch = new Map();
 const MISSION_MAP_RENDER_VERSION = 2;
+const CROSSWORD_PROGRESS_HOT_TTL_MS = 10 * 60 * 1000;
+const CROSSWORD_RUNTIME_CONTEXT_TTL_MS = 5 * 60 * 1000;
 
 function getFreshCacheEntry(cache, key) {
   const entry = cache.get(key);
@@ -1092,6 +1101,13 @@ function invalidateMissionMapRenderCache(eventId) {
 
 function invalidateMissionContentCache(eventId, missionId = null) {
   missionDefinitionCache.delete(Number(eventId || 0));
+  invalidateCrosswordRuntimeEvent(eventId);
+  const crosswordPrefix = missionId
+    ? `${Number(eventId || 0)}:${Number(missionId)}:`
+    : `${Number(eventId || 0)}:`;
+  for (const key of crosswordBoardRenderCache.keys()) {
+    if (String(key).startsWith(crosswordPrefix)) crosswordBoardRenderCache.delete(key);
+  }
   if (missionId) {
     const prefix = `${Number(missionId)}:`;
     for (const key of missionImageMetadataCache.keys()) {
@@ -2565,7 +2581,7 @@ async function initDb() {
   // 카카오 요청이 들어온 뒤 큰 이미지 데이터가 포함된 문구 설정을 처음 읽으면
   // 제한시간을 넘길 수 있어, 기본 행사 설정을 서버 준비 단계에서 한 번 올려둡니다.
   const settingsEvents = await query(`
-    SELECT id
+    SELECT *
     FROM events
     WHERE status IN ('active', 'paused')
     ORDER BY
@@ -2573,6 +2589,13 @@ async function initDb() {
       CASE WHEN status='active' THEN 0 WHEN status='paused' THEN 1 ELSE 2 END,
       id DESC
   `);
+  settingsEvents.rows.forEach((event) => rememberEvent(event));
+  if (settingsEvents.rows[0]) {
+    defaultEventCache = {
+      value: settingsEvents.rows[0],
+      expiresAt: Date.now() + EVENT_CACHE_TTL_MS,
+    };
+  }
   await Promise.all(settingsEvents.rows.flatMap((row) => [
     getMessageSettings(row.id),
     getParticipationFeatureSettings(row.id),
@@ -2580,6 +2603,10 @@ async function initDb() {
     getMissions(row.id),
     getMissionMapStaticAssets(row.id),
   ]));
+  const warmedMissionGroups = await Promise.all(settingsEvents.rows.map((row) => getMissions(row.id)));
+  await Promise.all(warmedMissionGroups.flatMap((missions, eventIndex) => missions
+    .filter((mission) => mission.mission_type === 'crossword')
+    .map((mission) => cachedCrosswordBoardPng(settingsEvents.rows[eventIndex].id, mission, []))));
 }
 
 
@@ -2671,7 +2698,79 @@ async function getTeamByKakaoUser(eventId, kakaoUserId) {
   return fallback.rows[0] || null;
 }
 
+function crosswordRuntimeContextKey(eventId, kakaoUserId) {
+  return `${Number(eventId || 0)}:${String(kakaoUserId || '').trim()}`;
+}
+
+function deleteCrosswordRuntimeContextKey(key) {
+  const cached = crosswordRuntimeContextCache.get(key);
+  crosswordRuntimeContextCache.delete(key);
+  const teamId = Number(cached?.teamId || 0);
+  if (!teamId) return;
+  const keys = crosswordRuntimeTeamKeys.get(teamId);
+  if (!keys) return;
+  keys.delete(key);
+  if (!keys.size) crosswordRuntimeTeamKeys.delete(teamId);
+}
+
+function invalidateCrosswordRuntimeContext(eventId, kakaoUserId) {
+  deleteCrosswordRuntimeContextKey(crosswordRuntimeContextKey(eventId, kakaoUserId));
+}
+
+function invalidateCrosswordRuntimeTeam(teamId) {
+  const numericTeamId = Number(teamId || 0);
+  const keys = crosswordRuntimeTeamKeys.get(numericTeamId);
+  if (!keys) return;
+  for (const key of [...keys]) deleteCrosswordRuntimeContextKey(key);
+}
+
+function invalidateCrosswordRuntimeEvent(eventId) {
+  const prefix = `${Number(eventId || 0)}:`;
+  for (const key of [...crosswordRuntimeContextCache.keys()]) {
+    if (String(key).startsWith(prefix)) deleteCrosswordRuntimeContextKey(key);
+  }
+}
+
+function rememberCrosswordRuntimeContext(eventId, kakaoUserId, context = {}) {
+  const key = crosswordRuntimeContextKey(eventId, kakaoUserId);
+  const teamId = Number(context?.team?.id || 0);
+  const mission = context?.currentMission || null;
+  if (!teamId || mission?.mission_type !== 'crossword' || context?.currentMissionCompletion) {
+    deleteCrosswordRuntimeContextKey(key);
+    return;
+  }
+  deleteCrosswordRuntimeContextKey(key);
+  crosswordRuntimeContextCache.set(key, {
+    teamId,
+    value: structuredClone(context),
+    expiresAt: Date.now() + CROSSWORD_RUNTIME_CONTEXT_TTL_MS,
+  });
+  const teamKeys = crosswordRuntimeTeamKeys.get(teamId) || new Set();
+  teamKeys.add(key);
+  crosswordRuntimeTeamKeys.set(teamId, teamKeys);
+  while (crosswordRuntimeContextCache.size > 1000) {
+    deleteCrosswordRuntimeContextKey(crosswordRuntimeContextCache.keys().next().value);
+  }
+}
+
+function getCrosswordRuntimeContext(eventId, kakaoUserId) {
+  const key = crosswordRuntimeContextKey(eventId, kakaoUserId);
+  const cached = crosswordRuntimeContextCache.get(key);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    deleteCrosswordRuntimeContextKey(key);
+    return null;
+  }
+  crosswordRuntimeContextCache.delete(key);
+  crosswordRuntimeContextCache.set(key, cached);
+  const context = structuredClone(cached.value);
+  context.userState = overlayCrosswordProgressState(eventId, kakaoUserId, context.userState || null);
+  return context;
+}
+
 async function getKakaoUserContext(eventId, kakaoUserId) {
+  const cachedContext = getCrosswordRuntimeContext(eventId, kakaoUserId);
+  if (cachedContext) return cachedContext;
   const result = await query(
     `WITH selected_team AS MATERIALIZED (
        SELECT candidate.*
@@ -2722,13 +2821,16 @@ async function getKakaoUserContext(eventId, kakaoUserId) {
        ) AS current_mission_completion;`,
     [eventId, kakaoUserId]
   );
-  return {
+  const storedUserState = result.rows[0]?.user_state || null;
+  const context = {
     team: result.rows[0]?.team || null,
-    userState: result.rows[0]?.user_state || null,
+    userState: overlayCrosswordProgressState(eventId, kakaoUserId, storedUserState),
     member: result.rows[0]?.member || null,
     currentMission: result.rows[0]?.current_mission || null,
     currentMissionCompletion: result.rows[0]?.current_mission_completion || null,
   };
+  rememberCrosswordRuntimeContext(eventId, kakaoUserId, context);
+  return context;
 }
 
 async function getTeamMember(eventId, kakaoUserId) {
@@ -2994,6 +3096,8 @@ async function joinTeamById(eventId, teamId, kakaoUserId, memberName) {
 }
 
 async function getUserState(eventId, kakaoUserId) {
+  const hotState = getCrosswordProgressHotState(eventId, kakaoUserId);
+  if (hotState) return hotState;
   const result = await query(
     `SELECT * FROM user_states WHERE event_id=$1 AND kakao_user_id=$2 LIMIT 1;`,
     [eventId, kakaoUserId]
@@ -3011,7 +3115,82 @@ function stateData(userState) {
   }
 }
 
+function crosswordProgressStateCacheKey(eventId, kakaoUserId) {
+  return `${Number(eventId || 0)}:${String(kakaoUserId || '').trim()}`;
+}
+
+function getCrosswordProgressHotState(eventId, kakaoUserId) {
+  const key = crosswordProgressStateCacheKey(eventId, kakaoUserId);
+  const cached = crosswordProgressHotCache.get(key);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    crosswordProgressHotCache.delete(key);
+    return null;
+  }
+  return cached.value;
+}
+
+function overlayCrosswordProgressState(eventId, kakaoUserId, storedState = null) {
+  const hotState = getCrosswordProgressHotState(eventId, kakaoUserId);
+  if (!hotState) return storedState;
+  const storedAt = new Date(storedState?.updated_at || 0).getTime();
+  const hotAt = new Date(hotState.updated_at || 0).getTime();
+  return !Number.isFinite(storedAt) || hotAt >= storedAt ? hotState : storedState;
+}
+
+function queueCrosswordProgressState(eventId, kakaoUserId, data = {}) {
+  const key = crosswordProgressStateCacheKey(eventId, kakaoUserId);
+  const updatedAt = new Date().toISOString();
+  const value = {
+    event_id: Number(eventId),
+    kakao_user_id: String(kakaoUserId || ''),
+    state: 'WAIT_CROSSWORD_ANSWER',
+    data: structuredClone(data || {}),
+    updated_at: updatedAt,
+  };
+  crosswordProgressHotCache.set(key, {
+    value,
+    expiresAt: Date.now() + CROSSWORD_PROGRESS_HOT_TTL_MS,
+  });
+
+  const previous = crosswordProgressWriteChains.get(key) || Promise.resolve();
+  const write = previous.catch(() => {}).then(async () => {
+    let lastError;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await query(
+          `INSERT INTO user_states(event_id, kakao_user_id, state, data, updated_at)
+           VALUES ($1,$2,'WAIT_CROSSWORD_ANSWER',$3,$4)
+           ON CONFLICT(event_id, kakao_user_id)
+           DO UPDATE SET state=EXCLUDED.state, data=EXCLUDED.data, updated_at=EXCLUDED.updated_at;`,
+          [eventId, kakaoUserId, JSON.stringify(data || {}), updatedAt]
+        );
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError;
+  });
+  crosswordProgressWriteChains.set(key, write);
+  write.catch((error) => {
+    console.error('[crossword-progress save error]', error.message);
+  }).finally(() => {
+    if (crosswordProgressWriteChains.get(key) === write) crosswordProgressWriteChains.delete(key);
+  });
+  return value;
+}
+
+async function flushCrosswordProgressState(eventId, kakaoUserId, { clear = false } = {}) {
+  const key = crosswordProgressStateCacheKey(eventId, kakaoUserId);
+  const pending = crosswordProgressWriteChains.get(key);
+  if (pending) await pending.catch(() => {});
+  if (clear) crosswordProgressHotCache.delete(key);
+}
+
 async function setUserState(eventId, kakaoUserId, state, data = {}) {
+  await flushCrosswordProgressState(eventId, kakaoUserId, { clear: true });
+  invalidateCrosswordRuntimeContext(eventId, kakaoUserId);
   await query(
     `INSERT INTO user_states(event_id, kakao_user_id, state, data, updated_at)
      VALUES ($1,$2,$3,$4,NOW())
@@ -3022,6 +3201,8 @@ async function setUserState(eventId, kakaoUserId, state, data = {}) {
 }
 
 async function clearUserState(eventId, kakaoUserId) {
+  await flushCrosswordProgressState(eventId, kakaoUserId, { clear: true });
+  invalidateCrosswordRuntimeContext(eventId, kakaoUserId);
   await query(`DELETE FROM user_states WHERE event_id=$1 AND kakao_user_id=$2;`, [eventId, kakaoUserId]);
 }
 
@@ -4591,13 +4772,30 @@ async function resolveMissionMapProgress(eventId, access) {
   ]);
 }
 
+function crosswordBoardVersion(mission, solvedIndexText = '') {
+  return createHash('sha1')
+    .update(`outline-v1:${JSON.stringify(normalizeCrosswordData(mission?.crossword_data))}:${String(solvedIndexText || '')}`)
+    .digest('hex')
+    .slice(0, 12);
+}
+
+async function cachedCrosswordBoardPng(eventId, mission, solvedIds = [], solvedIndexText = '') {
+  const solved = String(solvedIndexText || crosswordSolvedIndexText(mission, solvedIds));
+  const version = crosswordBoardVersion(mission, solved);
+  const cacheKey = `${Number(eventId)}:${Number(mission?.id || 0)}:${version}:${solved || 'none'}`;
+  return loadBoundedCache(
+    crosswordBoardRenderCache,
+    cacheKey,
+    MISSION_CACHE_TTL_MS,
+    300,
+    () => renderCrosswordBoardPng(mission.crossword_data, solvedIds)
+  );
+}
+
 function crosswordBoardUrl(req, event, mission, solvedIds = []) {
   const solved = crosswordSolvedIndexText(mission, solvedIds);
   const signature = crosswordImageSignature(event?.id, mission?.id, solved);
-  const version = createHash('sha1')
-    .update(`outline-v1:${JSON.stringify(normalizeCrosswordData(mission?.crossword_data))}:${solved}`)
-    .digest('hex')
-    .slice(0, 12);
+  const version = crosswordBoardVersion(mission, solved);
   const pathValue = urlWithEvent(
     `/api/public/missions/${Number(mission?.id || 0)}/crossword.png?v=${version}&solved=${encodeURIComponent(solved)}&sig=${signature}`,
     event
@@ -4765,6 +4963,22 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
     nextStateName,
     nextStateData
   );
+  invalidateCrosswordRuntimeTeam(team.id);
+  if (!startResult.completion && mission.mission_type === 'crossword') {
+    rememberCrosswordRuntimeContext(event.id, kakaoUserId, {
+      team: { ...team, current_mission_id: mission.id },
+      userState: {
+        event_id: event.id,
+        kakao_user_id: kakaoUserId,
+        state: nextStateName,
+        data: structuredClone(nextStateData),
+        updated_at: new Date().toISOString(),
+      },
+      member: req?.kakaoUserContext?.member || null,
+      currentMission: mission,
+      currentMissionCompletion: null,
+    });
+  }
   if (startResult.completion) {
     const currentActorName = String(
       req?.kakaoUserContext?.member?.member_name
@@ -5665,7 +5879,10 @@ async function completeInteractiveMission(
 }
 
 async function completeCrosswordMission(event, team, mission, kakaoUserId, actorName, solvedIds, progress) {
-  return completeInteractiveMission(
+  // 직전 중간 정답의 비동기 상태 저장이 완료된 뒤 최종 완료 상태를 기록해
+  // 느린 이전 UPDATE가 완료 상태를 다시 덮어쓰지 않게 합니다.
+  await flushCrosswordProgressState(event.id, kakaoUserId);
+  const result = await completeInteractiveMission(
     event,
     team,
     mission,
@@ -5676,6 +5893,9 @@ async function completeCrosswordMission(event, team, mission, kakaoUserId, actor
     progress,
     'crossword:complete'
   );
+  await flushCrosswordProgressState(event.id, kakaoUserId, { clear: true });
+  invalidateCrosswordRuntimeTeam(team.id);
+  return result;
 }
 
 async function buildQuizMissionSuccessResponse(req, event, team, mission, kakaoUserId, actorName, messages, options = {}) {
@@ -5903,7 +6123,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
       const selectedKey = crosswordEntryKey(selectedEntry);
       if (solvedIds.includes(selectedKey)) {
         const nextEntry = entries.find((entry) => !solvedIds.includes(crosswordEntryKey(entry))) || currentEntry;
-        await setUserState(event.id, kakaoUserId, 'WAIT_CROSSWORD_ANSWER', {
+        queueCrosswordProgressState(event.id, kakaoUserId, {
           missionId: mission.id,
           solved: solvedIds,
           currentEntryId: crosswordEntryKey(nextEntry),
@@ -5919,7 +6139,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
         return activeMissionResponse(response);
       }
       currentEntry = selectedEntry;
-      await setUserState(event.id, kakaoUserId, 'WAIT_CROSSWORD_ANSWER', {
+      queueCrosswordProgressState(event.id, kakaoUserId, {
         missionId: mission.id,
         solved: solvedIds,
         currentEntryId: selectedKey,
@@ -5940,7 +6160,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
     if (/^(다음\s*문제|다음)$/u.test(navigation) || /^(이전\s*문제|이전)$/u.test(navigation)) {
       const offset = /^(이전\s*문제|이전)$/u.test(navigation) ? -1 : 1;
       currentEntry = crosswordRelativeEntry(entries, solvedIds, crosswordEntryKey(currentEntry), offset) || currentEntry;
-      await setUserState(event.id, kakaoUserId, 'WAIT_CROSSWORD_ANSWER', {
+      queueCrosswordProgressState(event.id, kakaoUserId, {
         missionId: mission.id,
         solved: solvedIds,
         currentEntryId: crosswordEntryKey(currentEntry),
@@ -5961,7 +6181,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
 
     if (!answeredEntry && previouslySolvedEntry) {
       const nextEntry = entries.find((entry) => !solvedIds.includes(crosswordEntryKey(entry))) || currentEntry;
-      await setUserState(event.id, kakaoUserId, 'WAIT_CROSSWORD_ANSWER', {
+      queueCrosswordProgressState(event.id, kakaoUserId, {
         missionId: mission.id,
         solved: solvedIds,
         currentEntryId: crosswordEntryKey(nextEntry),
@@ -5985,6 +6205,8 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
         solved: solvedIds,
         currentEntryId: crosswordEntryKey(currentEntry),
       };
+      // 앞선 중간 정답 저장과 오답·감점 저장의 순서를 보장합니다.
+      await flushCrosswordProgressState(event.id, kakaoUserId);
       const answerSave = await query(
         `WITH prior_wrong AS MATERIALIZED (
            SELECT COUNT(*)::int AS count
@@ -6042,8 +6264,9 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
              + (SELECT total FROM prior_mission_penalty)
              + COALESCE((SELECT SUM(score_delta) FROM saved_penalty), 0)
            )::int AS available_score;`,
-        [event.id, team.id, mission.id, normalizeSubmissionUtteranceForDisplay(utterance), kakaoUserId, actorName, penaltyKey, wrongPenalty, JSON.stringify(progress), Number(mission.score || 0)]
+         [event.id, team.id, mission.id, normalizeSubmissionUtteranceForDisplay(utterance), kakaoUserId, actorName, penaltyKey, wrongPenalty, JSON.stringify(progress), Number(mission.score || 0)]
       );
+      await flushCrosswordProgressState(event.id, kakaoUserId, { clear: true });
       const wrongCount = Number(answerSave.rows[0]?.wrong_count || 1);
       const totalAfterWrong = Number(answerSave.rows[0]?.team_total || 0);
       const availableScore = Number(answerSave.rows[0]?.available_score ?? mission.score ?? 0);
@@ -6108,7 +6331,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
 
     const nextEntry = crosswordRelativeEntry(entries, solvedIds, answeredKey, 1)
       || entries.find((entry) => !solvedIds.includes(crosswordEntryKey(entry)));
-    await setUserState(event.id, kakaoUserId, 'WAIT_CROSSWORD_ANSWER', {
+    queueCrosswordProgressState(event.id, kakaoUserId, {
       missionId: mission.id,
       solved: solvedIds,
       currentEntryId: crosswordEntryKey(nextEntry),
@@ -7586,14 +7809,9 @@ app.post('/api/public/verify/location', async (req, res) => {
 app.get('/api/public/missions/:id/crossword.png', async (req, res) => {
   try {
     const event = await getActiveEvent(req);
-    const result = await query(
-      `SELECT id, crossword_data
-       FROM missions
-       WHERE id=$1 AND event_id=$2 AND mission_type='crossword'
-       LIMIT 1;`,
-      [req.params.id, event.id]
-    );
-    const mission = result.rows[0];
+    const missionId = Number(req.params.id || 0);
+    const missions = await getMissions(event.id);
+    const mission = missions.find((item) => Number(item.id) === missionId && item.mission_type === 'crossword');
     if (!mission) return res.status(404).send('crossword mission not found');
     let solvedIds = [];
     const hasProgressParameters = req.query.solved !== undefined || req.query.sig !== undefined;
@@ -7614,9 +7832,10 @@ app.get('/api/public/missions/:id/crossword.png', async (req, res) => {
       }
       solvedIds = indexes.map((index) => crosswordEntryKey(entries[index]));
     }
-    const png = await renderCrosswordBoardPng(mission.crossword_data, solvedIds);
+    const solvedIndexText = String(req.query.solved || '').trim();
+    const png = await cachedCrosswordBoardPng(event.id, mission, solvedIds, solvedIndexText);
     res.set('Content-Type', 'image/png');
-    res.set('Cache-Control', 'public, max-age=300, immutable');
+    res.set('Cache-Control', 'public, max-age=86400, immutable');
     res.send(png);
   } catch (error) {
     res.status(400).send(error.message);
@@ -7634,7 +7853,7 @@ app.get('/api/public/mission-map.png', async (req, res) => {
     const epoch = Number(missionMapCacheEpoch.get(Number(event.id)) || 0);
     // 지도에는 팀 고유 정보가 그려지지 않으므로 같은 행사에서 완료 조합이 같으면
     // 여러 팀이 하나의 결과 이미지를 공유할 수 있습니다.
-    const renderCacheKey = `${MISSION_MAP_RENDER_VERSION}:${Number(event.id)}:${epoch}:${completedIds.join('.') || 'none'}`;
+    const renderCacheKey = `${Number(event.id)}:${MISSION_MAP_RENDER_VERSION}:${epoch}:${completedIds.join('.') || 'none'}`;
     const image = await loadBoundedCache(
       missionMapRenderCache,
       renderCacheKey,
