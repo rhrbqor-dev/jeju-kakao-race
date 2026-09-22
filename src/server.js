@@ -69,7 +69,8 @@ const pool = new Pool({
   ssl: DATABASE_URL && !DATABASE_URL.includes('localhost') ? { rejectUnauthorized: false } : false,
   max: DB_POOL_MAX,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000,
+  // 카카오 응답 제한시간보다 오래 연결을 기다리지 않아 요청이 서버 안에 누적되는 것을 막습니다.
+  connectionTimeoutMillis: 3000,
 });
 
 const supabaseAdmin = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
@@ -763,6 +764,8 @@ const kakaoBotEventCache = new Map();
 const pendingKakaoEventSessions = new Map();
 let kakaoEventSessionFlushTimer = null;
 let defaultEventCache = null;
+let routableEventsCache = null;
+let routableEventsPromise = null;
 
 function timedCacheValue(entry) {
   if (!entry || entry.expiresAt <= Date.now()) return null;
@@ -782,10 +785,31 @@ function clearEventCaches() {
   kakaoEventSessionCache.clear();
   kakaoBotEventCache.clear();
   defaultEventCache = null;
+  routableEventsCache = null;
+  routableEventsPromise = null;
 }
 
 function normalizeEventRoutingName(value = '') {
   return String(value || '').trim().toLowerCase().replace(/[^0-9a-z가-힣]/gu, '');
+}
+
+async function getRoutableEvents() {
+  const cached = timedCacheValue(routableEventsCache);
+  if (cached) return cached;
+  if (routableEventsPromise) return routableEventsPromise;
+  routableEventsPromise = query(
+    `SELECT *
+     FROM events
+     WHERE status IN ('active','paused')
+     ORDER BY CASE WHEN COALESCE(is_default, false) THEN 1 ELSE 0 END, id DESC;`
+  ).then((result) => {
+    const events = result.rows.map((event) => rememberEvent(event));
+    routableEventsCache = { value: events, expiresAt: Date.now() + EVENT_CACHE_TTL_MS };
+    return events;
+  }).finally(() => {
+    routableEventsPromise = null;
+  });
+  return routableEventsPromise;
 }
 
 async function getEventByKakaoBot(req = null) {
@@ -799,12 +823,7 @@ async function getEventByKakaoBot(req = null) {
   if (cached?.expiresAt > Date.now()) return cached.value || null;
   if (cached) kakaoBotEventCache.delete(cacheKey);
 
-  const candidates = (await query(
-    `SELECT *
-     FROM events
-     WHERE status IN ('active','paused')
-     ORDER BY CASE WHEN COALESCE(is_default, false) THEN 1 ELSE 0 END, id DESC;`
-  )).rows;
+  const candidates = await getRoutableEvents();
   const exact = candidates.filter(
     (event) => normalizeEventRoutingName(event.event_name) === normalizedBotName
   );
@@ -944,15 +963,15 @@ async function resolveKakaoEvent(req, kakaoUserId = '') {
 
   // 행사별 카카오 봇 이름과 관리자 행사명이 같으면 URL에 event 값이 빠져도
   // 해당 행사로 연결합니다. 명시적인 event URL이 있으면 위 분기가 항상 우선합니다.
-  const [botEvent, sessionEvent] = await Promise.all([
-    getEventByKakaoBot(req),
-    getKakaoUserEventSession(kakaoUserId),
-  ]);
+  // 봇 이름으로 행사가 확정되면 사용자별 행사 세션을 조회할 필요가 없습니다.
+  // 특히 행사 시작 직후 신규 참가자가 몰릴 때 요청당 DB 조회 한 번을 줄입니다.
+  const botEvent = await getEventByKakaoBot(req);
   if (botEvent) {
     req.selectedEvent = botEvent;
     return botEvent;
   }
 
+  const sessionEvent = await getKakaoUserEventSession(kakaoUserId);
   if (sessionEvent) {
     req.selectedEvent = sessionEvent;
     return sessionEvent;
@@ -1051,6 +1070,8 @@ const missionImageBinaryCache = new Map();
 const crosswordBoardRenderCache = new Map();
 const crosswordProgressHotCache = new Map();
 const crosswordProgressWriteChains = new Map();
+const sequenceProgressHotCache = new Map();
+const sequenceProgressWriteChains = new Map();
 const crosswordRuntimeContextCache = new Map();
 const crosswordRuntimeTeamKeys = new Map();
 const missionMapStaticAssetsCache = new Map();
@@ -1058,6 +1079,7 @@ const missionMapRenderCache = new Map();
 const missionMapCacheEpoch = new Map();
 const MISSION_MAP_RENDER_VERSION = 2;
 const CROSSWORD_PROGRESS_HOT_TTL_MS = 10 * 60 * 1000;
+const SEQUENCE_PROGRESS_HOT_TTL_MS = 10 * 60 * 1000;
 const CROSSWORD_RUNTIME_CONTEXT_TTL_MS = 5 * 60 * 1000;
 
 function getFreshCacheEntry(cache, key) {
@@ -1933,7 +1955,7 @@ function kakaoConfiguredMessage(req, settings, key, text, quickReplies = [], tit
   return kakaoText(text, quickReplies);
 }
 
-function kakaoTeamReadyMessage(req, settings, baseKey, baseText, variables = {}, quickReplies = [], title = '팀 등록 완료') {
+function kakaoTeamReadyMessage(req, settings, baseKey, baseText, variables = {}, quickReplies = [], title = '팀 등록 완료', event = null, team = null) {
   const guideText = renderTemplate(settings?.mission_guide_message || '', variables).trim();
   const text = guideText ? `${String(baseText || '').trim()}
 
@@ -1942,7 +1964,8 @@ ${guideText}` : String(baseText || '').trim();
   const baseImage = messageImageUrl(req, settings, baseKey);
   const imageUrl = guideImage || baseImage;
   const cardTitle = visibleMessageTitle(settings, guideImage ? 'mission_guide' : baseKey, title);
-  if (imageUrl) return kakaoCard(cardTitle, text, [], quickReplies, imageUrl);
+  const buttons = guideText ? missionMapViewButtons(req, event, team) : [];
+  if (imageUrl || buttons.length) return kakaoCard(cardTitle, text, buttons, quickReplies, imageUrl);
   return kakaoText(text, quickReplies);
 }
 
@@ -1964,7 +1987,9 @@ function teamCreatedResponse(req, event, team, memberName, messages = DEFAULT_ME
     renderTemplate(messages.team_created_message, variables),
     variables,
     ['미션 목록', '팀원 목록', '도움말'],
-    '팀 생성 완료'
+    '팀 생성 완료',
+    event,
+    team
   ));
 }
 
@@ -1989,7 +2014,9 @@ function automaticParticipationResponse(req, event, team, memberName, messages =
     baseText,
     variables,
     menuQuickReplies,
-    showStartMessage ? '미션 시작' : '참가 등록 완료'
+    showStartMessage ? '미션 시작' : '참가 등록 완료',
+    event,
+    team
   ));
 }
 
@@ -2007,7 +2034,9 @@ function joinedTeamResponse(req, event, team, memberName, messages = DEFAULT_MES
     joinText,
     variables,
     menuQuickReplies,
-    '팀 참가 완료'
+    '팀 참가 완료',
+    event,
+    team
   ));
 }
 
@@ -2590,6 +2619,10 @@ async function initDb() {
       id DESC
   `);
   settingsEvents.rows.forEach((event) => rememberEvent(event));
+  routableEventsCache = {
+    value: settingsEvents.rows,
+    expiresAt: Date.now() + EVENT_CACHE_TTL_MS,
+  };
   if (settingsEvents.rows[0]) {
     defaultEventCache = {
       value: settingsEvents.rows[0],
@@ -2735,7 +2768,9 @@ function rememberCrosswordRuntimeContext(eventId, kakaoUserId, context = {}) {
   const key = crosswordRuntimeContextKey(eventId, kakaoUserId);
   const teamId = Number(context?.team?.id || 0);
   const mission = context?.currentMission || null;
-  if (!teamId || mission?.mission_type !== 'crossword' || context?.currentMissionCompletion) {
+  const cacheableInteractiveMission = mission?.mission_type === 'crossword'
+    || (mission?.mission_type === 'quiz' && normalizeQuizType(mission?.quiz_type) === 'sequence');
+  if (!teamId || !cacheableInteractiveMission || context?.currentMissionCompletion) {
     deleteCrosswordRuntimeContextKey(key);
     return;
   }
@@ -2764,7 +2799,7 @@ function getCrosswordRuntimeContext(eventId, kakaoUserId) {
   crosswordRuntimeContextCache.delete(key);
   crosswordRuntimeContextCache.set(key, cached);
   const context = structuredClone(cached.value);
-  context.userState = overlayCrosswordProgressState(eventId, kakaoUserId, context.userState || null);
+  context.userState = overlayInteractiveProgressState(eventId, kakaoUserId, context.userState || null);
   return context;
 }
 
@@ -2786,13 +2821,24 @@ async function getKakaoUserContext(eventId, kakaoUserId) {
        ) candidate
        ORDER BY candidate.priority ASC
        LIMIT 1
+     ), consumed_recent_state AS (
+       DELETE FROM user_states
+       WHERE event_id=$1 AND kakao_user_id=$2 AND state='TEAM_CREATED_RECENT'
+       RETURNING *
      )
      SELECT
        (SELECT to_jsonb(selected_team) - 'priority' FROM selected_team) AS team,
        (
-         SELECT to_jsonb(s)
-         FROM user_states s
-         WHERE s.event_id=$1 AND s.kakao_user_id=$2
+         SELECT to_jsonb(state_row) - 'priority'
+         FROM (
+           SELECT consumed.*, 0 AS priority FROM consumed_recent_state consumed
+           UNION ALL
+           SELECT saved.*, 1 AS priority
+           FROM user_states saved
+           WHERE saved.event_id=$1 AND saved.kakao_user_id=$2
+             AND NOT EXISTS (SELECT 1 FROM consumed_recent_state)
+         ) state_row
+         ORDER BY state_row.priority ASC
          LIMIT 1
        ) AS user_state,
        (
@@ -2824,7 +2870,7 @@ async function getKakaoUserContext(eventId, kakaoUserId) {
   const storedUserState = result.rows[0]?.user_state || null;
   const context = {
     team: result.rows[0]?.team || null,
-    userState: overlayCrosswordProgressState(eventId, kakaoUserId, storedUserState),
+    userState: overlayInteractiveProgressState(eventId, kakaoUserId, storedUserState),
     member: result.rows[0]?.member || null,
     currentMission: result.rows[0]?.current_mission || null,
     currentMissionCompletion: result.rows[0]?.current_mission_completion || null,
@@ -3096,7 +3142,7 @@ async function joinTeamById(eventId, teamId, kakaoUserId, memberName) {
 }
 
 async function getUserState(eventId, kakaoUserId) {
-  const hotState = getCrosswordProgressHotState(eventId, kakaoUserId);
+  const hotState = overlayInteractiveProgressState(eventId, kakaoUserId, null);
   if (hotState) return hotState;
   const result = await query(
     `SELECT * FROM user_states WHERE event_id=$1 AND kakao_user_id=$2 LIMIT 1;`,
@@ -3130,12 +3176,83 @@ function getCrosswordProgressHotState(eventId, kakaoUserId) {
   return cached.value;
 }
 
-function overlayCrosswordProgressState(eventId, kakaoUserId, storedState = null) {
-  const hotState = getCrosswordProgressHotState(eventId, kakaoUserId);
-  if (!hotState) return storedState;
-  const storedAt = new Date(storedState?.updated_at || 0).getTime();
-  const hotAt = new Date(hotState.updated_at || 0).getTime();
-  return !Number.isFinite(storedAt) || hotAt >= storedAt ? hotState : storedState;
+function sequenceProgressStateCacheKey(eventId, kakaoUserId) {
+  return `${Number(eventId || 0)}:${String(kakaoUserId || '').trim()}`;
+}
+
+function getSequenceProgressHotState(eventId, kakaoUserId) {
+  const key = sequenceProgressStateCacheKey(eventId, kakaoUserId);
+  const cached = sequenceProgressHotCache.get(key);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    sequenceProgressHotCache.delete(key);
+    return null;
+  }
+  return cached.value;
+}
+
+function overlayInteractiveProgressState(eventId, kakaoUserId, storedState = null) {
+  const candidates = [
+    storedState,
+    getCrosswordProgressHotState(eventId, kakaoUserId),
+    getSequenceProgressHotState(eventId, kakaoUserId),
+  ].filter(Boolean);
+  if (!candidates.length) return null;
+  return candidates.reduce((latest, candidate) => {
+    const latestAt = new Date(latest?.updated_at || 0).getTime();
+    const candidateAt = new Date(candidate?.updated_at || 0).getTime();
+    return !Number.isFinite(latestAt) || candidateAt >= latestAt ? candidate : latest;
+  });
+}
+
+function queueSequenceProgressState(eventId, kakaoUserId, data = {}) {
+  const key = sequenceProgressStateCacheKey(eventId, kakaoUserId);
+  const updatedAt = new Date().toISOString();
+  const value = {
+    event_id: Number(eventId),
+    kakao_user_id: String(kakaoUserId || ''),
+    state: 'WAIT_SEQUENCE_ANSWER',
+    data: structuredClone(data || {}),
+    updated_at: updatedAt,
+  };
+  sequenceProgressHotCache.set(key, {
+    value,
+    expiresAt: Date.now() + SEQUENCE_PROGRESS_HOT_TTL_MS,
+  });
+
+  const previous = sequenceProgressWriteChains.get(key) || Promise.resolve();
+  const write = previous.catch(() => {}).then(async () => {
+    let lastError;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await query(
+          `INSERT INTO user_states(event_id, kakao_user_id, state, data, updated_at)
+           VALUES ($1,$2,'WAIT_SEQUENCE_ANSWER',$3,$4)
+           ON CONFLICT(event_id, kakao_user_id)
+           DO UPDATE SET state=EXCLUDED.state, data=EXCLUDED.data, updated_at=EXCLUDED.updated_at;`,
+          [eventId, kakaoUserId, JSON.stringify(data || {}), updatedAt]
+        );
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError;
+  });
+  sequenceProgressWriteChains.set(key, write);
+  write.catch((error) => {
+    console.error('[sequence-progress save error]', error.message);
+  }).finally(() => {
+    if (sequenceProgressWriteChains.get(key) === write) sequenceProgressWriteChains.delete(key);
+  });
+  return value;
+}
+
+async function flushSequenceProgressState(eventId, kakaoUserId, { clear = false } = {}) {
+  const key = sequenceProgressStateCacheKey(eventId, kakaoUserId);
+  const pending = sequenceProgressWriteChains.get(key);
+  if (pending) await pending.catch(() => {});
+  if (clear) sequenceProgressHotCache.delete(key);
 }
 
 function queueCrosswordProgressState(eventId, kakaoUserId, data = {}) {
@@ -3189,7 +3306,10 @@ async function flushCrosswordProgressState(eventId, kakaoUserId, { clear = false
 }
 
 async function setUserState(eventId, kakaoUserId, state, data = {}) {
-  await flushCrosswordProgressState(eventId, kakaoUserId, { clear: true });
+  await Promise.all([
+    flushCrosswordProgressState(eventId, kakaoUserId, { clear: true }),
+    flushSequenceProgressState(eventId, kakaoUserId, { clear: true }),
+  ]);
   invalidateCrosswordRuntimeContext(eventId, kakaoUserId);
   await query(
     `INSERT INTO user_states(event_id, kakao_user_id, state, data, updated_at)
@@ -3201,7 +3321,10 @@ async function setUserState(eventId, kakaoUserId, state, data = {}) {
 }
 
 async function clearUserState(eventId, kakaoUserId) {
-  await flushCrosswordProgressState(eventId, kakaoUserId, { clear: true });
+  await Promise.all([
+    flushCrosswordProgressState(eventId, kakaoUserId, { clear: true }),
+    flushSequenceProgressState(eventId, kakaoUserId, { clear: true }),
+  ]);
   invalidateCrosswordRuntimeContext(eventId, kakaoUserId);
   await query(`DELETE FROM user_states WHERE event_id=$1 AND kakao_user_id=$2;`, [eventId, kakaoUserId]);
 }
@@ -3222,39 +3345,6 @@ async function addTeamNotice(eventId, teamId, noticeText, excludeKakaoUserId = '
       [result.rows[0].id, excludeKakaoUserId]
     );
   }
-}
-
-async function getAndMarkUnreadNotices(eventId, teamId, kakaoUserId) {
-  if (!teamId || !kakaoUserId) return '';
-
-  const result = await query(
-    `WITH unread AS MATERIALIZED (
-       SELECT n.id, n.notice_text, n.created_at
-       FROM team_notices n
-       WHERE n.event_id=$1
-         AND n.team_id=$2
-         AND NOT EXISTS (
-           SELECT 1 FROM team_notice_reads r
-           WHERE r.notice_id=n.id AND r.kakao_user_id=$3
-         )
-       ORDER BY n.created_at ASC
-       LIMIT 5
-     ), marked AS (
-       INSERT INTO team_notice_reads(notice_id, kakao_user_id)
-       SELECT id, $3 FROM unread
-       ON CONFLICT(notice_id, kakao_user_id) DO NOTHING
-       RETURNING notice_id
-     )
-     SELECT unread.id, unread.notice_text
-     FROM unread
-     LEFT JOIN marked ON marked.notice_id=unread.id
-     ORDER BY unread.created_at ASC;`,
-    [eventId, teamId, kakaoUserId]
-  );
-
-  if (!result.rows.length) return '';
-
-  return result.rows.map((row) => `- ${row.notice_text}`).join('\n');
 }
 
 function prependUnreadNoticesToResponse(response, noticeText = '') {
@@ -3334,93 +3424,8 @@ function appendCompletePromptToResponse(response, promptText) {
   return response;
 }
 
-async function addReadyCompleteMissionToResponse(eventId, team, response) {
-  if (!eventId || !team?.id || team.status === 'finished') return response;
-
-  const result = await query(
-    `WITH selected_team AS MATERIALIZED (
-       SELECT id, event_id, current_mission_id, status
-       FROM teams
-       WHERE id=$1 AND event_id=$2 AND status <> 'finished'
-       LIMIT 1
-     ), current_complete AS MATERIALIZED (
-       SELECT m.id, m.question, m.sort_order
-       FROM selected_team t
-       JOIN missions m ON m.id=t.current_mission_id AND m.event_id=t.event_id
-       WHERE m.mission_type='complete'
-         AND NOT EXISTS (
-           SELECT 1 FROM submissions s
-           WHERE s.team_id=t.id AND s.mission_id=m.id AND s.status IN ('correct','approved')
-         )
-     ), ready_complete AS MATERIALIZED (
-       SELECT m.id, m.question, m.sort_order
-       FROM selected_team t
-       JOIN missions m ON m.event_id=t.event_id AND m.mission_type='complete'
-       WHERE NOT EXISTS (
-               SELECT 1 FROM submissions s
-               WHERE s.team_id=t.id AND s.mission_id=m.id AND s.status IN ('correct','approved')
-             )
-         AND EXISTS (
-               SELECT 1 FROM missions required
-               WHERE required.event_id=t.event_id AND required.is_required=TRUE AND required.mission_type <> 'complete'
-             )
-         AND NOT EXISTS (
-               SELECT 1
-               FROM missions required
-               WHERE required.event_id=t.event_id
-                 AND required.is_required=TRUE
-                 AND required.mission_type <> 'complete'
-                 AND NOT EXISTS (
-                   SELECT 1 FROM submissions done
-                   WHERE done.team_id=t.id AND done.mission_id=required.id AND done.status IN ('correct','approved')
-                 )
-             )
-       ORDER BY m.sort_order ASC, m.id ASC
-       LIMIT 1
-     ), target_complete AS MATERIALIZED (
-       SELECT candidate.id, candidate.question
-       FROM (
-         SELECT id, question, sort_order, 0 AS priority FROM current_complete
-         UNION ALL
-         SELECT id, question, sort_order, 1 AS priority FROM ready_complete
-       ) candidate
-       ORDER BY candidate.priority ASC, candidate.sort_order ASC, candidate.id ASC
-       LIMIT 1
-     ), activated AS (
-       UPDATE teams t
-       SET current_mission_id=target_complete.id
-       FROM target_complete
-       WHERE t.id=$1 AND t.event_id=$2 AND t.status <> 'finished'
-       RETURNING t.id
-     )
-     SELECT target_complete.id, target_complete.question
-     FROM target_complete
-     LEFT JOIN activated ON activated.id=$1;`,
-    [team.id, eventId]
-  );
-  const completeMission = result.rows[0] || null;
-  if (!completeMission) return response;
-  return appendCompletePromptToResponse(response, completeMissionPromptText(completeMission));
-}
-
-async function syncActiveMissionHintQuickReply(eventId, team, response) {
-  if (!eventId || !team?.id || !response?.template) return response;
-
-  const result = await query(
-    `SELECT m.id, m.hint, m.mission_type, t.status AS team_status,
-            EXISTS (
-              SELECT 1
-              FROM submissions s
-              WHERE s.team_id=t.id AND s.mission_id=m.id
-                AND s.status IN ('correct', 'approved')
-            ) AS completed
-     FROM teams t
-     LEFT JOIN missions m ON m.id=t.current_mission_id AND m.event_id=$2
-     WHERE t.id=$1
-     LIMIT 1;`,
-    [team.id, eventId]
-  );
-  const mission = result.rows[0];
+function applyActiveMissionQuickReplies(response, mission = null) {
+  if (!response?.template) return response;
   const showHint = Boolean(String(mission?.hint || '').trim())
     && !mission?.completed
     && response.__missionCompletedInCurrentRequest !== true;
@@ -3446,6 +3451,122 @@ async function syncActiveMissionHintQuickReply(eventId, team, response) {
   if (replies.length) response.template.quickReplies = replies.slice(0, 10);
   else delete response.template.quickReplies;
   return response;
+}
+
+async function applyKakaoCommonPostProcessing(eventId, team, kakaoUserId, response) {
+  if (!eventId || !team?.id || !kakaoUserId || !response?.template) return response;
+  // 팀 알림 확인·완주 미션 활성화·힌트/QR 상태 확인을 한 DB 명령으로 처리합니다.
+  // 기존에는 응답 조립 후 최대 세 번의 DB 왕복이 순차적으로 발생했습니다.
+  const result = await query(
+    `/* kakao-common-post-processing-single-roundtrip */
+     WITH selected_team AS MATERIALIZED (
+       SELECT id, event_id, current_mission_id, status
+       FROM teams
+       WHERE id=$1 AND event_id=$2
+       LIMIT 1
+     ), unread AS MATERIALIZED (
+       SELECT n.id, n.notice_text, n.created_at
+       FROM team_notices n
+       WHERE n.event_id=$2 AND n.team_id=$1
+         AND NOT EXISTS (
+           SELECT 1 FROM team_notice_reads r
+           WHERE r.notice_id=n.id AND r.kakao_user_id=$3
+         )
+       ORDER BY n.created_at ASC
+       LIMIT 5
+     ), marked AS (
+       INSERT INTO team_notice_reads(notice_id, kakao_user_id)
+       SELECT id, $3 FROM unread
+       ON CONFLICT(notice_id, kakao_user_id) DO NOTHING
+       RETURNING notice_id
+     ), notice_rows AS MATERIALIZED (
+       SELECT unread.id, unread.notice_text, unread.created_at
+       FROM unread
+       LEFT JOIN marked ON marked.notice_id=unread.id
+     ), current_complete AS MATERIALIZED (
+       SELECT m.id, m.question, m.sort_order
+       FROM selected_team t
+       JOIN missions m ON m.id=t.current_mission_id AND m.event_id=t.event_id
+       WHERE t.status <> 'finished'
+         AND m.mission_type='complete'
+         AND NOT EXISTS (
+           SELECT 1 FROM submissions s
+           WHERE s.team_id=t.id AND s.mission_id=m.id AND s.status IN ('correct','approved')
+         )
+     ), ready_complete AS MATERIALIZED (
+       SELECT m.id, m.question, m.sort_order
+       FROM selected_team t
+       JOIN missions m ON m.event_id=t.event_id AND m.mission_type='complete'
+       WHERE t.status <> 'finished'
+         AND NOT EXISTS (
+           SELECT 1 FROM submissions s
+           WHERE s.team_id=t.id AND s.mission_id=m.id AND s.status IN ('correct','approved')
+         )
+         AND EXISTS (
+           SELECT 1 FROM missions required
+           WHERE required.event_id=t.event_id AND required.is_required=TRUE AND required.mission_type <> 'complete'
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM missions required
+           WHERE required.event_id=t.event_id
+             AND required.is_required=TRUE
+             AND required.mission_type <> 'complete'
+             AND NOT EXISTS (
+               SELECT 1 FROM submissions done
+               WHERE done.team_id=t.id AND done.mission_id=required.id AND done.status IN ('correct','approved')
+             )
+         )
+       ORDER BY m.sort_order ASC, m.id ASC
+       LIMIT 1
+     ), target_complete AS MATERIALIZED (
+       SELECT candidate.id, candidate.question
+       FROM (
+         SELECT id, question, sort_order, 0 AS priority FROM current_complete
+         UNION ALL
+         SELECT id, question, sort_order, 1 AS priority FROM ready_complete
+       ) candidate
+       ORDER BY candidate.priority ASC, candidate.sort_order ASC, candidate.id ASC
+       LIMIT 1
+     ), activated AS (
+       UPDATE teams t
+       SET current_mission_id=target_complete.id
+       FROM target_complete
+       WHERE t.id=$1 AND t.event_id=$2 AND t.status <> 'finished'
+       RETURNING t.id
+     ), active_mission AS MATERIALIZED (
+       SELECT m.id, m.hint, m.mission_type, t.status AS team_status,
+              EXISTS (
+                SELECT 1 FROM submissions s
+                WHERE s.team_id=t.id AND s.mission_id=m.id
+                  AND s.status IN ('correct','approved')
+              ) AS completed
+       FROM selected_team t
+       LEFT JOIN target_complete target ON TRUE
+       LEFT JOIN missions m
+         ON m.id=COALESCE(target.id, t.current_mission_id) AND m.event_id=t.event_id
+       LIMIT 1
+     )
+     SELECT
+       COALESCE((
+         SELECT jsonb_agg(to_jsonb(notice_rows) ORDER BY notice_rows.created_at ASC)
+         FROM notice_rows
+       ), '[]'::jsonb) AS notices,
+       (SELECT id FROM target_complete LIMIT 1) AS complete_mission_id,
+       (SELECT question FROM target_complete LIMIT 1) AS complete_question,
+       (SELECT to_jsonb(active_mission) FROM active_mission LIMIT 1) AS active_mission,
+       EXISTS(SELECT 1 FROM activated) AS complete_activated;`,
+    [team.id, eventId, kakaoUserId]
+  );
+  const row = result.rows[0] || {};
+  if (row.complete_mission_id) {
+    invalidateCrosswordRuntimeTeam(team.id);
+    appendCompletePromptToResponse(response, completeMissionPromptText({ question: row.complete_question }));
+  }
+  applyActiveMissionQuickReplies(response, row.active_mission || null);
+  const notices = Array.isArray(row.notices) ? row.notices : [];
+  const noticeText = notices.map((notice) => `- ${notice.notice_text}`).join('\n');
+  return prependUnreadNoticesToResponse(response, noticeText);
 }
 
 
@@ -3588,13 +3709,7 @@ async function respondKakao(res, response, event = null, team = null, kakaoUserI
   // 여기서 팀 알림·다음 미션·힌트 확인 쿼리를 다시 실행하면 카카오 응답 제한시간을
   // 넘길 수 있으므로 완료 응답은 바로 정규화해서 반환합니다.
   if (event && team && kakaoUserId && response?.__skipCommonPostProcessing !== true) {
-    const noticePromise = getAndMarkUnreadNotices(event.id, team.id, kakaoUserId);
-    response = await addReadyCompleteMissionToResponse(event.id, team, response);
-    const [noticeText] = await Promise.all([
-      noticePromise,
-      syncActiveMissionHintQuickReply(event.id, team, response),
-    ]);
-    response = prependUnreadNoticesToResponse(response, noticeText);
+    response = await applyKakaoCommonPostProcessing(event.id, team, kakaoUserId, response);
   }
   response = normalizeKakaoResponse(response);
   response = applyParticipationFeatureVisibility(
@@ -3658,46 +3773,6 @@ async function addScoreEvent({ eventId, teamId, missionId = null, kakaoUserId = 
     [eventId, teamId, missionId, kakaoUserId, actorName || '', eventType, eventKey || '', Number(scoreDelta || 0), memo || '']
   );
   return result.rows[0] || null;
-}
-
-async function scoreAdjustmentsTotal(teamId) {
-  const result = await query(
-    `SELECT COALESCE(SUM(se.score_delta), 0)::int AS total
-     FROM score_events se
-     WHERE se.team_id=$1
-       AND (
-         se.event_type NOT IN ('hint', 'wrong')
-         OR EXISTS (
-           SELECT 1
-           FROM submissions s
-           WHERE s.team_id=se.team_id AND s.mission_id=se.mission_id
-             AND s.status IN ('correct', 'approved')
-         )
-       );`,
-    [teamId]
-  );
-  return Number(result.rows[0]?.total || 0);
-}
-
-async function scoreAdjustmentDetails(teamId) {
-  const result = await query(
-    `SELECT se.*, m.mission_code, m.mission_name
-     FROM score_events se
-     LEFT JOIN missions m ON m.id=se.mission_id
-     WHERE se.team_id=$1
-       AND (
-         se.event_type NOT IN ('hint', 'wrong')
-         OR EXISTS (
-           SELECT 1
-           FROM submissions s
-           WHERE s.team_id=se.team_id AND s.mission_id=se.mission_id
-             AND s.status IN ('correct', 'approved')
-         )
-       )
-     ORDER BY se.created_at ASC, se.id ASC;`,
-    [teamId]
-  );
-  return result.rows;
 }
 
 async function missionAdjustmentTotal(teamId, missionId, eventTypes = []) {
@@ -4319,27 +4394,64 @@ async function handleMissionList(req, event, team, messages = DEFAULT_MESSAGE_SE
 }
 
 async function handleScore(team, messages = DEFAULT_MESSAGE_SETTINGS) {
-  const [total, result, adjustments] = await Promise.all([
-    teamTotalScore(team.id),
-    query(
-      `SELECT DISTINCT ON (m.id)
-         m.sort_order, m.mission_code, m.mission_name,
-         (s.score + COALESCE((
-           SELECT SUM(se.score_delta)
-           FROM score_events se
-           WHERE se.team_id=s.team_id AND se.mission_id=s.mission_id
-         ), 0))::int AS score,
-         s.actor_name
+  const snapshotResult = await query(
+    `/* team-score-single-roundtrip */
+     WITH mission_scores AS MATERIALIZED (
+       SELECT mission_id, MAX(score)::int AS score
+       FROM submissions
+       WHERE team_id=$1 AND status IN ('correct','approved')
+       GROUP BY mission_id
+     ), best_details AS MATERIALIZED (
+       SELECT DISTINCT ON (s.mission_id)
+         s.mission_id, s.score, s.actor_name, s.submitted_at
        FROM submissions s
-       JOIN missions m ON m.id=s.mission_id
-       WHERE s.team_id=$1 AND s.status IN ('correct', 'approved') AND s.score > 0
-       ORDER BY m.id, s.score DESC, s.submitted_at ASC;`,
-      [team.id]
-    ),
-    scoreAdjustmentDetails(team.id),
-  ]);
-  const missionDetail = result.rows.length
-    ? result.rows
+       WHERE s.team_id=$1 AND s.status IN ('correct','approved') AND s.score > 0
+       ORDER BY s.mission_id, s.score DESC, s.submitted_at ASC
+     ), mission_details AS MATERIALIZED (
+       SELECT m.sort_order, m.mission_code, m.mission_name,
+              (best.score + COALESCE((
+                SELECT SUM(se.score_delta)
+                FROM score_events se
+                WHERE se.team_id=$1 AND se.mission_id=best.mission_id
+              ), 0))::int AS score,
+              best.actor_name
+       FROM best_details best
+       JOIN missions m ON m.id=best.mission_id
+     ), eligible_adjustments AS MATERIALIZED (
+       SELECT se.*, m.mission_code, m.mission_name
+       FROM score_events se
+       LEFT JOIN missions m ON m.id=se.mission_id
+       WHERE se.team_id=$1
+         AND (
+           se.event_type NOT IN ('hint','wrong')
+           OR EXISTS (
+             SELECT 1 FROM submissions completed
+             WHERE completed.team_id=se.team_id AND completed.mission_id=se.mission_id
+               AND completed.status IN ('correct','approved')
+           )
+         )
+     )
+     SELECT
+       (
+         COALESCE((SELECT SUM(score) FROM mission_scores), 0)
+         + COALESCE((SELECT SUM(score_delta) FROM eligible_adjustments), 0)
+       )::int AS total,
+       COALESCE((
+         SELECT jsonb_agg(to_jsonb(mission_details) ORDER BY sort_order ASC, mission_code ASC)
+         FROM mission_details
+       ), '[]'::jsonb) AS mission_details,
+       COALESCE((
+         SELECT jsonb_agg(to_jsonb(eligible_adjustments) ORDER BY created_at ASC, id ASC)
+         FROM eligible_adjustments
+       ), '[]'::jsonb) AS adjustments;`,
+    [team.id]
+  );
+  const snapshot = snapshotResult.rows[0] || {};
+  const total = Number(snapshot.total || 0);
+  const missionRows = Array.isArray(snapshot.mission_details) ? snapshot.mission_details : [];
+  const adjustments = Array.isArray(snapshot.adjustments) ? snapshot.adjustments : [];
+  const missionDetail = missionRows.length
+    ? missionRows
         .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0))
         .map((r) => `${r.mission_code} ${r.mission_name}: +${r.score}점 / 수행자: ${r.actor_name || '팀원'}`)
         .join('\n')
@@ -4955,6 +5067,7 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
 
   // 완료 여부 확인, 현재 미션 변경, 순서형/십자말풀이 상태 저장을 한 번의
   // DB 명령으로 처리합니다. 미션 정의와 이미지 메타데이터는 행사 캐시를 사용합니다.
+  await flushSequenceProgressState(event.id, kakaoUserId, { clear: true });
   const startResult = await beginMissionAttempt(
     event.id,
     team.id,
@@ -4964,7 +5077,7 @@ async function handleMissionStart(req, event, team, missionCode, kakaoUserId = '
     nextStateData
   );
   invalidateCrosswordRuntimeTeam(team.id);
-  if (!startResult.completion && mission.mission_type === 'crossword') {
+  if (!startResult.completion && (mission.mission_type === 'crossword' || (mission.mission_type === 'quiz' && quizType === 'sequence'))) {
     rememberCrosswordRuntimeContext(event.id, kakaoUserId, {
       team: { ...team, current_mission_id: mission.id },
       userState: {
@@ -5084,20 +5197,25 @@ async function handleGpsFallbackPhotoRequest(req, event, team, kakaoUserId, mess
     : null;
 
   if (!mission && freshTeam.current_mission_id) {
-    mission = (await query(
-      `SELECT * FROM missions WHERE id=$1 AND event_id=$2 LIMIT 1;`,
-      [freshTeam.current_mission_id, event.id]
-    )).rows[0];
+    const prefetchedMission = req?.kakaoUserContext?.currentMission || null;
+    mission = Number(prefetchedMission?.id) === Number(freshTeam.current_mission_id)
+      ? prefetchedMission
+      : (await getMissions(event.id)).find((item) => Number(item.id) === Number(freshTeam.current_mission_id));
   }
 
   if (!mission || mission.mission_type !== 'gps') {
     return skipKakaoCommonPostProcessing(kakaoText('현재 진행 중인 GPS 미션을 찾을 수 없습니다. 미션 QR을 다시 스캔해주세요.', menuQuickReplies));
   }
 
-  const [completion, actor] = await Promise.all([
-    getMissionCompletion(freshTeam.id, mission.id),
-    resolveActorForTeam(event.id, freshTeam.id, kakaoUserId, freshTeam.leader_name || '팀원'),
-  ]);
+  const prefetchedCompletion = req?.kakaoUserContext?.currentMissionCompletion || null;
+  const completion = Number(mission.id) === Number(freshTeam.current_mission_id)
+    ? prefetchedCompletion
+    : await getMissionCompletion(freshTeam.id, mission.id);
+  const member = req?.kakaoUserContext?.member || null;
+  const actor = {
+    actor_kakao_user_id: String(member?.kakao_user_id || kakaoUserId || '').trim(),
+    actor_name: String(member?.member_name || freshTeam.leader_name || '팀원').trim(),
+  };
 
   if (completion) {
     const response = await kakaoAlreadyCompletedMissionMessage(req, event, freshTeam, mission, {
@@ -5168,10 +5286,8 @@ async function handleGpsVerificationResult(req, event, team, messages = DEFAULT_
     const targetMission = requestedMissionCode
       ? await getMissionByCode(event.id, requestedMissionCode)
       : team.current_mission_id
-        ? (await query(
-            `SELECT * FROM missions WHERE event_id=$1 AND id=$2 LIMIT 1;`,
-            [event.id, team.current_mission_id]
-          )).rows[0]
+        ? (req?.kakaoUserContext?.currentMission
+          || (await getMissions(event.id)).find((item) => Number(item.id) === Number(team.current_mission_id)))
         : null;
     const notFoundText = cleanRenderedMessage(renderTemplate(
       messages.gps_result_not_found_message,
@@ -5193,18 +5309,13 @@ async function handleGpsVerificationResult(req, event, team, messages = DEFAULT_
       : skipKakaoCommonPostProcessing(response);
   }
 
-  const [total, missionPenalty, wrongCountResult, answerImages] = await Promise.all([
-    teamTotalScore(team.id),
-    missionAdjustmentTotal(team.id, mission.id, ['hint', 'wrong']),
-    query(
-      `SELECT COUNT(*)::int AS count
-       FROM submissions
-       WHERE team_id=$1 AND mission_id=$2 AND status='wrong';`,
-      [team.id, mission.id]
-    ),
+  const [summary, answerImages] = await Promise.all([
+    missionCompletionScoreSummary(team.id, mission.id),
     getMissionImages(mission.id, 'answer'),
   ]);
   const actorName = String(mission.actor_name || team.leader_name || '팀원').trim();
+  const total = summary.total;
+  const missionPenalty = summary.missionAdjustment;
   const earnedScore = Number(mission.submitted_score || 0) + missionPenalty;
   const successText = cleanRenderedMessage(renderTemplate(messages.gps_result_success_message, {
     ...eventTemplateVars(event, team, actorName),
@@ -5213,7 +5324,7 @@ async function handleGpsVerificationResult(req, event, team, messages = DEFAULT_
     actor_name: actorName,
     member_name: actorName,
     base_score: Number(mission.submitted_score || 0),
-    wrong_count: Number(wrongCountResult.rows[0]?.count || 0),
+    wrong_count: summary.wrongCount,
     penalty_total: missionPenalty,
     earned_score: earnedScore,
     distance_m: Math.round(Number(mission.distance_m || 0)),
@@ -5249,14 +5360,15 @@ async function resolveAdminNextMissionId(eventId, currentMissionId, nextMissionI
 async function getLinkedNextMission(eventId, mission) {
   const nextMissionId = Number(mission?.next_mission_id || 0);
   if (!nextMissionId) return null;
-  const result = await query(
-    `SELECT id, mission_code, mission_name, mission_type
-     FROM missions
-     WHERE event_id=$1 AND id=$2
-     LIMIT 1;`,
-    [eventId, nextMissionId]
-  );
-  return result.rows[0] || null;
+  const missions = await getMissions(eventId);
+  const nextMission = missions.find((item) => Number(item.id) === nextMissionId);
+  if (!nextMission) return null;
+  return {
+    id: nextMission.id,
+    mission_code: nextMission.mission_code,
+    mission_name: nextMission.mission_name,
+    mission_type: nextMission.mission_type,
+  };
 }
 
 function linkedNextMissionButton(mission, nextMission) {
@@ -5554,11 +5666,18 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
   // getTeamByKakaoUser에서 방금 읽은 팀 정보이므로 같은 요청 안에서 다시 조회하지 않습니다.
   const teamReload = team;
   if (!teamReload?.current_mission_id) return kakaoText('먼저 사진 미션을 시작해주세요.', menuQuickReplies);
-  const mission = (await query(`SELECT * FROM missions WHERE id=$1 AND event_id=$2;`, [teamReload.current_mission_id, event.id])).rows[0];
+  const prefetchedMission = req?.kakaoUserContext?.currentMission || null;
+  const mission = Number(prefetchedMission?.id) === Number(teamReload.current_mission_id)
+    ? prefetchedMission
+    : (await getMissions(event.id)).find((item) => Number(item.id) === Number(teamReload.current_mission_id));
   if (!mission || !['photo', 'gps'].includes(mission.mission_type)) return kakaoText('현재 진행 중인 미션은 사진 인증 미션이 아닙니다.', menuQuickReplies);
 
-  const [actor, existingResult, alreadyCompleted, image, photoAutoApproval] = await Promise.all([
-    resolveActorForTeam(event.id, team.id, kakaoUserId, team.leader_name || '팀원'),
+  const member = req?.kakaoUserContext?.member || null;
+  const actor = {
+    actor_kakao_user_id: String(member?.kakao_user_id || kakaoUserId || '').trim(),
+    actor_name: String(member?.member_name || team.leader_name || '팀원').trim(),
+  };
+  const [existingResult, photoAutoApproval] = await Promise.all([
     query(
       `SELECT * FROM submissions
        WHERE event_id=$1 AND team_id=$2 AND mission_id=$3
@@ -5572,11 +5691,10 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
        LIMIT 1;`,
       [event.id, team.id, mission.id]
     ),
-    isMissionAlreadyCompleted(team.id, mission.id),
-    downloadKakaoSecureImage(imageUrls[0]),
     getPhotoAutoApprovalSettings(event.id),
   ]);
   const existing = existingResult.rows[0];
+  const alreadyCompleted = Boolean(req?.kakaoUserContext?.currentMissionCompletion);
   if (!existing && alreadyCompleted) {
     return kakaoAlreadyCompletedMissionMessage(req, event, team, mission, {
       currentActorName: actor.actor_name,
@@ -5594,6 +5712,7 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
     }));
     setImmediate(async () => {
       try {
+        const image = await downloadKakaoSecureImage(imageUrls[0]);
         await replacePhotoSubmissionAssets({
           submission: existing,
           eventId: event.id,
@@ -5607,6 +5726,12 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
         });
       } catch (error) {
         console.error('[kakao-secure-image] replacement save failed:', error);
+        await addTeamNotice(
+          event.id,
+          team.id,
+          `${mission.mission_code} ${mission.mission_name} 사진 재제출 저장에 실패했습니다. 사진을 다시 제출해주세요.`,
+          ''
+        ).catch(() => {});
       }
     });
     return kakaoText(replacedText, existing.status === 'pending' ? pendingPhotoQuickReplies(req) : approvedPhotoQuickReplies(req));
@@ -5616,19 +5741,22 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
   const status = autoApprove ? 'approved' : 'pending';
   const score = autoApprove ? Number(mission.score || 0) : 0;
   const submissionKey = `secureimage:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
-  const persistSubmission = () => insertPhotoSubmissionWithAssets({
-    eventId: event.id,
-    teamId: team.id,
-    missionId: mission.id,
-    answerText: mission.mission_type === 'gps' ? '카카오 GPS 대체 사진 인증' : '카카오 이미지 보안전송',
-    image,
-    actorKakaoUserId: actor.actor_kakao_user_id,
-    actorName: actor.actor_name,
-    submissionKey,
-    status,
-    score,
-    reviewNote: autoApprove ? '카카오 이미지 보안전송 자동 승인' : '',
-  });
+  const persistSubmission = async () => {
+    const image = await downloadKakaoSecureImage(imageUrls[0]);
+    return insertPhotoSubmissionWithAssets({
+      eventId: event.id,
+      teamId: team.id,
+      missionId: mission.id,
+      answerText: mission.mission_type === 'gps' ? '카카오 GPS 대체 사진 인증' : '카카오 이미지 보안전송',
+      image,
+      actorKakaoUserId: actor.actor_kakao_user_id,
+      actorName: actor.actor_name,
+      submissionKey,
+      status,
+      score,
+      reviewNote: autoApprove ? '카카오 이미지 보안전송 자동 승인' : '',
+    });
+  };
 
   if (!autoApprove) {
     const pendingText = cleanRenderedMessage(renderTemplate(messages.photo_upload_pending_message, {
@@ -5646,17 +5774,24 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
         );
       } catch (error) {
         console.error('[kakao-secure-image] pending save failed:', error);
+        await addTeamNotice(
+          event.id,
+          team.id,
+          `${mission.mission_code} ${mission.mission_name} 사진 저장에 실패했습니다. 사진을 다시 제출해주세요.`,
+          ''
+        ).catch(() => {});
       }
     });
     return kakaoText(pendingText, pendingPhotoQuickReplies(req));
   }
 
-  const [currentTotal, missionAdjustment, answerImages, progression] = await Promise.all([
-    teamTotalScore(team.id),
-    missionAdjustmentTotal(team.id, mission.id, ['hint', 'wrong']),
+  const [summary, answerImages, progression] = await Promise.all([
+    missionCompletionScoreSummary(team.id, mission.id),
     getMissionImages(mission.id, 'answer'),
     mission.next_mission_id ? getLinkedNextMission(event.id, mission) : Promise.resolve(null),
   ]);
+  const currentTotal = summary.total;
+  const missionAdjustment = summary.missionAdjustment;
   const earnedScore = score + missionAdjustment;
   const total = currentTotal + earnedScore;
   const approvedText = cleanRenderedMessage(renderTemplate(messages.photo_upload_approved_message, {
@@ -5691,6 +5826,12 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
       ]);
     } catch (error) {
       console.error('[kakao-secure-image] approved save failed:', error);
+      await addTeamNotice(
+        event.id,
+        team.id,
+        `${mission.mission_code} ${mission.mission_name} 사진 저장에 실패했습니다. 사진을 다시 제출해주세요.`,
+        ''
+      ).catch(() => {});
     }
   });
 
@@ -6368,7 +6509,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
         : [];
 
       if (/^(처음부터 다시|다시|초기화|리셋)$/i.test(String(utterance || '').trim())) {
-        await setUserState(event.id, kakaoUserId, 'WAIT_SEQUENCE_ANSWER', { missionId: mission.id, selected: [] });
+        queueSequenceProgressState(event.id, kakaoUserId, { missionId: mission.id, selected: [] });
         return activeMissionResponse(kakaoText(sequenceProgressText(mission, []), sequenceQuickReplies(mission, [])));
       }
 
@@ -6386,7 +6527,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
       sequenceFinished = selected.length >= expected.length;
 
       if (!sequenceFinished) {
-        await setUserState(event.id, kakaoUserId, 'WAIT_SEQUENCE_ANSWER', { missionId: mission.id, selected });
+        queueSequenceProgressState(event.id, kakaoUserId, { missionId: mission.id, selected });
         return activeMissionResponse(kakaoText(sequenceProgressText(mission, selected), sequenceQuickReplies(mission, selected)));
       }
 
@@ -6404,6 +6545,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
     const penaltyKey = `wrong:${mission.id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
 
     if (isCorrect) {
+      if (quizType === 'sequence') await flushSequenceProgressState(event.id, kakaoUserId);
       const completionResult = await completeInteractiveMission(
         event,
         team,
@@ -6415,6 +6557,10 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
         { missionId: mission.id },
         `quiz:${quizType}:complete`
       );
+      if (quizType === 'sequence') {
+        await flushSequenceProgressState(event.id, kakaoUserId, { clear: true });
+        invalidateCrosswordRuntimeTeam(team.id);
+      }
       return buildQuizMissionSuccessResponse(
         req,
         event,
@@ -6435,11 +6581,34 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
       );
     }
 
+    if (quizType === 'sequence') await flushSequenceProgressState(event.id, kakaoUserId);
     const answerSave = await query(
       `WITH prior_wrong AS MATERIALIZED (
          SELECT COUNT(*)::int AS count
          FROM submissions
          WHERE team_id=$2 AND mission_id=$3 AND status='wrong'
+       ), prior_mission_penalty AS MATERIALIZED (
+         SELECT COALESCE(SUM(score_delta), 0)::int AS total
+         FROM score_events
+         WHERE team_id=$2 AND mission_id=$3 AND event_type IN ('hint', 'wrong')
+       ), mission_scores AS MATERIALIZED (
+         SELECT mission_id, MAX(score)::int AS score
+         FROM submissions
+         WHERE team_id=$2 AND status IN ('correct', 'approved')
+         GROUP BY mission_id
+       ), team_total AS MATERIALIZED (
+         SELECT (
+           COALESCE((SELECT SUM(score) FROM mission_scores), 0)
+           + COALESCE((
+             SELECT SUM(se.score_delta)
+             FROM score_events se
+             WHERE se.team_id=$2
+               AND (
+                 se.event_type NOT IN ('hint', 'wrong')
+                 OR EXISTS (SELECT 1 FROM mission_scores completed WHERE completed.mission_id=se.mission_id)
+               )
+           ), 0)
+         )::int AS total
        ), saved_answer AS (
          INSERT INTO submissions(event_id, team_id, mission_id, answer_text, actor_kakao_user_id, actor_name, status, score)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
@@ -6451,7 +6620,7 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
          FROM saved_answer
          WHERE $7='wrong' AND $10::integer <> 0
          ON CONFLICT(event_id, team_id, mission_id, event_type, event_key) WHERE event_key <> '' DO NOTHING
-         RETURNING id
+         RETURNING id, score_delta
        ), saved_sequence_state AS (
          INSERT INTO user_states(event_id, kakao_user_id, state, data, updated_at)
          SELECT $1, $5,
@@ -6466,20 +6635,24 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
          DO UPDATE SET state=EXCLUDED.state, data=EXCLUDED.data, updated_at=NOW()
          RETURNING id
        )
-       SELECT (SELECT count FROM prior_wrong)::int AS wrong_count,
+       SELECT ((SELECT count FROM prior_wrong) + 1)::int AS wrong_count,
+              (SELECT total FROM team_total)::int AS team_total,
+              (
+                $12::integer
+                + (SELECT total FROM prior_mission_penalty)
+                + COALESCE((SELECT SUM(score_delta) FROM saved_penalty), 0)
+              )::int AS available_score,
               EXISTS(SELECT 1 FROM saved_penalty) AS penalty_saved,
               EXISTS(SELECT 1 FROM saved_sequence_state) AS sequence_state_saved;`,
       [
         event.id, team.id, mission.id, normalizedUtterance, kakaoUserId, actorName,
-        submissionStatus, earnedScore, penaltyKey, wrongPenalty, quizType,
+        submissionStatus, earnedScore, penaltyKey, wrongPenalty, quizType, Number(mission.score || 0),
       ]
     );
-    const wrongCount = Number(answerSave.rows[0]?.wrong_count || 0);
-
-    const [totalAfterWrong, availableScore] = await Promise.all([
-      teamTotalScore(team.id),
-      missionAvailableScore(team.id, mission),
-    ]);
+    if (quizType === 'sequence') await flushSequenceProgressState(event.id, kakaoUserId, { clear: true });
+    const wrongCount = Number(answerSave.rows[0]?.wrong_count || 1);
+    const totalAfterWrong = Number(answerSave.rows[0]?.team_total || 0);
+    const availableScore = Number(answerSave.rows[0]?.available_score ?? mission.score ?? 0);
     const wrongTemplate = String(mission.wrong_message || '').trim();
     const hasHint = Boolean(String(mission.hint || '').trim());
     const hintPrompt = hasHint ? `\n힌트가 필요하면 "힌트"라고 입력해주세요.` : '';
@@ -6487,20 +6660,20 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
       ? `아쉽습니다. 순서가 맞지 않습니다.
 
 입력한 순서: ${selectedSequence.join(' → ')}
-현재 오답 횟수: ${wrongCount + 1}회
+현재 오답 횟수: ${wrongCount}회
 오답 감점: ${wrongPenalty}점 (미션 완료 시 반영)
 획득가능 점수: ${availableScore}점
 
 다시 처음부터 순서대로 선택해주세요.`
       : `아쉽습니다. 정답이 아닙니다.
 
-현재 오답 횟수: ${wrongCount + 1}회
+현재 오답 횟수: ${wrongCount}회
 오답 감점: ${wrongPenalty}점 (미션 완료 시 반영)
 획득가능 점수: ${availableScore}점
 ${hintPrompt}
 다시 정답을 입력해주세요.`;
     const wrongText = wrongTemplate
-      ? renderTemplate(wrongTemplate, { mission_code: mission.mission_code, mission_name: mission.mission_name, wrong_count: wrongCount + 1, wrong_penalty: wrongPenalty, total_score: totalAfterWrong, available_score: availableScore, mission_available_score: availableScore, hint: mission.hint || '', answer: normalizedUtterance, team_name: team.team_name, actor_name: actorName })
+      ? renderTemplate(wrongTemplate, { mission_code: mission.mission_code, mission_name: mission.mission_name, wrong_count: wrongCount, wrong_penalty: wrongPenalty, total_score: totalAfterWrong, available_score: availableScore, mission_available_score: availableScore, hint: mission.hint || '', answer: normalizedUtterance, team_name: team.team_name, actor_name: actorName })
       : defaultWrongText;
     return activeMissionResponse(kakaoText(wrongText, quizType === 'sequence' ? sequenceQuickReplies(mission, []) : ['다시 입력하기', ...choiceQuickReplies(mission, menuQuickReplies)]));
   }
@@ -6764,8 +6937,8 @@ async function handleKakaoSkill(req, res) {
         && !participationFeatures.nickname_setup_enabled
         && isStartCommand(utterance);
 
-      // 복구 상태는 다음 메시지에서 반드시 해제해 일반 명령 처리를 방해하지 않게 합니다.
-      await clearUserState(event.id, kakaoUserId);
+      // TEAM_CREATED_RECENT 상태는 사용자 컨텍스트를 읽는 단일 DB 명령 안에서
+      // 이미 소비·삭제되어 별도 DELETE를 기다릴 필요가 없습니다.
       if (isRecent && (isSameNickname || isSameTeamName || isRepeatedAutomaticStart)) {
         const response = data.automatic === true || !participationFeatures.team_setup_enabled
           ? automaticParticipationResponse(req, event, team, savedMemberName, messages, {
