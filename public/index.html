@@ -80,7 +80,7 @@
     .crossword-entry-list table { min-width:620px; background:#fff; }
     .mission-map-canvas { position:relative; width:100%; max-width:900px; margin:12px auto 0; border:1px solid var(--line); border-radius:14px; overflow:hidden; background:#eef2f7; cursor:crosshair; line-height:0; }
     .mission-map-canvas img { width:100%; height:auto; display:block; user-select:none; pointer-events:none; }
-    .mission-map-marker { position:absolute; transform:translate(-50%,-50%); min-width:38px; height:38px; padding:0 8px; border:3px solid #fff; border-radius:999px; background:#f59e0b; color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; line-height:1; font-weight:900; box-shadow:0 3px 10px rgba(0,0,0,.32); pointer-events:none; }
+    .mission-map-marker { position:absolute; transform:translate(-50%,-50%); min-width:54px; max-width:150px; min-height:38px; padding:6px 10px; border:3px solid #fff; border-radius:999px; background:#f59e0b; color:#fff; display:flex; align-items:center; justify-content:center; text-align:center; white-space:normal; word-break:keep-all; font-size:12px; line-height:1.15; font-weight:900; box-shadow:0 3px 10px rgba(0,0,0,.32); pointer-events:none; }
     .mission-map-marker.selected { background:#2f6df6; outline:4px solid rgba(47,109,246,.25); }
     .mission-map-empty { min-height:280px; padding:28px; display:flex; align-items:center; justify-content:center; color:var(--muted); text-align:center; line-height:1.7; cursor:default; }
     @media(max-width:700px){ .crossword-fields,.crossword-entry-fields { grid-template-columns:1fr 1fr; } .crossword-board { --cw-cell:38px; } .crossword-cell { font-size:18px; } }
@@ -1346,7 +1346,8 @@ function renderMissionMapEditor() {
       ? pendingMissionMapPosition
       : (m.map_x != null && m.map_y != null ? { x:Number(m.map_x), y:Number(m.map_y) } : null);
     if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y)) return '';
-    return `<span class="mission-map-marker${isSelected ? ' selected' : ''}" style="left:${pos.x}%;top:${pos.y}%;" title="${esc(m.mission_name)}">${esc(m.mission_code)}</span>`;
+    const markerLabel = String(m.location_name || '').trim() || m.mission_code;
+    return `<span class="mission-map-marker${isSelected ? ' selected' : ''}" style="left:${pos.x}%;top:${pos.y}%;" title="${esc(`${m.mission_code} ${m.mission_name}`)}">${esc(markerLabel)}</span>`;
   }).join('');
   canvas.innerHTML = `<img src="${esc(imageUrl)}" alt="행사장 미션 지도" draggable="false" />${markers}`;
 }

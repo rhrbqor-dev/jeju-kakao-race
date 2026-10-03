@@ -1077,7 +1077,7 @@ const crosswordRuntimeTeamKeys = new Map();
 const missionMapStaticAssetsCache = new Map();
 const missionMapRenderCache = new Map();
 const missionMapCacheEpoch = new Map();
-const MISSION_MAP_RENDER_VERSION = 2;
+const MISSION_MAP_RENDER_VERSION = 3;
 const CROSSWORD_PROGRESS_HOT_TTL_MS = 10 * 60 * 1000;
 const SEQUENCE_PROGRESS_HOT_TTL_MS = 10 * 60 * 1000;
 const CROSSWORD_RUNTIME_CONTEXT_TTL_MS = 5 * 60 * 1000;
@@ -4682,7 +4682,7 @@ function missionMapViewButtons(req, event, team, options = {}) {
 }
 
 function missionMapMarkerTextPath(text, x, y, fontSize, fill = '#ffffff') {
-  const safeText = String(text || '').slice(0, 12);
+  const safeText = Array.from(String(text || '')).slice(0, 12).join('');
   if (!safeText) return '';
   return crosswordTextToSvg.getPath(safeText, {
     x,
@@ -4693,26 +4693,71 @@ function missionMapMarkerTextPath(text, x, y, fontSize, fill = '#ffffff') {
   });
 }
 
+function missionMapMarkerLabel(mission) {
+  return String(mission?.location_name || '').replace(/\s+/g, ' ').trim()
+    || String(mission?.mission_code || '').trim();
+}
+
+function missionMapMarkerLabelLines(value, maxChars = 10) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  const chars = Array.from(text);
+  if (chars.length <= maxChars) return text ? [text] : [];
+
+  const firstWindow = chars.slice(0, maxChars + 1).join('');
+  const breakAt = firstWindow.lastIndexOf(' ');
+  const firstLength = breakAt >= Math.ceil(maxChars * 0.55)
+    ? Array.from(firstWindow.slice(0, breakAt)).length
+    : maxChars;
+  const first = chars.slice(0, firstLength).join('').trim();
+  const remaining = chars.slice(firstLength).join('').trim();
+  const remainingChars = Array.from(remaining);
+  const second = remainingChars.length > maxChars
+    ? `${remainingChars.slice(0, Math.max(1, maxChars - 1)).join('').trim()}…`
+    : remaining;
+  return [first, second].filter(Boolean);
+}
+
 async function renderMissionMapMarker(mission, size) {
-  const missionCode = String(mission?.mission_code || '').trim();
+  const markerLabel = missionMapMarkerLabel(mission);
+  const labelLines = missionMapMarkerLabelLines(markerLabel);
   const completed = mission?.completed === true;
-  const labelFontSize = Math.max(16, Math.round(size * (missionCode.length > 5 ? 0.16 : 0.21)));
-  const labelHeight = Math.max(27, Math.round(size * 0.25));
+  const longestLineLength = Math.max(1, ...labelLines.map((line) => Array.from(line).length));
+  const labelFontSize = Math.max(15, Math.round(size * (longestLineLength > 7 ? 0.13 : 0.16)));
+  const labelLineHeight = Math.round(labelFontSize * 1.12);
+  const labelPaddingY = Math.max(6, Math.round(size * 0.045));
+  const labelHeight = Math.max(30, labelLineHeight * Math.max(1, labelLines.length) + labelPaddingY * 2);
+  const labelWidth = Math.min(
+    Math.round(size * 2.15),
+    Math.max(Math.round(size * 0.92), Math.round(longestLineLength * labelFontSize * 0.94 + size * 0.22))
+  );
   const labelGap = Math.max(4, Math.round(size * 0.04));
   const borderWidth = Math.max(4, Math.round(size * 0.045));
   const checkSize = Math.max(24, Math.round(size * 0.3));
+  const canvasWidth = Math.max(size, labelWidth);
+  const canvasHeight = size + labelGap + labelHeight;
+  const circleX = canvasWidth / 2;
+  const stampLeft = Math.round((canvasWidth - size) / 2);
+  const labelTop = size + labelGap;
+  const labelStartY = labelTop + labelPaddingY + labelLineHeight / 2 - 1;
+  const labelPaths = labelLines.map((line, index) => (
+    missionMapMarkerTextPath(line, circleX, labelStartY + index * labelLineHeight, labelFontSize)
+  )).join('');
+  const labelRectX = (canvasWidth - labelWidth) / 2;
 
   if (!completed) {
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
-      <circle cx="${size / 2}" cy="${size / 2}" r="${size * 0.45}" fill="#ffffff" fill-opacity="0.93" stroke="#f59e0b" stroke-width="${borderWidth}"/>
-      <circle cx="${size / 2}" cy="${size / 2}" r="${size * 0.34}" fill="#f59e0b"/>
-      ${missionMapMarkerTextPath(missionCode, size / 2, size / 2, Math.max(18, Math.round(size * 0.25)))}
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${canvasWidth}" height="${canvasHeight}" viewBox="0 0 ${canvasWidth} ${canvasHeight}">
+      <circle cx="${circleX}" cy="${size / 2}" r="${size * 0.45}" fill="#ffffff" fill-opacity="0.93" stroke="#f59e0b" stroke-width="${borderWidth}"/>
+      <circle cx="${circleX}" cy="${size / 2}" r="${size * 0.34}" fill="#f59e0b"/>
+      <path d="M ${circleX} ${size * 0.73} C ${circleX - size * 0.04} ${size * 0.66}, ${circleX - size * 0.20} ${size * 0.51}, ${circleX - size * 0.20} ${size * 0.39} C ${circleX - size * 0.20} ${size * 0.25}, ${circleX - size * 0.11} ${size * 0.17}, ${circleX} ${size * 0.17} C ${circleX + size * 0.11} ${size * 0.17}, ${circleX + size * 0.20} ${size * 0.25}, ${circleX + size * 0.20} ${size * 0.39} C ${circleX + size * 0.20} ${size * 0.51}, ${circleX + size * 0.04} ${size * 0.66}, ${circleX} ${size * 0.73} Z" fill="#ffffff"/>
+      <circle cx="${circleX}" cy="${size * 0.38}" r="${size * 0.075}" fill="#f59e0b"/>
+      <rect x="${labelRectX}" y="${labelTop}" width="${labelWidth}" height="${labelHeight}" rx="${Math.min(labelHeight / 2, size * 0.18)}" fill="#d97706"/>
+      ${labelPaths}
     </svg>`;
     return {
       input: await sharp(Buffer.from(svg)).png().toBuffer(),
-      width: size,
-      height: size,
-      anchorX: size / 2,
+      width: canvasWidth,
+      height: canvasHeight,
+      anchorX: circleX,
       anchorY: size / 2,
     };
   }
@@ -4739,34 +4784,31 @@ async function renderMissionMapMarker(mission, size) {
     stamp = await sharp(Buffer.from(fallback)).png().toBuffer();
   }
 
-  // 완료 미션의 코드는 정답 이미지 위를 가리지 않도록 원 아래의 별도 라벨에 표시합니다.
-  const canvasHeight = size + labelGap + labelHeight;
-  const labelTop = size + labelGap;
-  const labelY = labelTop + labelHeight / 2 - 2;
-  const codePath = missionMapMarkerTextPath(missionCode, size / 2, labelY, labelFontSize);
-  const frame = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${canvasHeight}" viewBox="0 0 ${size} ${canvasHeight}">
-    <circle cx="${size / 2}" cy="${size / 2}" r="${size * 0.46}" fill="none" stroke="#0f9960" stroke-width="${borderWidth}"/>
-    <rect x="${size * 0.12}" y="${labelTop}" width="${size * 0.76}" height="${labelHeight}" rx="${labelHeight / 2}" fill="#0f9960"/>
-    ${codePath}
-    <circle cx="${size - checkSize * 0.48}" cy="${checkSize * 0.48}" r="${checkSize * 0.45}" fill="#0f9960" stroke="#fff" stroke-width="${Math.max(2, borderWidth / 2)}"/>
-    <path d="M ${size - checkSize * 0.68} ${checkSize * 0.47} L ${size - checkSize * 0.54} ${checkSize * 0.61} L ${size - checkSize * 0.28} ${checkSize * 0.31}" fill="none" stroke="#fff" stroke-width="${Math.max(3, checkSize * 0.11)}" stroke-linecap="round" stroke-linejoin="round"/>
+  // 완료 미션은 정답 이미지를 가리지 않고, 관리자에서 입력한 장소명을 원 아래에 표시합니다.
+  const checkX = circleX + size / 2 - checkSize * 0.48;
+  const frame = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${canvasWidth}" height="${canvasHeight}" viewBox="0 0 ${canvasWidth} ${canvasHeight}">
+    <circle cx="${circleX}" cy="${size / 2}" r="${size * 0.46}" fill="none" stroke="#0f9960" stroke-width="${borderWidth}"/>
+    <rect x="${labelRectX}" y="${labelTop}" width="${labelWidth}" height="${labelHeight}" rx="${Math.min(labelHeight / 2, size * 0.18)}" fill="#0f9960"/>
+    ${labelPaths}
+    <circle cx="${checkX}" cy="${checkSize * 0.48}" r="${checkSize * 0.45}" fill="#0f9960" stroke="#fff" stroke-width="${Math.max(2, borderWidth / 2)}"/>
+    <path d="M ${checkX - checkSize * 0.20} ${checkSize * 0.47} L ${checkX - checkSize * 0.06} ${checkSize * 0.61} L ${checkX + checkSize * 0.20} ${checkSize * 0.31}" fill="none" stroke="#fff" stroke-width="${Math.max(3, checkSize * 0.11)}" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>`);
   const marker = await sharp({
     create: {
-      width: size,
+      width: canvasWidth,
       height: canvasHeight,
       channels: 4,
       background: { r: 0, g: 0, b: 0, alpha: 0 },
     },
   }).composite([
-    { input: stamp, left: 0, top: 0 },
+    { input: stamp, left: stampLeft, top: 0 },
     { input: frame, left: 0, top: 0 },
   ]).png().toBuffer();
   return {
     input: marker,
-    width: size,
+    width: canvasWidth,
     height: canvasHeight,
-    anchorX: size / 2,
+    anchorX: circleX,
     anchorY: size / 2,
   };
 }
@@ -4817,7 +4859,7 @@ async function getMissionMapStaticAssets(eventId) {
     50,
     async () => {
       const result = await query(
-        `SELECT m.id, m.mission_code, m.mission_name, m.map_x, m.map_y,
+        `SELECT m.id, m.mission_code, m.mission_name, m.location_name, m.map_x, m.map_y,
                 answer_image.id AS answer_image_id,
                 answer_image.image_data AS answer_image_data,
                 answer_image.image_mime AS answer_image_mime
