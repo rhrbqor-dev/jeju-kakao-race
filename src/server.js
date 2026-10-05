@@ -4383,14 +4383,32 @@ async function handleMissionList(req, event, team, messages = DEFAULT_MESSAGE_SE
     completedMissionIds: [...completedMap.keys()],
   };
   const mapButtons = missionMapViewButtons(req, event, team, mapOptions);
+  let response;
   if (!mapButtons.length) {
-    return skipKakaoCommonPostProcessing(
-      kakaoConfiguredMessage(req, messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list', text, menuQuickReplies, '')
-    );
+    response = kakaoConfiguredMessage(req, messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list', text, menuQuickReplies, '');
+  } else {
+    const configuredImageUrl = messageImageUrl(req, messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list');
+    const cardTitle = visibleMessageTitle(messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list', '');
+    response = kakaoCard(cardTitle, text, mapButtons, menuQuickReplies, configuredImageUrl);
   }
-  const configuredImageUrl = messageImageUrl(req, messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list');
-  const cardTitle = visibleMessageTitle(messages || DEFAULT_MESSAGE_SETTINGS, 'mission_list', '');
-  return skipKakaoCommonPostProcessing(kakaoCard(cardTitle, text, mapButtons, menuQuickReplies, configuredImageUrl));
+
+  // 사진 저장은 성공했지만 과거 응답에서 완주 안내만 빠진 팀도 미션 목록을
+  // 열면 현재 활성화된 완주 미션을 별도 말풍선으로 다시 확인할 수 있습니다.
+  const activeCompleteMission = team?.status !== 'finished'
+    ? missions.find((mission) => (
+        Number(mission.id) === Number(team?.current_mission_id || 0)
+        && mission.mission_type === 'complete'
+        && !completedMap.has(mission.id)
+      ))
+    : null;
+  if (activeCompleteMission) {
+    appendCompletePromptToResponse(response, completeMissionPromptText(activeCompleteMission));
+    return finalizeMissionStartResponse(response, activeCompleteMission, {
+      currentMissionId: activeCompleteMission.id,
+      teamStatus: team.status,
+    });
+  }
+  return skipKakaoCommonPostProcessing(response);
 }
 
 async function handleScore(team, messages = DEFAULT_MESSAGE_SETTINGS) {
@@ -5827,63 +5845,94 @@ async function handleKakaoSecureImageSubmission(req, event, team, kakaoUserId, m
     return kakaoText(pendingText, pendingPhotoQuickReplies(req));
   }
 
-  const [summary, answerImages, progression] = await Promise.all([
-    missionCompletionScoreSummary(team.id, mission.id),
-    getMissionImages(mission.id, 'answer'),
-    mission.next_mission_id ? getLinkedNextMission(event.id, mission) : Promise.resolve(null),
-  ]);
-  const currentTotal = summary.total;
-  const missionAdjustment = summary.missionAdjustment;
+  // 자동 승인 사진은 파일 다운로드·압축·Storage 업로드만 백그라운드로 보냅니다.
+  // 완료 기록과 완주 미션 활성화는 한 번의 DB 처리로 먼저 끝내야 마지막 필수
+  // 미션의 응답에 완주 안내를 즉시 붙일 수 있습니다.
+  const completionResult = await completeInteractiveMission(
+    event,
+    team,
+    mission,
+    kakaoUserId,
+    actor.actor_name,
+    mission.mission_type === 'gps' ? '카카오 GPS 대체 사진 인증' : '카카오 이미지 보안전송',
+    '',
+    {},
+    submissionKey,
+    'approved'
+  );
+  const missionAdjustment = completionResult.summary.missionAdjustment;
   const earnedScore = score + missionAdjustment;
-  const total = currentTotal + earnedScore;
+  const total = completionResult.summary.total;
   const approvedText = cleanRenderedMessage(renderTemplate(messages.photo_upload_approved_message, {
     ...eventTemplateVars(event, team, actor.actor_name), mission_code: mission.mission_code,
     mission_name: mission.mission_name, actor_name: actor.actor_name, earned_score: earnedScore,
     total, answer_explanation: mission.answer_explanation || '', next_message: '',
     photo_type: mission.mission_type === 'gps' ? 'GPS 대체 사진' : '사진',
   }));
-  let buttons = [];
-  let finalText = approvedText;
-  if (mission.next_mission_id && progression) {
-    buttons = linkedNextMissionButton(mission, progression);
-    const nextMessage = buildNextMissionMessage(mission, progression, nextMissionTemplateVariables({
-      event, team, mission, nextMission: progression, actorName: actor.actor_name, total,
-    }));
-    if (nextMessage) finalText = `${approvedText}\n\n${nextMessage}`;
-  }
-
-  // 대용량 이미지 DB 저장을 기다리지 않고 카카오 응답을 먼저 반환합니다.
+  // 대용량 이미지 다운로드·압축·Storage 저장은 기다리지 않고 카카오 응답을
+  // 먼저 반환합니다. 완료 행은 위 단일 쿼리에서 이미 만들어졌으므로 해당 행에
+  // 사진 자산만 뒤이어 연결합니다.
   setImmediate(async () => {
+    let imageSaved = false;
     try {
-      await persistSubmission();
-      if (!mission.next_mission_id) await activateCompleteMissionIfReady(event.id, team, mission);
-      await Promise.all([
-        maybeMarkFinished(team, event.id),
-        addTeamNotice(
-          event.id,
-          team.id,
-          `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} 미션을 완료했습니다. 현재 팀 점수는 ${total}점입니다.`,
-          kakaoUserId
-        ),
-      ]);
+      if (completionResult.answerSaved && completionResult.submissionId) {
+        const image = await downloadKakaoSecureImage(imageUrls[0]);
+        await replacePhotoSubmissionAssets({
+          submission: { id: completionResult.submissionId },
+          eventId: event.id,
+          teamId: team.id,
+          missionId: mission.id,
+          image,
+          actorKakaoUserId: actor.actor_kakao_user_id,
+          actorName: actor.actor_name,
+          answerText: mission.mission_type === 'gps' ? '카카오 GPS 대체 사진 인증' : '카카오 이미지 보안전송',
+          submissionKey,
+        });
+        imageSaved = true;
+      }
     } catch (error) {
       console.error('[kakao-secure-image] approved save failed:', error);
       await addTeamNotice(
         event.id,
         team.id,
-        `${mission.mission_code} ${mission.mission_name} 사진 저장에 실패했습니다. 사진을 다시 제출해주세요.`,
+        `${mission.mission_code} ${mission.mission_name} 점수는 반영되었지만 사진 저장에 실패했습니다. 사진을 다시 제출해주세요.`,
         ''
       ).catch(() => {});
     }
+    try {
+      await maybeMarkFinished(team, event.id);
+      if (completionResult.answerSaved && imageSaved) {
+        await addTeamNotice(
+          event.id,
+          team.id,
+          `${actor.actor_name}님이 ${mission.mission_code} ${mission.mission_name} 미션을 완료했습니다. 현재 팀 점수는 ${total}점입니다.`,
+          kakaoUserId
+        );
+      }
+    } catch (error) {
+      console.error('[kakao-secure-image] approved follow-up failed:', error);
+    }
   });
 
-  const answerImageUrls = missionImageLinks(req, answerImages);
-  const mapOptions = { completedMissionId: mission.id };
-  buttons = [...buttons, ...missionMapViewButtons(req, event, team, mapOptions)].slice(0, 3);
-  const completionImageUrls = [...new Set(answerImageUrls.filter(Boolean))];
-  if (completionImageUrls.length > 1) return markMissionCompletedResponse(kakaoCarousel(buildImageCards('', '', completionImageUrls), approvedPhotoQuickReplies(req), finalText, buttons));
-  if (completionImageUrls.length === 1) return markMissionCompletedResponse(kakaoCard('', finalText, buttons, approvedPhotoQuickReplies(req), completionImageUrls[0]));
-  return markMissionCompletedResponse(kakaoText(finalText, [...buttons, ...approvedPhotoQuickReplies(req)]));
+  const response = await missionCompletionResponse(
+    req,
+    event,
+    mission,
+    approvedText,
+    approvedPhotoQuickReplies(req),
+    missionImageLinks(req, completionResult.answerImages),
+    '',
+    {
+      team,
+      actorName: actor.actor_name,
+      total,
+      settings: messages,
+      progressionResolved: true,
+      autoCompleteMission: completionResult.autoCompleteMission,
+      linkedMission: completionResult.linkedMission,
+    }
+  );
+  return markMissionCompletedResponse(response);
 }
 
 const COMPLETE_INTERACTIVE_MISSION_SQL = `/* interactive-mission-finalize-single-roundtrip */
@@ -5892,13 +5941,13 @@ const COMPLETE_INTERACTIVE_MISSION_SQL = `/* interactive-mission-finalize-single
          event_id, team_id, mission_id, answer_text, actor_kakao_user_id,
          actor_name, status, score, submission_key
        )
-       SELECT $1,$2,$3,$4,$5,$6,'correct',$7,$10
+       SELECT $1,$2,$3,$4,$5,$6,$11,$7,$10
        WHERE NOT EXISTS (
          SELECT 1 FROM submissions
          WHERE team_id=$2 AND mission_id=$3 AND status IN ('correct','approved')
        )
        ON CONFLICT DO NOTHING
-       RETURNING mission_id, score
+       RETURNING id, mission_id, score
      ), saved_state AS (
        INSERT INTO user_states(event_id, kakao_user_id, state, data, updated_at)
        SELECT $1,$5,$9,$8,NOW()
@@ -6000,6 +6049,7 @@ const COMPLETE_INTERACTIVE_MISSION_SQL = `/* interactive-mission-finalize-single
      )
      SELECT
        EXISTS(SELECT 1 FROM saved_answer) AS answer_saved,
+       (SELECT id FROM saved_answer LIMIT 1) AS submission_id,
        EXISTS(SELECT 1 FROM saved_state) AS state_saved,
        score_summary.total,
        score_summary.mission_adjustment,
@@ -6027,8 +6077,10 @@ async function completeInteractiveMission(
   answerText,
   stateName,
   stateData,
-  submissionKey
+  submissionKey,
+  submissionStatus = 'correct'
 ) {
+  const normalizedSubmissionStatus = submissionStatus === 'approved' ? 'approved' : 'correct';
   const result = await query(
     COMPLETE_INTERACTIVE_MISSION_SQL,
     [
@@ -6042,11 +6094,13 @@ async function completeInteractiveMission(
       JSON.stringify(stateData || {}),
       String(stateName || ''),
       String(submissionKey || ''),
+      normalizedSubmissionStatus,
     ]
   );
   const row = result.rows[0] || {};
   return {
     answerSaved: row.answer_saved === true,
+    submissionId: Number(row.submission_id || 0),
     stateSaved: row.state_saved === true,
     summary: {
       total: Number(row.total || 0),
