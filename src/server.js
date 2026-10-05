@@ -6449,7 +6449,11 @@ async function handleAnswer(req, event, team, utterance, kakaoUserId, messages =
            )::int AS available_score;`,
          [event.id, team.id, mission.id, normalizeSubmissionUtteranceForDisplay(utterance), kakaoUserId, actorName, penaltyKey, wrongPenalty, JSON.stringify(progress), Number(mission.score || 0)]
       );
-      await flushCrosswordProgressState(event.id, kakaoUserId, { clear: true });
+      // saved_state가 같은 진행 상태를 DB에 기록했더라도 메모리의 최신 상태를
+      // 지우면 런타임 컨텍스트에 남아 있던 미션 시작 당시 상태가 다시 선택될 수
+      // 있습니다. 이미 맞힌 답은 유지한 채 오답 횟수와 감점만 반영해야 하므로
+      // 핫 캐시는 TTL 만료 또는 미션 완료 시까지 보존합니다.
+      await flushCrosswordProgressState(event.id, kakaoUserId);
       const wrongCount = Number(answerSave.rows[0]?.wrong_count || 1);
       const totalAfterWrong = Number(answerSave.rows[0]?.team_total || 0);
       const availableScore = Number(answerSave.rows[0]?.available_score ?? mission.score ?? 0);
