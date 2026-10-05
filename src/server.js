@@ -8529,7 +8529,8 @@ app.get('/api/public/settings/certificate/background', async (req, res) => {
 
 function buildCertificatePreviewHtml(req, settings, vars, isPreview = false) {
   const title = renderTemplate(settings.title, vars);
-  const recipient = renderTemplate(settings.recipient_template, vars);
+  // 팀명 또는 닉네임 기능이 꺼져 빈 값이 된 줄은 수료증에 여백으로 남기지 않습니다.
+  const recipient = cleanRenderedMessage(renderTemplate(settings.recipient_template, vars));
   const body = renderTemplate(settings.body, vars);
   const issuer = renderTemplate(settings.issuer, vars);
   const sealText = renderTemplate(settings.seal_text, vars);
@@ -8637,12 +8638,15 @@ function buildCertificatePreviewHtml(req, settings, vars, isPreview = false) {
 app.get('/certificate/preview', requireAdmin, async (req, res) => {
   try {
     const event = await getActiveEvent(req);
-    const settings = await getCertificateSettings(event.id);
+    const [settings, participationFeatures] = await Promise.all([
+      getCertificateSettings(event.id),
+      getParticipationFeatureSettings(event.id),
+    ]);
     const sampleDate = formatKoreanDate(new Date());
     const vars = {
-      team_name: String(req.query.team_name || '꿀탐험대'),
-      team_code: String(req.query.team_code || 'T001'),
-      member_name: String(req.query.member_name || '홍길동'),
+      team_name: participationFeatures.team_setup_enabled ? String(req.query.team_name || '꿀탐험대') : '',
+      team_code: participationFeatures.team_setup_enabled ? String(req.query.team_code || 'T001') : '',
+      member_name: participationFeatures.nickname_setup_enabled ? String(req.query.member_name || '홍길동') : '',
       program_name: settings.program_name || DEFAULT_CERTIFICATE_SETTINGS.program_name,
       finish_date: sampleDate,
       total: Number(req.query.total || 350),
@@ -8670,7 +8674,10 @@ app.get('/certificate', async (req, res) => {
         team = anyTeam;
       }
     }
-    const settings = await getCertificateSettings(event.id);
+    const [settings, participationFeatures] = await Promise.all([
+      getCertificateSettings(event.id),
+      getParticipationFeatureSettings(event.id),
+    ]);
     if (!settings.enabled) {
       return res.status(404).send('<!doctype html><meta charset="utf-8"><title>수료증</title><p>수료증 기능이 꺼져 있습니다.</p>');
     }
@@ -8683,9 +8690,9 @@ app.get('/certificate', async (req, res) => {
     const memberName = String(req.query.member || team.team_name || '').trim() || team.team_name;
     const finishDate = formatKoreanDate(team.finish_time || new Date());
     const vars = {
-      team_name: team.team_name,
-      team_code: team.team_code,
-      member_name: memberName,
+      team_name: participationFeatures.team_setup_enabled ? team.team_name : '',
+      team_code: participationFeatures.team_setup_enabled ? team.team_code : '',
+      member_name: participationFeatures.nickname_setup_enabled ? memberName : '',
       program_name: settings.program_name,
       finish_date: finishDate,
       total,
@@ -8693,7 +8700,7 @@ app.get('/certificate', async (req, res) => {
       rank: myRank,
     };
     const title = renderTemplate(settings.title, vars);
-    const recipient = renderTemplate(settings.recipient_template, vars);
+    const recipient = cleanRenderedMessage(renderTemplate(settings.recipient_template, vars));
     const body = renderTemplate(settings.body, vars);
     const issuer = renderTemplate(settings.issuer, vars);
     const sealText = renderTemplate(settings.seal_text, vars);
